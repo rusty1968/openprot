@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_mdbook","check_mermaid","create_default_docs_structure","docs","project_root"],"type":["DynError"]};

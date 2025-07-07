@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EXTENSIONS","IGNORED_DIRS","IGNORED_PATHS","REQUIRED_TEXT"],"fn":["add_path","add_path_walkdir_error","allow","check","check_file","check_file_contents","find_files","fix","fix_file","remove_root"]};

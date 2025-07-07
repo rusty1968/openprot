@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build","check","clean","clippy","dist","dist_dir","fmt","main","print_help","project_root","test","try_main"],"mod":["cargo_lock","docs","header","precheckin"],"type":["DynError"]};
