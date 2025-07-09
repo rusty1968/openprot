@@ -1,0 +1,10 @@
+[package]
+name = "syscall-abstraction"
+version = "1.0.0"
+edition = "2021"
+authors = ["rusty1968"]
+description = "OS-agnostic syscall abstraction library for embedded systems (Tock, Hubris)"
+license = "Apache-2.0"
+
+[dependencies]
+# Add your dependencies here

@@ -2,7 +2,7 @@
 
 [workspace]
 members = [
-    "openprot",
+    "syscall-abstraction",
     "xtask",
 ]
 resolver = "2"
