@@ -1,0 +1,13 @@
+[package]
+name = "ast1060-test-harness"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+ast1060-pac = { git = "https://github.com/rusty1968/ast1060-pac.git" }
+cortex-m = "0.7.7"
+embassy-executor = "0.7.0"
+embassy-time = "0.4.0"
+embassy-time-driver = "0.2.0"
+panic-halt = "1.0.0"
