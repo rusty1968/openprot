@@ -1,0 +1,51 @@
+name: Build QEMU
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-qemu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone QEMU repository
+        run: |
+          git clone https://gitlab.com/qemu-project/qemu.git
+          # Optionally checkout a specific version/tag
+          cd qemu && git checkout 2af4a82ab2cce3412ffc92cd4c
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build libglib2.0-dev libpixman-1-dev \
+            libfdt-dev zlib1g-dev libsdl2-dev libspice-server-dev meson \
+            libslirp-dev libgcrypt-dev libssh-dev python3-sphinx python3-sphinx-rtd-theme \
+            libusb-1.0-0-dev libpulse-dev libcacard-dev libaio-dev libbluetooth-dev
+
+      - name: Build QEMU
+        run: |
+          mkdir build
+          cd build
+          ../qemu/configure --target-list=arm-linux-user,arm-softmmu,aarch64-softmmu,aarch64-linux-user,riscv32-softmmu --enable-docs --enable-slirp --enable-gcrypt
+          make -j 4
+
+      - name: Test QEMU installation
+        run: |
+          cd build
+          ./qemu-system-aarch64 --version
+          ./qemu-system-arm --version
+          ./qemu-system-riscv32 --version
+          ./qemu-arm --version
+          ./qemu-aarch64 --version
+
+      # Optional: Cache the build for future runs
+      - name: Cache QEMU build
+        uses: actions/cache@v3
+        with:
+          path: build
+          key: ${{ runner.os }}-qemu-${{ hashFiles('qemu/**/*.c', 'qemu/**/*.h') }}
