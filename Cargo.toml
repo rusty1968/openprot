@@ -4,5 +4,14 @@
 members = [
     "openprot",
     "xtask",
+    "hal/blocking",
+    "hal/async", 
+    "hal/nb",
+    "platform/traits",
+    "platform/impls/linux",
+    "platform/impls/tock",
+    "platform/impls/hubris",
+    "services/telemetry",
+    "services/storage",
 ]
 resolver = "2"

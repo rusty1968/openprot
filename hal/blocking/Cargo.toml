@@ -1,0 +1,11 @@
+# Licensed under the Apache-2.0 license
+
+[package]
+name = "openprot-hal-blocking"
+version = "0.1.0"
+edition = "2021"
+description = "Blocking/synchronous HAL traits for OpenPRoT"
+license = "Apache-2.0"
+
+[dependencies]
+embedded-hal = "1.0"
