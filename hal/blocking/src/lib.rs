@@ -1,13 +1,23 @@
 // Licensed under the Apache-2.0 license
 
-//! Blocking/synchronous HAL traits for OpenPRoT
+//! Blocking (synchronous) HAL traits for OpenPRoT
 //!
-//! This crate re-exports embedded-hal 1.0 traits for blocking hardware abstraction
-//! layer operations such as SPI, I2C, GPIO, and other hardware interfaces.
+//! This crate provides a blocking (synchronous) hardware abstraction layer (HAL) for
+//! OpenPRoT-compliant platforms. It includes platform-specific modules such as reset
+//! control and re-exports traits from `embedded-hal` 1.0 for common hardware interfaces
+//! like SPI, I2C, GPIO, and delays.
+//!
+//! The goal is to offer a unified, safe, and no_std-compatible interface for embedded
+//! development across multiple chip families.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+/// Gpio port module
+pub mod gpio_port;
+/// Reset and clocking traits for OpenPRoT HAL
+pub mod system_control;
 
 // Re-export embedded-hal 1.0 traits
 pub use embedded_hal::delay::DelayNs;
