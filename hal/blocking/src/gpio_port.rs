@@ -79,41 +79,82 @@ pub trait GpioErrorType {
     type Error: GpioError;
 }
 
+/// Type used to represent pin masks
+pub trait PinMask: Copy + core::fmt::Debug {
+    /// Create an empty mask (no pins selected)
+    fn empty() -> Self;
+
+    /// Create a mask with all pins selected
+    fn all() -> Self;
+
+    /// Check if the mask is empty
+    fn is_empty(&self) -> bool;
+
+    /// Check if the mask contains the specified pins
+    fn contains(&self, other: Self) -> bool;
+
+    /// Merge two masks
+    fn union(&self, other: Self) -> Self;
+
+    /// Get intersection of two masks
+    fn intersection(&self, other: Self) -> Self;
+
+    /// Toggle pins in mask
+    fn toggle(&self) -> Self;
+}
+
 /// Base trait for GPIO port operations with integrated error handling
 pub trait GpioPort: GpioErrorType {
     /// Configuration type for GPIO pins
     type Config;
 
+    /// Mask type for pin identification
+    type Mask: PinMask;
+
     /// Configure GPIO pins with specified configuration
-    fn configure(&mut self, pins: u32, config: Self::Config) -> Result<(), Self::Error>;
+    fn configure(&mut self, pins: Self::Mask, config: Self::Config) -> Result<(), Self::Error>;
 
     /// Set and clear pins atomically using set and reset masks
-    fn set_reset(&mut self, set_mask: u32, reset_mask: u32) -> Result<(), Self::Error>;
+    fn set_reset(
+        &mut self,
+        set_mask: Self::Mask,
+        reset_mask: Self::Mask,
+    ) -> Result<(), Self::Error>;
 
     /// Read current state of input pins
-    fn read_input(&self) -> Result<u32, Self::Error>;
+    fn read_input(&self) -> Result<Self::Mask, Self::Error>;
 
     /// Toggle specified output pins
-    fn toggle(&mut self, pins: u32) -> Result<(), Self::Error>;
+    fn toggle(&mut self, pins: Self::Mask) -> Result<(), Self::Error>;
 }
 
 /// Trait for GPIO interrupt capabilities with integrated error handling
 pub trait GpioInterrupt: GpioErrorType {
+    /// Mask type for pin identification
+    type Mask: PinMask;
+
     /// Configure interrupt sensitivity for specified pins
-    fn irq_configure(&mut self, mask: u32, sensitivity: EdgeSensitivity)
-        -> Result<(), Self::Error>;
+    fn irq_configure(
+        &mut self,
+        mask: Self::Mask,
+        sensitivity: EdgeSensitivity,
+    ) -> Result<(), Self::Error>;
 
     /// Control interrupt operations (enable, disable, etc.)
     fn irq_control(
         &mut self,
-        mask: u32,
+        mask: Self::Mask,
         operation: InterruptOperation,
     ) -> Result<bool, Self::Error>;
 
     /// Register a callback for interrupt handling
-    fn register_interrupt_handler<F>(&mut self, mask: u32, handler: F) -> Result<(), Self::Error>
+    fn register_interrupt_handler<F>(
+        &mut self,
+        mask: Self::Mask,
+        handler: F,
+    ) -> Result<(), Self::Error>
     where
-        F: FnMut(u32) + Send + 'static;
+        F: FnMut(Self::Mask) + Send + 'static;
 }
 
 /// Trait for splitting a GPIO port into individual pins
