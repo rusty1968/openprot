@@ -178,7 +178,7 @@ pub struct BufferInfo {
 /// # Ok(())
 /// # }
 /// ```
-pub trait GenericSyscalls: Clone {
+pub trait GenericSyscalls {
     /// Execute an immediate command that returns synchronously.
     ///
     /// This is used for simple operations that can complete immediately
