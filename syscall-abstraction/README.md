@@ -80,7 +80,7 @@ The abstraction is built in layers:
 The main syscall interface that abstracts OS-specific operations:
 
 ```rust
-pub trait GenericSyscalls: Clone {
+pub trait GenericSyscalls {
     fn command_immediate(&self, driver_id: u32, command_id: u32, arg0: u32, arg1: u32) -> Result<u32, ErrorCode>;
     fn setup_callback(&self, driver_id: u32, callback_id: u32) -> Result<CallbackHandle, ErrorCode>;
     fn poll_callback(&self, handle: &CallbackHandle) -> CallbackStatus;
