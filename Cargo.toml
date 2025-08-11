@@ -11,7 +11,22 @@ members = [
     "platform/impls/linux",
     "platform/impls/tock",
     "platform/impls/hubris",
+    "platform/impls/baremetal",
     "services/telemetry",
     "services/storage",
+    "apis/clock-api",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+zerocopy = { version = "0.8.25", features = ["derive"] }
+idol = { git = "https://github.com/oxidecomputer/idolatry.git", default-features = false }
+idol-runtime = { git = "https://github.com/oxidecomputer/idolatry.git", default-features = false }
+num-traits = "0.2"
+zerocopy-derive = "0.7"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

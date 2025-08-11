@@ -1,0 +1,44 @@
+# Cargo configuration for OpenTitan RISC-V baremetal builds
+
+[build]
+# Default to the OpenTitan RISC-V target when building this crate
+target = "riscv32imc-unknown-none-elf"
+
+[target.riscv32imc-unknown-none-elf]
+# Use the RISC-V GCC linker for bare metal
+linker = "riscv32-unknown-elf-gcc"
+
+# Linker arguments for OpenTitan
+rustflags = [
+    "-C", "link-arg=-nostartfiles",  # Don't use default startup files
+    "-C", "link-arg=-Wl,--gc-sections",  # Remove unused sections
+    "-C", "target-feature=+m",       # Enable multiplication extension
+    "-C", "target-feature=+c",       # Enable compressed instructions
+]
+
+# Alternative: use rust-lld if available (doesn't require external toolchain)
+# linker = "rust-lld"
+# rustflags = [
+#     "-C", "link-arg=-Tlink.x",
+#     "-C", "link-arg=--nmagic",
+#     "-C", "link-arg=--gc-sections",
+# ]
+
+[target.'cfg(all(target_arch = "riscv32", target_os = "none"))']
+runner = "echo 'Use OpenTitan tools to flash: '"
+
+# Development configuration for hosted platforms
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-feature=+crt-static",  # For static linking in tests
+]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+]
+
+# Unstable features that might be needed for OpenTitan compatibility
+[unstable]
+build-std = ["core", "alloc"]  # Build std library components from source
+build-std-features = ["compiler-builtins-mem"]

@@ -1,0 +1,26 @@
+# Licensed under the Apache-2.0 license
+
+[package]
+name = "openprot-platform-opentitan"
+version = "0.1.0"
+edition = "2021"
+description = "OpenTitan platform implementation for OpenPRoT"
+license = "Apache-2.0"
+
+[dependencies]
+# HAL traits
+openprot-hal-blocking = { path = "../../../hal/blocking" }
+
+# OpenTitan-specific dependencies
+zerocopy = { workspace = true }
+
+# Low-level hardware access (these would come from OpenTitan SDK)
+# opentitan-registers = { path = "../../../external/opentitan-registers" }
+# opentitan-drivers = { path = "../../../external/opentitan-drivers" }
+
+[features]
+default = ["hmac", "kmac"]
+hmac = []
+kmac = []
+aes = []
+rsa = []
