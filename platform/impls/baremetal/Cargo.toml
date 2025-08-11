@@ -1,0 +1,32 @@
+# Licensed under the Apache-2.0 license
+
+[package]
+name = "openprot-platform-baremetal"
+version = "0.1.0"
+edition = "2021"
+description = "Baremetal platform implementations for OpenPRoT HAL traits"
+license = "Apache-2.0"
+build = "build.rs"
+
+[build-dependencies]
+# No build dependencies needed for basic configuration
+
+[dependencies]
+# Core HAL traits
+openprot-hal-blocking = { path = "../../../hal/blocking" }
+openprot-platform-traits = { path = "../../traits" }
+
+# Zero-copy support
+zerocopy = { workspace = true }
+
+[features]
+default = []
+# OpenTitan RISC-V (Ibex RV32IMC) platform support
+opentitan = []
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+# Optional dependencies for development/testing on hosted platforms
+
+# Target-specific configuration for OpenTitan RISC-V
+[target.'cfg(all(target_arch = "riscv32", target_os = "none"))'.dependencies]
+# RISC-V specific dependencies would go here
