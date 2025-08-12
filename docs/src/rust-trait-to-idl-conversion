@@ -1,625 +1,670 @@
-# OpenPRoT Traits to IDL Transformation Guide
+# Converting Rust HAL Traits to Idol Interfaces: A Practical Guide
 
-**Version**: 1.0  
-**Date**: August 11, 2025  
-**Purpose**: Technical reference for transforming OpenPRoT Rust traits into IDL interfaces
+## Overview
+
+This guide explains how to transform Rust Hardware Abstraction Layer (HAL) traits into Idol interface definitions for use in Hubris-based systems. Based on practical experience converting the digest traits, this guide covers the key patterns, challenges, and solutions.
 
 ## Table of Contents
 
-1. [Transformation Overview](#transformation-overview)
-2. [Mapping Patterns](#mapping-patterns)
-3. [Type System Transformations](#type-system-transformations)
-4. [Memory Management](#memory-management)
-5. [Error Handling](#error-handling)
-6. [Session Management](#session-management)
+1. [Understanding the Transformation](#understanding-the-transformation)
+2. [Core Design Patterns](#core-design-patterns)
+3. [Step-by-Step Conversion Process](#step-by-step-conversion-process)
+4. [Common Challenges and Solutions](#common-challenges-and-solutions)
+5. [Type System Considerations](#type-system-considerations)
+6. [Error Handling Patterns](#error-handling-patterns)
 7. [Performance Considerations](#performance-considerations)
-8. [Best Practices](#best-practices)
-9. [Complete Example](#complete-example)
+8. [Testing and Validation](#testing-and-validation)
 
----
+## Understanding the Transformation
 
-## Transformation Overview
+### From Trait-Based to IPC-Based
 
-The transformation from OpenPRoT HAL traits to IDL interfaces involves systematic mapping of Rust's rich type system to IDL's IPC-oriented structure while preserving semantic guarantees.
+**Rust HAL traits** provide compile-time polymorphism with:
+- Associated types
+- Lifetime parameters
+- Generic parameters
+- Zero-cost abstractions
+- Direct memory access
 
-### Key Transformation Goals
+**Idol interfaces** provide runtime communication with:
+- Concrete types
+- Message passing
+- Serialization boundaries
+- Process isolation
+- Memory leases for data transfer
 
-1. **Preserve Semantics**: Maintain the same operational behavior and safety guarantees
-2. **Enable IPC**: Transform in-process trait calls to inter-process communication
-3. **Type Safety**: Maintain compile-time safety where possible, add runtime checks where needed
-4. **Performance**: Minimize overhead while enabling zero-copy operations
-5. **Ergonomics**: Provide intuitive APIs that feel natural to use
+### Key Conceptual Shifts
 
-### Transformation Pipeline
+| Rust Trait Concept | Idol Equivalent | Transformation Strategy |
+|-------------------|-----------------|------------------------|
+| `&mut self` methods | Session-based operations | Use session IDs |
+| Associated types | Concrete types | Define enums/structs |
+| Lifetimes | Ownership transfer | Memory leases |
+| Generic parameters | Multiple operations | One operation per type |
+| Zero-cost abstractions | IPC overhead | Optimize message structure |
 
-```
-OpenPRoT Traits → Analysis → IDL Interface → Generated Code → Client API
-      ↓              ↓            ↓              ↓            ↓
-   Type Info    Semantics     IPC Spec      Server Impl   Ergonomic
-   Lifetimes    Error Paths   Memory Mgmt   Error Maps    Wrappers
-   Generics     State Mgmt    Session IDs   Type Erasure  Type Safety
-```
+## Core Design Patterns
 
----
+### 1. Session-Based State Management
 
-## Mapping Patterns
+**Problem**: Rust traits use `&mut self` for stateful operations.
+**Solution**: Use session IDs to track state across IPC boundaries.
 
-### 1. Trait Methods → IDL Operations
-
-**Source Pattern (OpenPRoT)**:
 ```rust
-trait DigestInit<T: DigestAlgorithm>: ErrorType {
+// Original Trait
+pub trait DigestOp: ErrorType {
+    fn update(&mut self, input: &[u8]) -> Result<(), Self::Error>;
+    fn finalize(self) -> Result<Self::Output, Self::Error>;
+}
+```
+
+```ron
+// Idol Interface
+Interface(
+    name: "Digest",
+    ops: {
+        "init_sha256": (
+            reply: Result(ok: "u32", err: CLike("DigestError")), // Returns session ID
+        ),
+        "update": (
+            args: { "session_id": "u32", "len": "u32" },
+            leases: { "data": (type: "[u8]", read: true, max_len: Some(1024)) },
+            reply: Result(ok: "()", err: CLike("DigestError")),
+        ),
+        "finalize_sha256": (
+            args: { "session_id": "u32" },
+            leases: { "digest_out": (type: "[u32; 8]", write: true) },
+            reply: Result(ok: "()", err: CLike("DigestError")),
+        ),
+    },
+)
+```
+
+### 2. Generic Type Expansion
+
+**Problem**: Rust traits use generics to support multiple types.
+**Solution**: Create separate operations for each concrete type.
+
+```rust
+// Original Generic Trait
+pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
+    fn init(&mut self, params: T) -> Result<Self::OpContext<'_>, Self::Error>;
+}
+```
+
+```ron
+// Idol Interface - Expanded Operations
+"init_sha256": (/* ... */),
+"init_sha384": (/* ... */),
+"init_sha512": (/* ... */),
+"init_sha3_256": (/* ... */),
+// etc.
+```
+
+### 3. Memory Lease Patterns
+
+**Problem**: Rust uses references and slices for zero-copy operations.
+**Solution**: Use Idol memory leases for efficient data transfer.
+
+| Rust Pattern | Idol Lease Pattern | Use Case |
+|-------------|-------------------|----------|
+| `&[u8]` | `read: true` | Input data |
+| `&mut [u8]` | `write: true` | Output buffers |
+| `&T` | `read: true` | Configuration structs |
+| `&mut T` | `write: true` | Result structs |
+
+### 4. Error Type Consolidation
+
+**Problem**: Traits use associated error types and generic error handling.
+**Solution**: Define comprehensive concrete error enums.
+
+```rust
+// Original - Generic Error
+pub trait ErrorType {
+    type Error: Error;
+}
+
+pub trait Error: core::fmt::Debug {
+    fn kind(&self) -> ErrorKind;
+}
+```
+
+```rust
+// Idol - Concrete Error Enum
+#[derive(Copy, Clone, Debug, FromPrimitive, Eq, PartialEq, IdolError, counters::Count)]
+#[repr(u32)]
+pub enum DigestError {
+    InvalidInputLength = 1,
+    UnsupportedAlgorithm = 2,
+    // ... comprehensive error cases
+    #[idol(server_death)]
+    ServerRestarted = 100,
+}
+```
+
+## Step-by-Step Conversion Process
+
+### Step 1: Analyze the Original Trait
+
+1. **Identify State Management Patterns**
+   - Methods that take `&mut self` → Need session management
+   - Methods that consume `self` → Need session cleanup
+   - Associated types → Need concrete type definitions
+
+2. **Map Data Flow**
+   - Input parameters → Idol args + read leases
+   - Output parameters → Idol return values + write leases
+   - Mutable references → Write leases
+
+3. **Catalog Error Cases**
+   - Collect all possible error conditions
+   - Map generic `ErrorKind` to specific error variants
+
+### Step 2: Design the Idol Interface
+
+1. **Create the IDL File**
+   ```bash
+   mkdir -p hubris/idl/
+   touch hubris/idl/my_trait.idol
+   ```
+
+2. **Define Operations Structure**
+   ```ron
+   Interface(
+       name: "MyTrait",
+       ops: {
+           // Initialization operations
+           "init_*": (/* ... */),
+           
+           // State manipulation operations  
+           "operation_*": (/* ... */),
+           
+           // Cleanup operations
+           "reset": (/* ... */),
+           
+           // Convenience operations
+           "oneshot_*": (/* ... */),
+       },
+   )
+   ```
+
+3. **Design Session Management**
+   - Use `u32` session IDs
+   - Return session ID from init operations
+   - Pass session ID to subsequent operations
+
+### Step 3: Create the API Package
+
+1. **Directory Structure**
+   ```
+   hubris/drv/my-trait-api/
+   ├── Cargo.toml
+   ├── build.rs
+   └── src/
+       └── lib.rs
+   ```
+
+2. **Configure Cargo.toml**
+   ```toml
+   [package]
+   name = "drv-my-trait-api"
+   version = "0.1.0"
+   edition = "2021"
+
+   [dependencies]
+   idol-runtime.workspace = true
+   num-traits.workspace = true
+   zerocopy.workspace = true
+   zerocopy-derive.workspace = true
+   counters = { path = "../../lib/counters" }
+   derive-idol-err = { path = "../../lib/derive-idol-err" }
+   userlib = { path = "../../sys/userlib" }
+
+   [build-dependencies]
+   idol.workspace = true
+
+   [lib]
+   test = false
+   doctest = false
+   bench = false
+
+   [lints]
+   workspace = true
+   ```
+
+3. **Create build.rs**
+   ```rust
+   fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+       idol::client::build_client_stub("../../idl/my_trait.idol", "client_stub.rs")?;
+       Ok(())
+   }
+   ```
+
+### Step 4: Implement Type Definitions
+
+1. **Create Zerocopy-Compatible Types**
+   ```rust
+   #[derive(
+       Copy, Clone, Debug, PartialEq, Eq,
+       zerocopy::IntoBytes,
+       zerocopy::FromBytes,
+       zerocopy::Immutable,
+       zerocopy::KnownLayout,
+   )]
+   #[repr(C, packed)] // Use packed for complex structs
+   pub struct MyConfig {
+       pub field1: u32,
+       pub field2: u8,
+       // Avoid bool - use u8 instead
+       pub enabled: u8,
+   }
+   ```
+
+2. **Define Error Types**
+   ```rust
+   #[derive(
+       Copy, Clone, Debug, FromPrimitive, Eq, PartialEq, 
+       IdolError, counters::Count,
+   )]
+   #[repr(u32)]
+   pub enum MyTraitError {
+       // Map from original ErrorKind
+       InvalidInput = 1,
+       HardwareFailure = 2,
+       // ... 
+       #[idol(server_death)]
+       ServerRestarted = 100,
+   }
+   ```
+
+3. **Create Enum Types for IPC**
+   ```rust
+   #[derive(
+       Copy, Clone, Debug, PartialEq, Eq,
+       zerocopy::IntoBytes,
+       zerocopy::Immutable,
+       zerocopy::KnownLayout,
+       FromPrimitive,
+   )]
+   #[repr(u32)] // Use u32 for enums
+   pub enum MyAlgorithm {
+       Algorithm1 = 0,
+       Algorithm2 = 1,
+   }
+   ```
+
+### Step 5: Handle Memory Management
+
+1. **Input Data Patterns**
+   ```ron
+   "process_data": (
+       args: { "len": "u32" },
+       leases: {
+           "input_data": (type: "[u8]", read: true, max_len: Some(4096)),
+       },
+   ),
+   ```
+
+2. **Output Data Patterns**
+   ```ron
+   "get_result": (
+       args: { "session_id": "u32" },
+       leases: {
+           "output_buffer": (type: "[u8]", write: true, max_len: Some(1024)),
+       },
+   ),
+   ```
+
+3. **Configuration Patterns**
+   ```ron
+   "configure": (
+       args: { "session_id": "u32" },
+       leases: {
+           "config": (type: "MyConfig", read: true),
+       },
+   ),
+   ```
+
+## Common Challenges and Solutions
+
+### Challenge 1: Associated Types
+
+**Problem**: Rust traits use associated types for flexibility.
+```rust
+pub trait DigestAlgorithm {
+    const OUTPUT_BITS: usize;
+    type Digest;
+}
+```
+
+**Solution**: Define concrete types and use constants.
+```rust
+pub const SHA256_WORDS: usize = 8;
+pub type Sha256Digest = DigestOutput<SHA256_WORDS>;
+
+#[repr(C)]
+pub struct DigestOutput<const N: usize> {
+    pub value: [u32; N],
+}
+```
+
+### Challenge 2: Lifetime Parameters
+
+**Problem**: Rust contexts have lifetime dependencies.
+```rust
+pub trait DigestInit<T>: ErrorType {
     type OpContext<'a>: DigestOp where Self: 'a;
     fn init<'a>(&'a mut self, params: T) -> Result<Self::OpContext<'a>, Self::Error>;
 }
 ```
 
-**Target Pattern (IDL)**:
-```idl
-"init_operation": (
-    args: {
-        "algorithm": "u32", // T becomes runtime parameter
-    },
-    reply: Result(
-        ok: "u32", // OpContext<'a> becomes session ID
-        err: CLike("DigestError"),
-    ),
-),
-```
-
-**Transformation Rules**:
-- Method name: `snake_case` preserved
-- Generic type parameters → runtime arguments
-- Associated types with lifetimes → session IDs
-- Return contexts → session management
-
-### 2. Generic Types → Runtime Parameters
-
-**Source Pattern**:
+**Solution**: Replace with session-based state management.
 ```rust
-impl DigestInit<Sha2_256> for Device { /* ... */ }
-impl DigestInit<Sha2_384> for Device { /* ... */ }
-impl DigestInit<Sha2_512> for Device { /* ... */ }
-```
-
-**Target Pattern**:
-```idl
-args: {
-    "algorithm": "u32", // 1=SHA256, 2=SHA384, 3=SHA512
-}
-
-const ALGORITHM_SHA2_256: u32 = 1;
-const ALGORITHM_SHA2_384: u32 = 2;
-const ALGORITHM_SHA2_512: u32 = 3;
-```
-
-**Implementation**:
-```rust
-fn dispatch_by_algorithm(&mut self, algorithm: u32) -> Result<SessionContext, Error> {
-    match algorithm {
-        1 => Ok(SessionContext::Sha256(self.hardware.init(Sha2_256)?)),
-        2 => Ok(SessionContext::Sha384(self.hardware.init(Sha2_384)?)),
-        3 => Ok(SessionContext::Sha512(self.hardware.init(Sha2_512)?)),
-        _ => Err(Error::UnsupportedAlgorithm),
-    }
-}
-```
-
-### 3. Lifetimes → Session Management
-
-**Source Pattern**:
-```rust
-// Lifetime ties context to device
-impl DigestInit<T> for Device {
-    type OpContext<'a> = Context<'a, T> where Self: 'a;
-    fn init<'a>(&'a mut self, params: T) -> Result<Self::OpContext<'a>, Error>;
-}
-
-// Context cannot outlive device
-impl<'a, T> DigestOp for Context<'a, T> {
-    fn update(&mut self, data: &[u8]) -> Result<(), Error>;
-    fn finalize(self) -> Result<Digest, Error>; // Consumes context
-}
-```
-
-**Target Pattern**:
-```idl
-// Session creation
-"init_operation": (reply: Result(ok: "u32", err: CLike("Error"))),
-
-// Session usage
-"update": (args: {"session_id": "u32"}),
-"finalize": (args: {"session_id": "u32"}), // Invalidates session
-
-// Session cleanup
-"destroy_session": (args: {"session_id": "u32"}),
-```
-
-**Implementation**:
-```rust
-struct ServerImpl {
-    sessions: FnvIndexMap<u32, SessionData, MAX_SESSIONS>,
+// Server maintains context mapping
+struct DigestServer {
+    contexts: HashMap<u32, DigestContext>,
     next_session_id: u32,
 }
-
-impl ServerImpl {
-    fn finalize(&mut self, session_id: u32) -> Result<Digest, Error> {
-        // Remove session to simulate consumption
-        let session = self.sessions.remove(&session_id)
-            .ok_or(Error::SessionNotFound)?;
-        // Process and return result
-    }
-}
 ```
 
-### 4. Associated Types → Output Parameters
+### Challenge 3: Generic Methods
 
-**Source Pattern**:
+**Problem**: Single generic method supports multiple types.
 ```rust
-trait DigestOp: ErrorType {
-    type Output: IntoBytes;
-    fn finalize(self) -> Result<Self::Output, Self::Error>;
-}
-
-impl DigestOp for Sha256Context {
-    type Output = Digest<8>; // 8 words = 256 bits
-}
+fn process<T: Algorithm>(&mut self, data: &[u8], algo: T) -> Result<T::Output, Error>;
 ```
 
-**Target Pattern**:
-```idl
+**Solution**: Create type-specific operations.
+```ron
+"process_sha256": (/* ... */),
+"process_sha384": (/* ... */),
+"process_aes": (/* ... */),
+```
+
+### Challenge 4: Complex Return Types
+
+**Problem**: Rust can return complex generic types.
+```rust
+fn finalize(self) -> Result<Self::Output, Self::Error>;
+```
+
+**Solution**: Use output leases for complex types.
+```ron
 "finalize": (
-    leases: {
-        "digest_out": (type: "[u32]", write: true, max_len: Some(16)),
-    },
-    reply: Result(
-        ok: "u32", // Number of words written
-        err: CLike("Error"),
-    ),
+    args: { "session_id": "u32" },
+    leases: { "result": (type: "MyResult", write: true) },
+    reply: Result(ok: "()", err: CLike("MyError")),
 ),
 ```
 
-**Implementation**:
-```rust
-fn finalize(&mut self, session_id: u32, digest_out: Leased<W, [u32]>) -> Result<u32, Error> {
-    let session = self.sessions.remove(&session_id)?;
-    let digest = session.context.finalize()?;
-    
-    // Write to leased memory
-    let words = digest.value;
-    for (i, &word) in words.iter().enumerate() {
-        digest_out[i] = word;
-    }
-    
-    Ok(words.len() as u32)
-}
-```
+## Type System Considerations
 
----
+### Zerocopy Compatibility
 
-## Type System Transformations
-
-### 1. Generic Constraints → Runtime Validation
-
-**Source**:
-```rust
-fn process<T: DigestAlgorithm + Sized + Clone>(&mut self, algo: T) {
-    // Compile-time guarantees
-}
-```
-
-**Target**:
-```rust
-fn process(&mut self, algorithm_id: u32) -> Result<(), Error> {
-    // Runtime validation
-    let info = self.get_algorithm_info(algorithm_id)?;
-    // Process with validated algorithm
-}
-```
-
-### 2. Const Generics → Dynamic Sizing
-
-**Source**:
-```rust
-struct Digest<const N: usize> {
-    value: [u32; N],
-}
-
-impl DigestAlgorithm for Sha2_256 {
-    type Digest = Digest<8>;
-}
-```
-
-**Target**:
-```rust
-enum DigestOutput {
-    Sha256([u32; 8]),
-    Sha384([u32; 12]),
-    Sha512([u32; 16]),
-}
-
-fn get_output_size(algorithm: u32) -> usize {
-    match algorithm {
-        1 => 8,  // SHA-256
-        2 => 12, // SHA-384
-        3 => 16, // SHA-512
-        _ => 0,
-    }
-}
-```
-
-### 3. Trait Objects → Enum Dispatch
-
-**Source**:
-```rust
-// Cannot send trait objects across IPC
-Box<dyn DigestOp>
-```
-
-**Target**:
-```rust
-enum SessionContext {
-    Sha256(Sha256Context),
-    Sha384(Sha384Context), 
-    Sha512(Sha512Context),
-}
-
-impl SessionContext {
-    fn update(&mut self, data: &[u8]) -> Result<(), Error> {
-        match self {
-            SessionContext::Sha256(ctx) => ctx.update(data),
-            SessionContext::Sha384(ctx) => ctx.update(data),
-            SessionContext::Sha512(ctx) => ctx.update(data),
-        }
-    }
-}
-```
-
----
-
-## Memory Management
-
-### 1. Zero-Copy Data Transfer
-
-**Pattern**: Use leased memory to avoid copying large buffers
-
-```idl
-"update": (
-    leases: {
-        "data": (type: "[u8]", read: true, max_len: Some(1024)),
-    },
-),
-```
-
-**Implementation**:
-```rust
-fn update(&mut self, session_id: u32, data: Leased<R, [u8]>) -> Result<(), Error> {
-    let session = self.get_session_mut(session_id)?;
-    
-    // Read directly from client memory
-    let mut buffer = [0u8; 1024];
-    let len = data.len().min(buffer.len());
-    data.read_range(0..len, &mut buffer[..len])?;
-    
-    // Process without additional copying
-    session.context.update(&buffer[..len])
-}
-```
-
-### 2. Buffer Size Validation
-
-**Pattern**: Validate buffer sizes to prevent overflows
+All types used in Idol interfaces must be zerocopy-compatible:
 
 ```rust
-const MAX_INPUT_SIZE: usize = 1024;
-const MAX_OUTPUT_WORDS: usize = 16;
-
-fn validate_input_size(len: u32) -> Result<(), Error> {
-    if len as usize > MAX_INPUT_SIZE {
-        return Err(Error::BufferTooLarge);
-    }
-    Ok(())
-}
-```
-
-### 3. Memory Layout Compatibility
-
-**Pattern**: Ensure data structures have stable memory layout
-
-```rust
+// ✅ Good - Zerocopy compatible
+#[derive(zerocopy::IntoBytes, zerocopy::FromBytes, zerocopy::Immutable)]
 #[repr(C)]
-struct DigestResult {
-    words: [u32; 16],
-    length: u32,
+pub struct GoodConfig {
+    pub value: u32,
+    pub enabled: u8, // Not bool!
+    pub _padding: [u8; 3], // Explicit padding
+}
+
+// ❌ Bad - Not zerocopy compatible  
+pub struct BadConfig {
+    pub value: u32,
+    pub enabled: bool, // bool doesn't implement FromBytes
+    pub data: Vec<u8>, // Dynamic allocation
 }
 ```
 
----
+### Enum Representations
 
-## Error Handling
-
-### 1. Error Type Mapping
-
-**Source (Rich Errors)**:
 ```rust
-trait Error: Debug {
-    fn kind(&self) -> ErrorKind;
+// ✅ Good - Use u32 for enums
+#[derive(FromPrimitive)]
+#[repr(u32)]
+pub enum MyEnum {
+    Variant1 = 0,
+    Variant2 = 1,
 }
 
-enum ErrorKind {
+// ❌ Bad - u8 enums with FromBytes need 256 variants
+#[repr(u8)]
+pub enum SmallEnum {
+    A = 0,
+    B = 1, // Only 2 variants - FromBytes won't work
+}
+```
+
+### Padding and Alignment
+
+```rust
+// ✅ Good - Use packed for complex layouts
+#[repr(C, packed)]
+pub struct PackedStruct {
+    pub field1: u8,
+    pub field2: u32, // No padding issues
+}
+
+// ✅ Good - Manual padding control
+#[repr(C)]
+pub struct PaddedStruct {
+    pub field1: u8,
+    pub _pad: [u8; 3], // Explicit padding
+    pub field2: u32,
+}
+```
+
+## Error Handling Patterns
+
+### Comprehensive Error Mapping
+
+Map all possible error conditions from the original trait:
+
+```rust
+// Original trait error kinds
+pub enum ErrorKind {
     InvalidInputLength,
     UnsupportedAlgorithm,
-    // ... 15+ variants
+    HardwareFailure,
+    // ...
 }
 
-struct HardwareError {
-    kind: ErrorKind,
-    context: String,
-    hardware_code: u32,
-}
-```
-
-**Target (IPC-Compatible Errors)**:
-```idl
-const DigestError = [
-    "InvalidInput",
-    "UnsupportedAlgorithm", 
-    "HardwareFailure",
-    // ... simplified variants
-];
-```
-
-**Conversion Implementation**:
-```rust
-impl From<HardwareError> for DigestError {
-    fn from(err: HardwareError) -> Self {
-        match err.kind() {
-            ErrorKind::InvalidInputLength => DigestError::InvalidInput,
-            ErrorKind::UnsupportedAlgorithm => DigestError::UnsupportedAlgorithm,
-            ErrorKind::HardwareFailure => DigestError::HardwareFailure,
-            // Map complex errors to simple categories
-            _ => DigestError::HardwareFailure,
-        }
-    }
-}
-```
-
-### 2. Error Context Preservation
-
-**Pattern**: Add debug information while maintaining simple IPC errors
-
-```rust
-#[cfg(feature = "debug")]
-struct ErrorContext {
-    ipc_error: DigestError,
-    original_error: Option<Box<dyn Error>>,
-    context: &'static str,
-}
-
-fn map_error_with_context(err: impl Error, context: &'static str) -> DigestError {
-    #[cfg(feature = "debug")]
-    {
-        log::error!("Error in {}: {:?}", context, err);
-    }
+// Idol error enum - comprehensive mapping
+#[derive(Copy, Clone, Debug, FromPrimitive, IdolError, counters::Count)]
+#[repr(u32)]
+pub enum MyTraitError {
+    // Map each ErrorKind to a specific variant
+    InvalidInputLength = 1,
+    UnsupportedAlgorithm = 2,
+    HardwareFailure = 3,
     
-    err.kind().into()
+    // Add IPC-specific errors
+    InvalidSession = 10,
+    TooManySessions = 11,
+    
+    // Required for Hubris
+    #[idol(server_death)]
+    ServerRestarted = 100,
 }
 ```
 
-### 3. Error Recovery Patterns
-
-**Pattern**: Provide recovery mechanisms for transient errors
+### Error Context Preservation
 
 ```rust
-impl ServerImpl {
-    fn reset_on_hardware_error(&mut self) -> Result<(), DigestError> {
-        // Clear all sessions and reset hardware
-        self.sessions.clear();
-        self.hardware.reset()?;
-        Ok(())
-    }
+// Add context-specific error variants
+pub enum MyTraitError {
+    // Operation-specific errors
+    InitializationFailed = 20,
+    UpdateFailed = 21,
+    FinalizationFailed = 22,
+    
+    // Resource-specific errors
+    OutOfMemory = 30,
+    BufferTooSmall = 31,
+    InvalidConfiguration = 32,
 }
 ```
-
----
-
-## Session Management
-
-### 1. Session Lifecycle
-
-```rust
-#[derive(Debug, PartialEq, Eq)]
-enum SessionState {
-    Uninitialized,
-    Initialized,
-    Updating,
-    Finalized,
-    Error,
-}
-
-struct Session {
-    algorithm: Algorithm,
-    context: Option<SessionContext>,
-    state: SessionState,
-    created_at: u64,
-    last_activity: u64,
-}
-```
-
-### 2. Session ID Generation
-
-**Pattern**: Prevent ID collision and wraparound issues
-
-```rust
-impl ServerImpl {
-    fn allocate_session_id(&mut self) -> Result<u32, Error> {
-        let start_id = self.next_session_id;
-        
-        loop {
-            let id = self.next_session_id;
-            self.next_session_id = self.next_session_id.wrapping_add(1);
-            
-            // Skip 0 as invalid
-            if self.next_session_id == 0 {
-                self.next_session_id = 1;
-            }
-            
-            // Check if ID is available
-            if !self.sessions.contains_key(&id) {
-                return Ok(id);
-            }
-            
-            // Prevent infinite loop
-            if self.next_session_id == start_id {
-                return Err(Error::TooManySessions);
-            }
-        }
-    }
-}
-```
-
-### 3. Resource Limits
-
-**Pattern**: Prevent resource exhaustion attacks
-
-```rust
-const MAX_SESSIONS: usize = 8;
-const SESSION_TIMEOUT_MS: u64 = 30_000;
-
-impl ServerImpl {
-    fn cleanup_expired_sessions(&mut self) {
-        let now = get_timestamp();
-        self.sessions.retain(|_, session| {
-            now - session.last_activity < SESSION_TIMEOUT_MS
-        });
-    }
-}
-```
-
----
 
 ## Performance Considerations
 
-### 1. Zero-Copy Operations
+### Minimize Message Overhead
+
+1. **Batch Operations**: Combine related parameters into single calls
+   ```ron
+   // ✅ Good - Single call with all parameters
+   "configure_and_start": (
+       args: {
+           "algorithm": "MyAlgorithm",
+           "buffer_size": "u32",
+           "timeout_ms": "u32",
+       },
+   ),
+   
+   // ❌ Bad - Multiple round trips
+   "set_algorithm": (args: {"algo": "MyAlgorithm"}),
+   "set_buffer_size": (args: {"size": "u32"}),
+   "set_timeout": (args: {"timeout": "u32"}),
+   "start": (),
+   ```
+
+2. **Efficient Data Transfer**: Use appropriate lease sizes
+   ```ron
+   leases: {
+       // Size limits based on expected usage
+       "small_data": (type: "[u8]", read: true, max_len: Some(256)),
+       "large_data": (type: "[u8]", read: true, max_len: Some(4096)),
+   }
+   ```
+
+### Memory Lease Optimization
+
+1. **Right-size Buffers**: Don't over-allocate
+2. **Reuse Sessions**: Avoid constant init/cleanup
+3. **Batch Updates**: Process multiple chunks in one call when possible
+
+## Testing and Validation
+
+### Build Verification
+
+1. **ARM Target Build**:
+   ```bash
+   cargo build -p drv-my-trait-api --target thumbv7em-none-eabihf
+   ```
+
+2. **Generated Code Inspection**:
+   ```bash
+   ls target/thumbv7em-none-eabihf/debug/build/drv-my-trait-api*/out/
+   head -50 target/thumbv7em-none-eabihf/debug/build/drv-my-trait-api*/out/client_stub.rs
+   ```
+
+### API Surface Validation
+
+1. **Check Generated Operations**: Verify all expected operations are present
+2. **Type Safety**: Ensure all types compile correctly
+3. **Error Handling**: Verify error propagation works
+
+### Integration Testing
+
+1. **Mock Server**: Create a simple server implementation
+2. **Client Testing**: Test all operation patterns
+3. **Error Scenarios**: Test error handling paths
+
+## Example: Complete Conversion
+
+Here's a complete example showing the transformation of a simple trait:
+
+### Original Rust Trait
 
 ```rust
-// Avoid copying large buffers
-fn update_efficient(&mut self, data: Leased<R, [u8]>) -> Result<(), Error> {
-    // Process data directly from leased memory
-    let mut buffer = [0u8; 1024];
-    let chunks = data.len().div_ceil(buffer.len());
+pub trait Crypto: ErrorType {
+    type Algorithm: CryptoAlgorithm;
+    type Context<'a>: CryptoOp where Self: 'a;
     
-    for i in 0..chunks {
-        let start = i * buffer.len();
-        let end = (start + buffer.len()).min(data.len());
-        let chunk_len = end - start;
-        
-        data.read_range(start..end, &mut buffer[..chunk_len])?;
-        self.process_chunk(&buffer[..chunk_len])?;
-    }
-    
-    Ok(())
+    fn init<'a>(&'a mut self, algo: Self::Algorithm) -> Result<Self::Context<'a>, Self::Error>;
+}
+
+pub trait CryptoOp: ErrorType {
+    type Output;
+    fn process(&mut self, data: &[u8]) -> Result<(), Self::Error>;
+    fn finalize(self) -> Result<Self::Output, Self::Error>;
 }
 ```
 
-### 2. Efficient Session Lookup
+### Converted Idol Interface
+
+```ron
+Interface(
+    name: "Crypto",
+    ops: {
+        "init_aes": (
+            reply: Result(ok: "u32", err: CLike("CryptoError")),
+        ),
+        "init_chacha": (
+            reply: Result(ok: "u32", err: CLike("CryptoError")),
+        ),
+        "process": (
+            args: { "session_id": "u32", "len": "u32" },
+            leases: { "data": (type: "[u8]", read: true, max_len: Some(1024)) },
+            reply: Result(ok: "()", err: CLike("CryptoError")),
+        ),
+        "finalize_aes": (
+            args: { "session_id": "u32" },
+            leases: { "output": (type: "[u8; 16]", write: true) },
+            reply: Result(ok: "()", err: CLike("CryptoError")),
+        ),
+        "finalize_chacha": (
+            args: { "session_id": "u32" },
+            leases: { "output": (type: "[u8; 32]", write: true) },
+            reply: Result(ok: "()", err: CLike("CryptoError")),
+        ),
+    },
+)
+```
+
+### API Package Implementation
 
 ```rust
-// Use efficient hash map for session lookup
-use heapless::FnvIndexMap;
+// drv/crypto-api/src/lib.rs
+#![no_std]
 
-struct ServerImpl {
-    sessions: FnvIndexMap<u32, Session, MAX_SESSIONS>,
+use derive_idol_err::IdolError;
+use userlib::{sys_send, FromPrimitive};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, zerocopy::IntoBytes, zerocopy::Immutable, FromPrimitive)]
+#[repr(u32)]
+pub enum CryptoAlgorithm {
+    Aes = 0,
+    ChaCha = 1,
 }
 
-// O(1) session access
-fn get_session(&mut self, id: u32) -> Result<&mut Session, Error> {
-    self.sessions.get_mut(&id).ok_or(Error::SessionNotFound)
+#[derive(Copy, Clone, Debug, FromPrimitive, Eq, PartialEq, IdolError, counters::Count)]
+#[repr(u32)]
+pub enum CryptoError {
+    InvalidInput = 1,
+    InvalidSession = 2,
+    HardwareFailure = 3,
+    #[idol(server_death)]
+    ServerRestarted = 100,
 }
+
+include!(concat!(env!("OUT_DIR"), "/client_stub.rs"));
 ```
 
-### 3. Hardware Optimization Preservation
+## Conclusion
 
-```rust
-// Enable platform-specific optimizations
-#[cfg(feature = "opentitan")]
-impl ServerImpl {
-    fn process_with_hardware_acceleration(&mut self, data: &[u8]) -> Result<(), Error> {
-        // Use OpenTitan-specific optimizations
-        self.hardware.bulk_process(data)
-    }
-}
+Converting Rust HAL traits to Idol interfaces requires careful consideration of:
 
-#[cfg(not(feature = "opentitan"))]
-impl ServerImpl {
-    fn process_with_hardware_acceleration(&mut self, data: &[u8]) -> Result<(), Error> {
-        // Fallback to generic implementation
-        self.hardware.update(data)
-    }
-}
-```
+1. **State Management**: Sessions instead of lifetimes
+2. **Type Systems**: Concrete types instead of generics  
+3. **Memory Management**: Leases instead of references
+4. **Error Handling**: Comprehensive concrete error enums
+5. **Performance**: Efficient message design
 
----
+The key is to preserve the semantic meaning and safety guarantees of the original trait while adapting to the constraints and patterns of the Hubris IPC system.
 
-## Best Practices
-
-### 1. API Design Principles
-
-1. **Preserve Semantics**: IDL operations should have identical behavior to original traits
-2. **Type Safety**: Use compile-time checks where possible, runtime validation otherwise
-3. **Error Transparency**: Map errors clearly while preserving recovery information
-4. **Resource Management**: Explicit session lifecycle with automatic cleanup
-5. **Performance**: Zero-copy operations and efficient data structures
-
-### 2. Implementation Guidelines
-
-1. **Session Limits**: Always enforce maximum concurrent sessions
-2. **Input Validation**: Validate all parameters before processing
-3. **Error Mapping**: Consistent error conversion with context preservation
-4. **Resource Cleanup**: Implement proper Drop semantics for sessions
-5. **Feature Gates**: Use compile-time selection for hardware backends
-
-### 3. Testing Strategies
-
-1. **Trait Compatibility**: Verify IDL operations match trait behavior
-2. **Error Propagation**: Test error conversion chain end-to-end
-3. **Resource Limits**: Validate session limits and cleanup
-4. **Performance**: Benchmark against direct trait usage
-5. **Concurrency**: Test multiple sessions and clients
-
----
-
-## Complete Example
-
-The complete transformation example is provided in the following files:
-
-1. **IDL Interface**: [`generic-digest.idol`](examples/generic-digest.idol)
-   - Complete IDL specification with all operations
-   - Error definitions and constants
-   - Memory management patterns
-
-2. **Server Implementation**: [`generic-digest-impl.rs`](examples/generic-digest-impl.rs)
-   - Full server implementation with trait integration
-   - Session management and error handling
-   - Hardware abstraction patterns
-
-3. **Client API**: [`generic-digest-client.rs`](examples/generic-digest-client.rs)
-   - Ergonomic client wrapper with type safety
-   - Synchronous and asynchronous APIs
-   - Usage examples and patterns
-
-### Key Metrics
-
-- **Type Safety**: 100% compile-time algorithm validation in client API
-- **Performance**: <5% overhead compared to direct trait usage
-- **Memory**: Zero unnecessary copies for data transfer
-- **Ergonomics**: Natural Rust APIs that hide IPC complexity
-- **Compatibility**: Complete semantic preservation from original traits
-
-This transformation demonstrates that complex Rust trait hierarchies can be successfully mapped to IDL interfaces while preserving all safety and performance characteristics essential for embedded systems development.
-
----
-
-**Document Status**: Complete  
-**Last Updated**: August 11, 2025  
-**Reviewed By**: Technical Architecture Team
+By following these patterns and guidelines, you can successfully transform complex Rust HAL traits into efficient, type-safe Idol interfaces that maintain the robustness and performance characteristics expected in embedded systems.
