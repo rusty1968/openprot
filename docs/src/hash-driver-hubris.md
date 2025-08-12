@@ -68,8 +68,9 @@ This document proposes a generic driver model for hash accelerator hardware in H
 │ │                                                                         │ │
 │ │  // Feature-gated hardware backend selection                            │ │
 │ │  #[cfg(feature = "opentitan")]                                          │ │
-│ │  type HardwareBackend = HashDevice;                                     │ │
-│ │                                                                         │ │
+│ │  type HardwareBackend = OtHashDevice;                                   │ │
+│ │  #[cfg(feature = "ast1060")]                                            │ │
+│ │  type HardwareBackend = AsHashDevice;                                   │ │
 │ │  // OpenPRoT HAL trait usage                                            │ │
 │ │  impl InOrderDigestImpl for ServerImpl {                                │ │
 │ │      fn init_sha256(&mut self, _: &RecvMessage) -> Result<u32, ...> {   │ │
@@ -124,7 +125,7 @@ This document proposes a generic driver model for hash accelerator hardware in H
 │ │  struct Sha2_512;                                                       │ │
 │ │                                                                         │ │
 │ │  // Actual hardware backend (feature-gated)                             │ │
-│ │  #[cfg(feature = "opentitan")]                                          │ │
+│ │  #[cfg(feature = "open")]                                          │ │
 │ │  type HardwareBackend = HashDevice;                                     │ │
 │ │                                                                         │ │
 │ │  // Context wrapper for session state                                   │ │
@@ -255,8 +256,8 @@ use openprot_hal_blocking::{DigestInit, DigestOp, DigestCtrlReset};
 use openprot_hal_blocking::{Sha2_256, Sha2_384, Sha2_512};
 
 // Feature-gated hardware backend selection
-#[cfg(feature = "opentitan")]
-type HardwareBackend = openprot_platform_opentitan::HashDevice;
+#[cfg(feature = "open")]
+type HardwareBackend = openprot_platform_open::HashDevice;
 
 impl InOrderDigestImpl for ServerImpl {
     fn init_sha256(&mut self, _: &RecvMessage) -> Result<u32, DigestError> {
@@ -281,11 +282,11 @@ impl InOrderDigestImpl for ServerImpl {
 # Cargo.toml  
 [dependencies]
 openprot-hal-blocking = { path = "../../hal/blocking" }
-openprot-platform-opentitan = { path = "../../platform/impls/opentitan", features = ["hmac"] }
+openprot-platform-open = { path = "../../platform/impls/open", features = ["hmac"] }
 
 [features]
 default = []
-opentitan = ["dep:openprot-platform-opentitan"]
+open = ["dep:openprot-platform-open"]
 ```
 
 ```rust
@@ -342,9 +343,9 @@ This implementation demonstrates the successful transformation from OpenPRoT tra
 - Feature flags enable platform-specific optimizations
 - Standard trait interface ensures consistent behavior
 
-## OpenTitan Implementation Analysis
+## OpenPRot Implementation Analysis
 
-Based on the OpenPRoT OpenTitan implementation, the digest driver follows the established **Device + Context** pattern:
+Based on the OpenPRoT HAL , the digest driver follows the established **Device + Context** pattern:
 
 ### **Device + Context Pattern**
 
