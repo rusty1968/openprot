@@ -368,7 +368,7 @@ The OpenTitan implementation separates concerns between:
 // Device implements initialization for each algorithm
 impl DigestInit<Sha2_256> for HashDevice {
     type Context = HashContext;
-    type Error = HmacError;
+    type Error = HashError;
     
     fn init(&mut self) -> Result<Self::Context, Self::Error> {
         // Configure hardware for SHA-256
@@ -378,7 +378,7 @@ impl DigestInit<Sha2_256> for HashDevice {
 
 // Context implements the digest operations  
 impl DigestOp for HashContext {
-    type Error = HmacError;
+    type Error = HashError;
     
     fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> {
         // Write to hardware FIFO
