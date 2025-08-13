@@ -1,0 +1,11 @@
+// Generic AST1060 board definition 
+
+board "AST1060-Generic" {
+    chip "proj:chips/ast1060.kdl"
+    
+    // External oscillator - AST1060 typically uses 25MHz crystal
+    external-clock-hz 25_000_000
+    
+    // Console UART (typically UART5 on AST1060)
+    console-uart uart5
+}

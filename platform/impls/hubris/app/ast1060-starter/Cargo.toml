@@ -5,15 +5,16 @@ name = "ast1060-starter"
 version = "0.1.0"
 
 [features]
-#dump = ["kern/dump"]
 jtag-halt = []
 
 [dependencies]
-ast1060-pac = { workspace = true, features = ["rt"] }
-cortex-m = { workspace = true }
-cortex-m-rt = { workspace = true }
-# Note: kern is not available in exhubris - would need to be replaced with userlib
-# kern = { path = "../../sys/kern" }
+# TODO: Add these when we have full ExHubris workspace setup
+# userlib = { workspace = true }
+# hubris-notifications = { workspace = true } 
+# hubris-task-slots = { workspace = true }
+
+# For now, just minimal dependencies for standalone build
+cortex-m = "0.7.7"
 
 # this lets you use `cargo fix`!
 [[bin]]

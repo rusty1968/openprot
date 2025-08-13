@@ -1,0 +1,21 @@
+// AST1060 chip definition for Aspeed Root of Trust SoC
+
+chip "AST1060" {
+    // Aspeed AST1060 is ARM Cortex-M4F
+    cpu cortex-m4f
+    
+    // Memory layout for AST1060
+    memory {
+        // Internal SRAM - typical AST1060 configuration
+        ram  0x10000000  0x20000   // 128KB SRAM
+        // Flash is typically external or in secure region
+        // For now, assume we're loaded into RAM
+    }
+    
+    // AST1060 peripherals (subset)
+    peripheral scu  0x7e6e2000  // System Control Unit
+    peripheral hace 0x1e6d0000  // Hash and Crypto Engine  
+    peripheral gpio 0x7e780000  // GPIO controllers
+    peripheral uart1 0x7e783000 // UART1
+    peripheral uart5 0x7e784000 // UART5 (console)
+}

@@ -1,0 +1,25 @@
+[package]
+name = "kernel-generic-ast1060"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Clock configuration options for AST1060
+clock-default = []
+
+# Rather specialized kernel profiling via fixed GPIOs.
+# Probably of limited usefulness in general.
+kernel-profiling = []
+
+[dependencies]
+cfg-if = "1.0.0"
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+cortex-m-rt = "0.7.5"
+ast1060-pac = { git = "https://github.com/rusty1968/ast1060-pac.git", branch = "exhubris" }
+
+# TODO: Re-enable ExHubris integration when we have proper tooling setup
+# [dependencies.hubris-kern]
+# package = "kern"
+# git = "https://github.com/cbiffle/hubris-fork.git"
+# branch = "cbiffle/exhubris-fixes"
+# features = ["nano", "stack-watermark"]

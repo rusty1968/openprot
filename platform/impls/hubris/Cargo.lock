@@ -130,7 +130,6 @@ version = "0.1.0"
 source = "git+https://github.com/rusty1968/ast1060-pac.git?branch=exhubris#5f26051e3abbfc30db65530c366be1c7295df5da"
 dependencies = [
  "cortex-m",
- "cortex-m-rt",
  "vcell",
 ]
 
@@ -138,9 +137,7 @@ dependencies = [
 name = "ast1060-starter"
 version = "0.1.0"
 dependencies = [
- "ast1060-pac",
  "cortex-m",
- "cortex-m-rt",
 ]
 
 [[package]]
@@ -1077,6 +1074,16 @@ dependencies = [
 name = "kerncore"
 version = "0.1.0"
 source = "git+https://github.com/cbiffle/hubris-fork.git?branch=cbiffle/exhubris-fixes#061df2fc76433bbc7cc3931a8981fbd509e35c97"
+
+[[package]]
+name = "kernel-generic-ast1060"
+version = "0.1.0"
+dependencies = [
+ "ast1060-pac",
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-rt",
+]
 
 [[package]]
 name = "kernel-generic-stm32g031"

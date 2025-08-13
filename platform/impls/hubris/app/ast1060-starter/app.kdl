@@ -1,0 +1,20 @@
+// AST1060 Starter Application
+
+app ast1060-starter
+
+// Use the AST1060 generic board
+board "proj:boards/ast1060-generic.kdl"
+
+// Instructions for building the kernel
+kernel {
+    workspace-crate kernel-generic-ast1060
+    stack-size 1024
+    features clock-default
+}
+
+// Simple starter task
+task starter {
+    workspace-crate ast1060-starter
+    stack-size 512
+    priority 1
+}
