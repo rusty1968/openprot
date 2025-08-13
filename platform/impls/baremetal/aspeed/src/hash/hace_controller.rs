@@ -328,6 +328,28 @@ impl HaceController {
         }
     }
 
+    /// Create a new HACE controller with system controller integration
+    /// 
+    /// This method initializes the system controller, enables HACE clock,
+    /// deasserts reset, and creates the HACE controller instance.
+    /// 
+    /// # Arguments
+    /// * `hace` - HACE peripheral instance
+    /// * `syscon` - Mutable reference to system controller
+    ///
+    /// # Errors
+    /// Returns syscon errors if clock enable or reset operations fail
+    pub fn new_with_syscon(
+        hace: Hace, 
+        syscon: &mut crate::syscon::SysCon
+    ) -> Result<Self, crate::syscon::Error> {
+        // Initialize HACE through system controller
+        syscon.init_hace()?;
+        
+        // Create controller instance
+        Ok(Self::new(hace))
+    }
+
     /// Get a mutable reference to the shared context in `.ram_nc` section
     /// This approach uses the section-placed context directly
     pub fn shared_ctx() -> *mut AspeedHashContext {

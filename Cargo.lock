@@ -150,13 +150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openprot-platform-hubris"
-version = "0.1.0"
-dependencies = [
- "openprot-platform-traits",
-]
-
-[[package]]
 name = "openprot-platform-linux"
 version = "0.1.0"
 dependencies = [

@@ -10,9 +10,12 @@ members = [
     "platform/traits",
     "platform/impls/linux",
     "platform/impls/tock",
-    "platform/impls/hubris",
     "services/telemetry",
-    "services/storage", "platform/impls/baremetal/aspeed",
+    "services/storage", 
+    "platform/impls/baremetal/aspeed",
+]
+exclude = [
+    "platform/impls/hubris",
 ]
 resolver = "2"
 
