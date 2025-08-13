@@ -1,0 +1,3 @@
+# AST1060 RoT board configuration
+[probe-rs]
+chip-name = "AST1060"

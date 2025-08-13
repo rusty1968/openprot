@@ -1,11 +1,32 @@
-# Licensed under the Apache-2.0 license
+[workspace]
+resolver = "2"
+members = [
+    "kernel-generic-*",
+    "sys/*",
+    "task/*",
+    "drv/*",
+    "tools/build",
+    "tools/hubake",
+    "tools/alloc",
 
-[package]
-name = "openprot-platform-hubris"
-version = "0.1.0"
-edition = "2021"
-description = "Hubris OS platform implementation for OpenPRoT"
-license = "Apache-2.0"
+    "app/kbd/basic-scanner",
+    "app/kbd/basic-scanner-api",
+    "app/ast1060-starter",
+]
 
-[dependencies]
-openprot-platform-traits = { path = "../../traits" }
+[workspace.dependencies]
+userlib = {path = "sys/userlib"}
+kipc = {path = "sys/kipc"}
+hubris-num-tasks = {path = "sys/num-tasks"}
+hubris-build = {path="tools/build"}
+
+# AST1060 specific dependencies
+aspeed-ddk = { git = "https://github.com/aspeedtech-bmc/ast1060-rust.git" }
+ast1060-pac = { git = "https://github.com/rusty1968/ast1060-pac.git", branch = "exhubris" }
+cortex-m = { version = "0.7", default-features = false, features = ["inline-asm"]}
+cortex-m-rt = { version = "0.7.5", default-features = false }
+
+[profile.release]
+debug = true
+lto = true
+opt-level = "s"

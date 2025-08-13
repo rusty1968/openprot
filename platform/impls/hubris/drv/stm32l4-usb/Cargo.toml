@@ -1,0 +1,37 @@
+[package]
+name = "drv-stm32l4-usb"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+chip-stm32l412kb = ["stm32-metapac/stm32l412kb"]
+
+[dependencies]
+idyll_runtime = { version = "0.1.0", path = "../../sys/idyll_runtime" }
+userlib = { workspace = true, features = ["no-panic"] }
+stm32-metapac = "15.0.0"
+hubpack = "0.1.2"
+serde = { version = "1.0.215", default-features = false, features = ["derive"] }
+drv-stm32xx-sys-api = { version = "0.1.0", path = "../stm32xx-sys-api" }
+hubris-task-slots = { version = "0.1.0", path = "../../sys/task-slots" }
+hubris-notifications = { version = "0.1.0", path = "../../sys/notifications" }
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+zerocopy = "0.8.11"
+zerocopy-derive = "0.8.11"
+num-traits = { version = "0.2.19", default-features = false }
+num-derive = "0.4.2"
+smart-default = "0.7.1"
+utf16_literal = "0.2.1"
+
+[build-dependencies]
+hubris-build-util = { version = "0.1.0", path = "../../sys/build-util" }
+serde = { version = "1.0.215", features = ["derive"] }
+hubris-build.workspace = true
+
+[[bin]]
+name = "drv-stm32l4-usb"
+test = false
+bench = false
+
+[package.metadata.hubris.auto-features]
+chip = true

@@ -1,0 +1,10 @@
+# AST1060 SoC peripheral definitions
+
+[hace_controller]
+address = 0x7e6d0000
+size = 0x400
+
+[uart]
+address = 0x7e784000
+size = 0x1000
+interrupts = { irq = 8 }

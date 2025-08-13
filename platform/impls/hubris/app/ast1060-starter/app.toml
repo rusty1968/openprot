@@ -1,0 +1,24 @@
+name = "ast1060-starter"
+target = "thumbv7em-none-eabihf"
+board = "ast1060-rot"
+chip = "../../chips/ast1060"
+stacksize = 1024 
+
+[kernel]
+name = "ast1060-starter"
+requires = {flash = 20000, ram = 3072}
+
+[tasks.jefe]
+name = "task-jefe"
+priority = 0
+max-sizes = {flash = 8192, ram = 4096}
+start = true
+stacksize = 1536
+notifications = ["fault", "timer"]
+
+[tasks.idle]
+name = "task-idle"
+priority = 5
+max-sizes = {flash = 128, ram = 256}
+stacksize = 256
+start = true

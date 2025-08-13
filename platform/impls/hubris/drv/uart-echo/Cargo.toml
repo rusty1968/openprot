@@ -1,0 +1,23 @@
+[package]
+name = "uart-echo"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# It is annoying that the chip features are specified down to the package level,
+# but, that is how the stm32-metapac do.
+chip-stm32g031k8 = ["stm32-metapac/stm32g031k8"]
+
+[dependencies]
+drv-stm32xx-sys-api = { version = "0.1.0", path = "../stm32xx-sys-api" }
+hubris-notifications = { version = "0.1.0", path = "../../sys/notifications" }
+hubris-task-slots = { version = "0.1.0", path = "../../sys/task-slots" }
+stm32-metapac = { version = "15.0.0" }
+userlib = { workspace = true, features = ["no-panic"] }
+
+[build-dependencies]
+hubris-build-util = { version = "0.1.0", path = "../../sys/build-util" }
+serde_json = "1.0.133"
+
+[package.metadata.hubris.auto-features]
+chip = true

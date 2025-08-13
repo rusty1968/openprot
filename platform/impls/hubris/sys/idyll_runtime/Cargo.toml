@@ -1,0 +1,12 @@
+[package]
+name = "idyll_runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+userlib.workspace = true
+zerocopy = "0.8.11"
+
+[lib]
+test = false
+bench = false

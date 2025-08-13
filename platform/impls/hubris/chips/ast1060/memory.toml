@@ -1,0 +1,20 @@
+[[flash]]
+address = 0x00000000
+size = 32768
+read = true
+write = true
+execute = true
+
+[[ram]]
+address = 0x20000
+size = 65536
+read = true
+write = true
+execute = true
+
+[[sboot_hdr]]
+address = 0x400
+size = 32
+read = true
+write = false
+execute = false
