@@ -12,6 +12,13 @@ members = [
     "platform/impls/tock",
     "platform/impls/hubris",
     "services/telemetry",
-    "services/storage",
+    "services/storage", "platform/impls/baremetal/aspeed",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+zerocopy = { version = "0.8.26", features = ["derive"] }
+ast1060-pac = { git = "https://github.com/AspeedTech-BMC/ast1060-pac.git", features = ["rt"] }
+cortex-m = "0.7.5"
+cortex-m-rt = { version = "0.6.5", features = ["device"] }
+panic-halt = "1.0.0"

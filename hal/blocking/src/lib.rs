@@ -19,6 +19,11 @@ pub mod gpio_port;
 /// Reset and clocking traits for OpenPRoT HAL
 pub mod system_control;
 
+/// Cryptographic digest operations (hashing)
+pub mod digest;
+/// Message Authentication Code (MAC) traits and implementations
+pub mod mac;
+
 // Re-export embedded-hal 1.0 traits
 pub use embedded_hal::delay::DelayNs;
 pub use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};

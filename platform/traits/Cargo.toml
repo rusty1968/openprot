@@ -8,3 +8,4 @@ description = "OS abstraction traits for OpenPRoT"
 license = "Apache-2.0"
 
 [dependencies]
+zerocopy = { workspace = true }
