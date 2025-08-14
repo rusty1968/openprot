@@ -13,6 +13,7 @@ members = [
     "services/telemetry",
     "services/storage", 
     "platform/impls/baremetal/aspeed",
+    "platform/impls/baremetal/mock",
 ]
 exclude = [
     "platform/impls/hubris",
@@ -21,7 +22,7 @@ resolver = "2"
 
 [workspace.dependencies]
 zerocopy = { version = "0.8.26", features = ["derive"] }
-ast1060-pac = { git = "https://github.com/AspeedTech-BMC/ast1060-pac.git", features = ["rt"] }
+ast1060-pac = { git = "https://github.com/rusty1968/ast1060-pac.git", branch = "exhubris" }
 cortex-m = "0.7.5"
-cortex-m-rt = { version = "0.6.5", features = ["device"] }
+cortex-m-rt = { version = "0.7.5", features = ["device"] }
 panic-halt = "1.0.0"
