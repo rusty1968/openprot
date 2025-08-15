@@ -1,5 +1,7 @@
-use core::fmt::Debug;
+// Licensed under the Apache-2.0 license
+
 use crate::digest::Digest;
+use core::fmt::Debug;
 use zerocopy::IntoBytes;
 
 /// Common error kinds for MAC operations (reused from digest operations).
@@ -130,7 +132,7 @@ pub trait MacOp: ErrorType {
 pub struct HmacSha2_256;
 impl MacAlgorithm for HmacSha2_256 {
     const OUTPUT_BITS: usize = 256;
-    type MacOutput = Digest<{Self::OUTPUT_BITS / 32}>;
+    type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
     type Key = [u8; 32];
 }
 
@@ -146,7 +148,7 @@ impl MacAlgorithm for HmacSha2_256 {
 pub struct HmacSha2_384;
 impl MacAlgorithm for HmacSha2_384 {
     const OUTPUT_BITS: usize = 384;
-    type MacOutput = Digest<{Self::OUTPUT_BITS / 32}>;
+    type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
     type Key = [u8; 48];
 }
 
@@ -162,6 +164,6 @@ impl MacAlgorithm for HmacSha2_384 {
 pub struct HmacSha2_512;
 impl MacAlgorithm for HmacSha2_512 {
     const OUTPUT_BITS: usize = 512;
-    type MacOutput = Digest<{Self::OUTPUT_BITS / 32}>;
+    type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
     type Key = [u8; 64];
 }

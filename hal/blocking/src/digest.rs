@@ -1,3 +1,5 @@
+// Licensed under the Apache-2.0 license
+
 //! # Digest HAL Traits
 //!
 //! This module provides blocking/synchronous Hardware Abstraction Layer (HAL) traits
@@ -35,8 +37,8 @@
 //! # impl DigestOp for MyContext<'_> {
 //! #     type Output = Digest<8>;
 //! #     fn update(&mut self, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
-//! #     fn finalize(self) -> Result<Self::Output, Self::Error> { 
-//! #         Ok(Digest { value: [0u32; 8] }) 
+//! #     fn finalize(self) -> Result<Self::Output, Self::Error> {
+//! #         Ok(Digest { value: [0u32; 8] })
 //! #     }
 //! # }
 //! let mut hasher = MyDigestImpl;
@@ -104,13 +106,13 @@ pub struct Digest<const N: usize> {
 ///     type Digest = Digest<8>; // 256 bits / 32 bits per word = 8 words
 /// }
 /// ```
-pub trait DigestAlgorithm: Copy+Debug {
+pub trait DigestAlgorithm: Copy + Debug {
     /// The output size of the digest algorithm in bits.
     ///
     /// This constant defines the total number of bits in the digest output.
     /// For example, SHA-256 would have `OUTPUT_BITS = 256`.
     const OUTPUT_BITS: usize;
-    
+
     /// The digest output type for this algorithm.
     ///
     /// This associated type specifies the concrete digest type that will be
@@ -130,7 +132,7 @@ pub trait DigestAlgorithm: Copy+Debug {
 pub struct Sha2_256;
 impl DigestAlgorithm for Sha2_256 {
     const OUTPUT_BITS: usize = 256usize;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// SHA-384 digest algorithm marker type.
@@ -144,7 +146,7 @@ impl DigestAlgorithm for Sha2_256 {
 pub struct Sha2_384;
 impl DigestAlgorithm for Sha2_384 {
     const OUTPUT_BITS: usize = 384usize;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// SHA-512 digest algorithm marker type.
@@ -158,7 +160,7 @@ impl DigestAlgorithm for Sha2_384 {
 pub struct Sha2_512;
 impl DigestAlgorithm for Sha2_512 {
     const OUTPUT_BITS: usize = 512;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// SHA3-224 digest algorithm marker type.
@@ -172,7 +174,7 @@ impl DigestAlgorithm for Sha2_512 {
 pub struct Sha3_224;
 impl DigestAlgorithm for Sha3_224 {
     const OUTPUT_BITS: usize = 224usize;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// SHA3-256 digest algorithm marker type.
@@ -186,7 +188,7 @@ impl DigestAlgorithm for Sha3_224 {
 pub struct Sha3_256;
 impl DigestAlgorithm for Sha3_256 {
     const OUTPUT_BITS: usize = 256usize;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// SHA3-384 digest algorithm marker type.
@@ -200,7 +202,7 @@ impl DigestAlgorithm for Sha3_256 {
 pub struct Sha3_384;
 impl DigestAlgorithm for Sha3_384 {
     const OUTPUT_BITS: usize = 384usize;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// SHA3-512 digest algorithm marker type.
@@ -214,7 +216,7 @@ impl DigestAlgorithm for Sha3_384 {
 pub struct Sha3_512;
 impl DigestAlgorithm for Sha3_512 {
     const OUTPUT_BITS: usize = 512;
-    type Digest = Digest<{Self::OUTPUT_BITS / 32}>;
+    type Digest = Digest<{ Self::OUTPUT_BITS / 32 }>;
 }
 
 /// Error kind.
@@ -349,18 +351,28 @@ pub trait ErrorType {
 /// #     fn init<'a>(&'a mut self, _: Sha2_256) -> Result<Self::OpContext<'a>, Self::Error> { todo!() }
 /// # }
 /// # struct MyContext<'a>(&'a mut MyDigestImpl);
+/// # impl ErrorType for MyContext<'_> { type Error = core::convert::Infallible; }
+/// # impl DigestOp for MyContext<'_> {
+/// #     type Output = Digest<8>;
+/// #     fn update(&mut self, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
+/// #     fn finalize(self) -> Result<Self::Output, Self::Error> {
+/// #         Ok(Digest { value: [0u32; 8] })
+/// #     }
+/// # }
 /// let mut device = MyDigestImpl;
 /// let context = device.init(Sha2_256)?;
 /// # Ok::<(), core::convert::Infallible>(())
 /// ```
-pub trait DigestInit<T: DigestAlgorithm> : ErrorType {
+pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
     /// The operation context type that will handle the digest computation.
     ///
     /// This associated type represents the stateful context returned by [`init`](Self::init)
     /// that can be used to perform the actual digest operations via [`DigestOp`].
     /// The lifetime parameter ensures the context cannot outlive the device that created it.
-    type OpContext<'a>: DigestOp<Output=Self::Output> where Self: 'a;
-    
+    type OpContext<'a>: DigestOp<Output = Self::Output>
+    where
+        Self: 'a;
+
     /// The output type produced by this digest implementation.
     ///
     /// This type must implement [`IntoBytes`] to allow conversion to byte arrays
@@ -376,7 +388,7 @@ pub trait DigestInit<T: DigestAlgorithm> : ErrorType {
     /// # Returns
     ///
     /// A new instance of the hash function.
-    fn init<'a>(&'a mut self, init_params: T) -> Result<Self::OpContext<'a>, Self::Error>;
+    fn init(&mut self, init_params: T) -> Result<Self::OpContext<'_>, Self::Error>;
 }
 
 /// Trait for resetting digest computation contexts.
@@ -433,8 +445,8 @@ pub trait DigestCtrlReset: ErrorType {
 /// # impl DigestOp for MyContext {
 /// #     type Output = Digest<8>;
 /// #     fn update(&mut self, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
-/// #     fn finalize(self) -> Result<Self::Output, Self::Error> { 
-/// #         Ok(Digest { value: [0u32; 8] }) 
+/// #     fn finalize(self) -> Result<Self::Output, Self::Error> {
+/// #         Ok(Digest { value: [0u32; 8] })
 /// #     }
 /// # }
 /// let mut context = MyContext;
@@ -460,7 +472,6 @@ pub trait DigestOp: ErrorType {
     ///
     /// A `Result` indicating success or failure. On success, returns `Ok(())`. On failure, returns a `CryptoError`.
     fn update(&mut self, input: &[u8]) -> Result<(), Self::Error>;
-
 
     /// Finalize the computation and produce the output.
     ///
