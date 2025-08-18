@@ -4,29 +4,32 @@
 
 ### Primary Requirement
 
-**Enable SPDM (Security Protocol and Data Model) Protocol Support**: The digest server must provide cryptographic hash services to support SPDM protocol implementation in Hubris OS.
+**Enable SPDM and PLDM Protocol Support**: The digest server must provide cryptographic hash services to support both SPDM (Security Protocol and Data Model) and PLDM (Platform Level Data Model) protocol implementations in Hubris OS.
 
 ### Derived Requirements
 
 #### R1: Algorithm Support
-- **R1.1**: Support SHA-256 for basic SPDM operations
-- **R1.2**: Support SHA-384 for enhanced security profiles  
+- **R1.1**: Support SHA-256 for basic SPDM operations and PLDM firmware integrity validation
+- **R1.2**: Support SHA-384 for enhanced security profiles in both SPDM and PLDM  
 - **R1.3**: Support SHA-512 for maximum security assurance
 - **R1.4**: Reject unsupported algorithms (SHA-3) with clear error codes
 
 #### R2: Session Management
-- **R2.1**: Support incremental hash computation for large certificate chains
+- **R2.1**: Support incremental hash computation for large certificate chains and firmware images
 - **R2.2**: Support multiple concurrent digest sessions (≥8 concurrent operations)
-- **R2.3**: Provide session isolation between different SPDM protocol flows
+- **R2.3**: Provide session isolation between different SPDM and PLDM protocol flows
 - **R2.4**: Automatic session cleanup to prevent resource exhaustion
 - **R2.5**: Session timeout mechanism for abandoned operations
 
-#### R3: SPDM-Specific Use Cases
+#### R3: SPDM and PLDM Use Cases
 - **R3.1**: Certificate chain verification (hash large X.509 certificate data)
 - **R3.2**: Measurement verification (hash firmware measurement data)
 - **R3.3**: Challenge-response authentication (compute transcript hashes)
 - **R3.4**: Session key derivation (hash key exchange material)
 - **R3.5**: Message authentication (hash SPDM message sequences)
+- **R3.6**: PLDM firmware image integrity validation (hash received firmware chunks)
+- **R3.7**: PLDM component image verification (validate assembled image against manifest digest)
+- **R3.8**: PLDM signature verification support (hash image data for signature validation)
 
 #### R4: Performance and Resource Constraints
 - **R4.1**: Memory-efficient operation suitable for embedded systems
@@ -52,6 +55,12 @@
 - **R7.3**: Integration with Hubris memory management and scheduling
 - **R7.4**: No dependency on async runtime or futures
 
+#### R8: Supervisor Integration Requirements
+- **R8.1**: Configure appropriate task disposition (Restart recommended for production)
+- **R8.2**: SPDM clients handle task generation changes transparently (no complex recovery logic needed)
+- **R8.3**: Digest server fails fast on unrecoverable hardware errors rather than returning complex error states
+- **R8.4**: Support debugging via jefe external interface during development
+
 ## Implementation Overview
 
 This digest server has been successfully converted to a generic implementation that can work with any device implementing the required digest traits from `openprot-hal-blocking`.
@@ -67,6 +76,11 @@ graph LR
         SCV[• Certificate verification<br/>• Transcript hashing<br/>• Challenge-response<br/>• Key derivation]
     end
     
+    subgraph "PLDM Client Task"
+        PC[PLDM Firmware Update]
+        PCV[• Image integrity validation<br/>• Component verification<br/>• Signature validation<br/>• Running digest computation]
+    end
+    
     subgraph "Digest Server"
         DS[ServerImpl&lt;D&gt;]
         DSV[• Session management<br/>• Generic implementation<br/>• Resource management<br/>• Error handling]
@@ -78,9 +92,11 @@ graph LR
     end
     
     SC ---|Synchronous<br/>IPC/Idol| DS
+    PC ---|Synchronous<br/>IPC/Idol| DS
     DS ---|HAL Traits| HW
     
     SC -.-> SCV
+    PC -.-> PCV
     DS -.-> DSV
     HW -.-> HWV
 ```
@@ -90,7 +106,7 @@ graph LR
 ```
 ServerImpl<D>
 ├── Generic Type Parameter D
-│   └── Trait Bounds: DigestInit<Sha2_256/384/512> + DigestCtrlReset
+│   └── Trait Bounds: DigestInit<Sha2_256/384/512>
 ├── Session Management
 │   ├── Static session storage (MAX_SESSIONS = 8)
 │   ├── Session lifecycle (init → update → finalize)
@@ -153,8 +169,7 @@ The server is generic over type `D` where:
 ```rust
 D: DigestInit<Sha2_256, Output = Digest<8>> 
  + DigestInit<Sha2_384, Output = Digest<12>> 
- + DigestInit<Sha2_512, Output = Digest<16>> 
- + DigestCtrlReset
+ + DigestInit<Sha2_512, Output = Digest<16>>
 ```
 
 #### Static Dispatch Pattern
@@ -201,11 +216,14 @@ Hardware Layer Error → DigestError → RequestError<DigestError> → SPDM Clie
 - Session IDs provide access control
 - Timeout mechanism prevents resource leaks
 
-#### SPDM Integration Points
-1. **Certificate Verification**: Hash certificate chains incrementally
-2. **Transcript Computation**: Hash sequences of SPDM messages
-3. **Challenge Processing**: Compute authentication hashes
-4. **Key Derivation**: Hash key exchange material
+#### SPDM and PLDM Integration Points
+1. **SPDM Certificate Verification**: Hash certificate chains incrementally
+2. **SPDM Transcript Computation**: Hash sequences of SPDM messages
+3. **SPDM Challenge Processing**: Compute authentication hashes
+4. **SPDM Key Derivation**: Hash key exchange material
+5. **PLDM Firmware Integrity**: Hash received firmware image chunks during transfer
+6. **PLDM Component Validation**: Verify assembled components against manifest digests
+7. **PLDM Multi-Component Updates**: Concurrent digest computation for multiple firmware components
 
 ## Failure Scenarios
 
@@ -262,20 +280,23 @@ sequenceDiagram
 #### Hardware Device Failure
 ```mermaid
 flowchart TD
-    A[SPDM Client Request] --> B[Digest Server]
+    A[SPDM/PLDM Client Request] --> B[Digest Server]
     B --> C{Hardware Available?}
     
     C -->|Yes| D[Call hardware.init]
-    C -->|No| E[Return HardwareFailure]
+    C -->|No| E[panic! - Hardware unavailable]
     
     D --> F{Hardware Response}
     F -->|Success| G[Process normally]
-    F -->|Error| H[Translate to DigestError]
+    F -->|Error| H[panic! - Hardware failure]
     
-    H --> I[Return HardwareFailure]
-    E --> J[SPDM handles graceful degradation]
-    I --> J
-    G --> K[Return result to SPDM]
+    G --> I[Return result to client]
+    E --> J[Task fault → Jefe supervision]
+    H --> J
+    
+    style E fill:#ffcccc
+    style H fill:#ffcccc
+    style J fill:#fff2cc
 ```
 
 
@@ -402,71 +423,214 @@ flowchart TD
 #### Error Propagation Chain
 ```mermaid
 flowchart LR
-    HW[Hardware Layer] -->|Error| DS[Digest Server]
-    DS -->|DigestError| RE[RequestError wrapper]
-    RE -->|IPC| SPDM[SPDM Client]
-    SPDM -->|Security Decision| POL[Security Policy]
+    HW[Hardware Layer] -->|Any Error| PANIC[Task Panic]
     
-    subgraph Error Types
-        E1[HardwareFailure]
-        E2[InvalidSession]
-        E3[TooManySessions]
-        E4[InvalidInputLength]
+    DS[Digest Server] -->|Recoverable DigestError| RE[RequestError wrapper]
+    RE -->|IPC| CLIENTS[SPDM/PLDM Clients]
+    CLIENTS -->|Simple Retry| POL[Security Policy]
+    
+    PANIC -->|Task Fault| JEFE[Jefe Supervisor]
+    JEFE -->|Task Restart| DS_NEW[Fresh Digest Server]
+    DS_NEW -->|Next IPC| CLIENTS
+    
+    subgraph "Recoverable Error Types"
+        E1[InvalidSession]
+        E2[TooManySessions]
+        E3[InvalidInputLength]
     end
     
-    DS -.-> Error Types
-    
-    subgraph Recovery Actions
-        R1[Hardware Reset]
-        R2[Session Cleanup]
-        R3[Retry with Backoff]
-        R4[Fallback to One-shot]
-        R5[Authentication Failure]
+    subgraph "Simple Client Recovery"
+        R1[Session Cleanup]
+        R2[Retry with Backoff]
+        R3[Use One-shot API]
+        R4[Authentication Failure]
     end
     
-    SPDM -.-> Recovery Actions
+    DS --> E1
+    DS --> E2
+    DS --> E3
+    
+    CLIENTS --> R1
+    CLIENTS --> R2
+    CLIENTS --> R3
+    CLIENTS --> R4
+    
+    style PANIC fill:#ffcccc
+    style DS_NEW fill:#ccffcc
 ```
 
 #### System-Level Failure Handling
 ```mermaid
 graph TB
-    subgraph "Digest Server Failures"
+    subgraph "Digest Server Internal Failures"
         F1[Session Exhaustion]
-        F2[Hardware Failure]
-        F3[Memory Corruption]
-        F4[Timeout Errors]
+        F2[Recoverable Hardware Failure]
+        F3[Input Validation Errors]
     end
     
-    subgraph "SPDM Recovery Strategies"
-        S1[Retry Operations]
-        S2[Fallback Methods]
+    subgraph "Task-Level Failures"
+        T1[Unrecoverable Hardware Failure]
+        T2[Memory Corruption]
+        T3[Syscall Faults]
+        T4[Explicit Panics]
+    end
+    
+    subgraph "SPDM Client Responses"
+        S1[Retry with Backoff]
+        S2[Fallback to One-shot]
         S3[Graceful Degradation]
         S4[Abort Authentication]
     end
     
-    subgraph "System Responses"
-        R1[Continue with Reduced Security]
-        R2[Fail to Secure State]
-        R3[Request Service Restart]
-        R4[Log Security Event]
+    subgraph "Jefe Supervisor Actions"
+        J1[Task Restart - Restart Disposition]
+        J2[Hold for Debug - Hold Disposition]
+        J3[Log Fault Information]
+        J4[External Debug Interface]
+    end
+    
+    subgraph "System-Level Responses"
+        R1[Continue with Fresh Task Instance]
+        R2[Debug Analysis Mode]
+        R3[System Reboot - Jefe Fault]
     end
     
     F1 --> S1
-    F1 --> S2
-    F2 --> S3
-    F2 --> S4
+    F2 --> S1
     F3 --> S4
-    F4 --> S1
+    
+    T1 --> J1
+    T2 --> J1
+    T3 --> J1
+    T4 --> J1
+    
+    J1 --> R1
+    J2 --> R2
     
     S1 --> R1
     S2 --> R1
     S3 --> R1
-    S4 --> R2
     
     R2 --> R3
     R1 --> R4
     R2 --> R4
 ```
+
+## Supervisor Integration and System-Level Failure Handling
+
+### Jefe Supervisor Role
+
+The digest server operates under the supervision of Hubris OS's supervisor task ("jefe"), which provides system-level failure management beyond the server's internal error handling.
+
+#### Supervisor Architecture
+```mermaid
+graph TB
+    subgraph "Supervisor Domain (Priority 0)"
+        JEFE[Jefe Supervisor Task]
+        JEFE_FEATURES[• Fault notification handling<br/>• Task restart decisions<br/>• Debugging interface<br/>• System restart capability]
+    end
+    
+    subgraph "Application Domain"
+        DS[Digest Server]
+        SPDM[SPDM Client]
+        OTHER[Other Tasks]
+    end
+    
+    KERNEL[Hubris Kernel] -->|Fault Notifications| JEFE
+    JEFE -->|reinit_task| KERNEL
+    JEFE -->|system_restart| KERNEL
+    
+    DS -.->|Task Fault| KERNEL
+    SPDM -.->|Task Fault| KERNEL
+    OTHER -.->|Task Fault| KERNEL
+    
+    JEFE -.-> JEFE_FEATURES
+```
+
+#### Task Disposition Management
+
+Each task, including the digest server, has a configured disposition that determines jefe's response to failures:
+
+- **Restart Disposition**: Automatic recovery via `kipc::reinit_task()`
+- **Hold Disposition**: Task remains faulted for debugging inspection
+
+#### Failure Escalation Hierarchy
+
+```mermaid
+sequenceDiagram
+    participant HW as Hardware
+    participant DS as Digest Server
+    participant SPDM as SPDM Client
+    participant K as Kernel
+    participant JEFE as Jefe Supervisor
+
+    Note over DS: Fail immediately on any hardware failure
+    HW->>DS: Hardware fault
+    DS->>DS: panic!("Hardware failure detected")
+    DS->>K: Task fault occurs
+    K->>JEFE: Fault notification (bit 0)
+    
+    JEFE->>K: find_faulted_task()
+    K-->>JEFE: task_index (digest server)
+    
+    alt Restart disposition (production)
+        JEFE->>K: reinit_task(digest_server, true)
+        K->>DS: Task reinitialized with fresh hardware state
+        Note over SPDM: Next IPC gets fresh task, no special handling needed
+    else Hold disposition (debug)
+        JEFE->>JEFE: Mark holding_fault = true
+        Note over DS: Task remains faulted for debugging
+        Note over SPDM: IPC returns generation mismatch error
+    end
+```
+
+### System Failure Categories and Responses
+
+#### Recoverable Failures (Handled by Digest Server)
+- **Session Management**: `TooManySessions`, `InvalidSession` → Return error to client
+- **Input Validation**: `InvalidInputLength` → Return error to client  
+
+#### Task-Level Failures (Handled by Jefe)
+- **Any Hardware Failure**: Hardware errors of any kind → Task panic → Jefe restart
+- **Hardware Resource Exhaustion**: Hardware cannot allocate resources → Task panic → Jefe restart  
+- **Memory Corruption**: Stack overflow, heap corruption → Task fault → Jefe restart
+- **Syscall Faults**: Invalid kernel IPC usage → Task fault → Jefe restart
+- **Explicit Panics**: `panic!()` in digest server code → Task fault → Jefe restart
+
+#### System-Level Failures (Handled by Kernel)
+- **Supervisor Fault**: Jefe task failure → System reboot
+- **Kernel Panic**: Critical kernel failure → System reset
+- **Watchdog Timeout**: System hang detection → Hardware reset
+
+**Key Design Principle**: The digest server fails immediately on any hardware error without attempting recovery. This maximally simplifies the implementation and ensures consistent system behavior through jefe's supervision.
+
+### External Debugging Interface
+
+Jefe provides an external interface for debugging digest server failures:
+
+```rust
+// External control commands available via debugger (Humility)
+enum JefeRequest {
+    Hold,     // Stop automatic restart of digest server
+    Start,    // Manually restart digest server  
+    Release,  // Resume automatic restart behavior
+    Fault,    // Force digest server to fault for testing
+}
+```
+
+This enables development workflows like:
+1. **Hold faulting server**: Examine failure state without automatic restart
+2. **Analyze dump data**: Extract task memory and register state
+3. **Test recovery**: Manually trigger restart after fixes
+4. **Fault injection**: Test SPDM client resilience
+
+### Integration Requirements Update
+
+#### R8: Supervisor Integration Requirements
+- **R8.1**: Configure appropriate task disposition (Restart recommended for production)
+- **R8.2**: SPDM clients handle task generation changes transparently (no complex recovery logic needed)
+- **R8.3**: Digest server fails fast on unrecoverable hardware errors rather than returning complex error states
+- **R8.4**: Support debugging via jefe external interface during development
 
 ## SPDM Integration Examples
 
@@ -538,6 +702,92 @@ impl SpdmResponder {
 }
 ```
 
+## PLDM Integration Examples
+
+### PLDM Firmware Image Integrity Validation (Requirement R3.6)
+```rust
+// PLDM task validating received firmware chunks
+fn validate_firmware_image(&mut self, image_chunks: &[&[u8]], expected_digest: &[u32; 8]) -> Result<bool, PldmError> {
+    let digest = Digest::from(DIGEST_SERVER_TASK_ID);
+    
+    // Create session for running digest computation (R2.1: incremental computation)
+    let session_id = digest.init_sha256()?;  // R1.1: SHA-256 commonly used in PLDM
+    
+    // Process firmware image incrementally as chunks are received (R4.2: zero-copy processing)
+    for chunk in image_chunks {
+        digest.update(session_id, chunk.len() as u32, chunk)?;
+    }
+    
+    // Get final image digest
+    let mut computed_digest = [0u32; 8];
+    digest.finalize_sha256(session_id, &mut computed_digest)?;
+    
+    // Compare with manifest digest
+    Ok(computed_digest == *expected_digest)
+}
+```
+
+### PLDM Component Verification During Transfer (Requirement R3.7)
+```rust
+// PLDM task computing running digest during TransferFirmware
+fn transfer_firmware_with_validation(&mut self, component_id: u16) -> Result<(), PldmError> {
+    let digest = Digest::from(DIGEST_SERVER_TASK_ID);
+    
+    // Initialize digest session for this component transfer (R2.3: session isolation)
+    let session_id = digest.init_sha384()?;  // R1.2: SHA-384 for enhanced security
+    
+    // Store session for this component transfer
+    self.component_sessions.insert(component_id, session_id);
+    
+    // Firmware chunks will be processed via update() calls as they arrive
+    // This enables real-time validation during transfer rather than after
+    
+    Ok(())
+}
+
+fn process_firmware_chunk(&mut self, component_id: u16, chunk: &[u8]) -> Result<(), PldmError> {
+    let digest = Digest::from(DIGEST_SERVER_TASK_ID);
+    
+    // Retrieve session for this component
+    let session_id = self.component_sessions.get(&component_id)
+        .ok_or(PldmError::InvalidComponent)?;
+    
+    // Add chunk to running digest (R3.6: firmware image integrity)
+    digest.update(*session_id, chunk.len() as u32, chunk)?;
+    
+    Ok(())
+}
+```
+
+### PLDM Multi-Component Concurrent Updates (Requirement R2.2)
+```rust
+// PLDM task handling multiple concurrent firmware updates
+impl PldmFirmwareUpdate {
+    fn handle_concurrent_updates(&mut self) -> Result<(), PldmError> {
+        let digest = Digest::from(DIGEST_SERVER_TASK_ID);
+        
+        // Component 1: Main firmware using SHA-256
+        let main_fw_session = digest.init_sha256()?;
+        
+        // Component 2: Boot loader using SHA-384  
+        let bootloader_session = digest.init_sha384()?;  // R1.2: SHA-384 support
+        
+        // Component 3: FPGA bitstream using SHA-512
+        let fpga_session = digest.init_sha512()?;        // R1.3: SHA-512 support
+        
+        // All components can be updated concurrently (up to 8 total - R2.2)
+        // Each maintains independent digest state (R2.3: isolation)
+        
+        // Store sessions for component tracking
+        self.component_sessions.insert(MAIN_FW_COMPONENT, main_fw_session);
+        self.component_sessions.insert(BOOTLOADER_COMPONENT, bootloader_session);
+        self.component_sessions.insert(FPGA_COMPONENT, fpga_session);
+        
+        Ok(())
+    }
+}
+```
+
 ## Requirements Validation
 
 ### ✅ Requirements Satisfied
@@ -554,6 +804,7 @@ impl SpdmResponder {
 | **R2.4** Automatic cleanup | ✅ | `cleanup_expired_sessions()` |
 | **R2.5** Session timeout | ✅ | `SESSION_TIMEOUT_TICKS` mechanism |
 | **R3.1-R3.5** SPDM use cases | ✅ | All supported via session-based API |
+| **R3.6-R3.8** PLDM use cases | ✅ | Firmware validation, component verification, signature support |
 | **R4.1** Memory efficient | ✅ | Static allocation, fixed buffers |
 | **R4.2** Zero-copy processing | ✅ | Hubris leased memory system |
 | **R4.3** Deterministic allocation | ✅ | No dynamic memory allocation |
@@ -570,6 +821,10 @@ impl SpdmResponder {
 | **R7.2** Idol-generated stubs | ✅ | Type-safe IPC interface |
 | **R7.3** Hubris integration | ✅ | Uses userlib, leased memory |
 | **R7.4** No async runtime | ✅ | Pure synchronous implementation |
+| **R8.1** Task disposition configuration | ✅ | Configured in app.toml |
+| **R8.2** Transparent task generation handling | ✅ | SPDM clients get fresh task transparently |
+| **R8.3** Fail-fast hardware error handling | ✅ | Task panic on unrecoverable hardware errors |
+| **R8.4** Debugging support | ✅ | Jefe external interface available |
 
 ## Generic Design Summary
 
@@ -604,10 +859,6 @@ impl DigestInit<Sha2_384> for MyDigestDevice {
 
 impl DigestInit<Sha2_512> for MyDigestDevice {
     type Output = Digest<16>;
-    // Implementation...
-}
-
-impl DigestCtrlReset for MyDigestDevice {
     // Implementation...
 }
 
