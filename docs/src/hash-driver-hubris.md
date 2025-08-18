@@ -281,16 +281,13 @@ flowchart TD
 
 #### Hardware Recovery Pattern
 ```mermaid
-stateDiagram-v2
+stateDiagram
     [*] --> Operational
     Operational --> HardwareFault: Hardware error detected
     HardwareFault --> Recovery: Attempt reset
     Recovery --> Operational: Reset successful
     Recovery --> Failed: Reset failed
     Failed --> [*]: Report to system
-    
-    Recovery : Uses DigestCtrlReset trait
-    Recovery : to attempt hardware recovery
 ```
 
 ### Resource Exhaustion Scenarios
