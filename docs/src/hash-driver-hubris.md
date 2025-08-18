@@ -289,10 +289,8 @@ stateDiagram-v2
     Recovery --> Failed: Reset failed
     Failed --> [*]: Report to system
     
-    note right of Recovery
-        Uses DigestCtrlReset trait
-        to attempt hardware recovery
-    end note
+    Recovery : Uses DigestCtrlReset trait
+    Recovery : to attempt hardware recovery
 ```
 
 ### Resource Exhaustion Scenarios
