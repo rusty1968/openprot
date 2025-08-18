@@ -277,18 +277,7 @@ flowchart TD
     I --> J
     G --> K[Return result to SPDM]
 ```
-```
 
-#### Hardware Recovery Pattern
-```mermaid
-stateDiagram
-    [*] --> Operational
-    Operational --> HardwareFault: Hardware error detected
-    HardwareFault --> Recovery: Attempt reset
-    Recovery --> Operational: Reset successful
-    Recovery --> Failed: Reset failed
-    Failed --> [*]: Report to system
-```
 
 ### Resource Exhaustion Scenarios
 
