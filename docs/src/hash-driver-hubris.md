@@ -1249,3 +1249,98 @@ impl MyDigestDevice {
 // Then use it with the streaming server
 let server = ServerImpl::new(MyDigestDevice::new());
 ```
+
+## Critical Findings
+
+### Trait Lifetime Incompatibility with Session-Based Operations
+
+During implementation, a fundamental incompatibility was discovered between the `openprot-hal-blocking` digest traits and the session-based streaming operations described in this design document.
+
+#### The Core Problem
+
+The `openprot-hal-blocking` digest traits are designed for **scoped operations**, but the digest server API expects **persistent sessions**. These requirements are fundamentally incompatible.
+
+#### Root Cause: Lifetime Constraints
+
+The trait definition creates an insurmountable lifetime constraint:
+
+```rust
+pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
+    type OpContext<'a>: DigestOp<Output = Self::Output>
+    where Self: 'a;
+    
+    fn init(&mut self, init_params: T) -> Result<Self::OpContext<'_>, Self::Error>;
+}
+```
+
+The `OpContext<'a>` has a lifetime tied to `&'a mut self`, meaning:
+- Context cannot outlive the function call that created it
+- Context cannot be stored in a separate struct
+- Context cannot persist across IPC boundaries
+- Sessions cannot maintain persistent state between operations
+
+#### What Works: One-Shot Operations
+
+```rust
+fn compute_hash(&mut self, data: &[u8]) -> Result<Output, Error> {
+    let mut ctx = self.hardware.init(Sha2_256)?;  // Borrow starts
+    ctx.update(data)?;
+    let result = ctx.finalize()?;                  // Borrow ends
+    Ok(result)
+}  // Context is dropped, borrow ends
+```
+
+One-shot operations work perfectly because the entire digest computation happens within a single scope.
+
+#### What Doesn't Work: Session Storage
+
+```rust
+struct Session<D> {
+    context: Option<D::OpContext<'static>>,  // ❌ IMPOSSIBLE
+}
+
+fn init_session(&mut self) -> Result<SessionId, Error> {
+    let ctx = self.hardware.init(Sha2_256)?;
+    self.sessions[id].context = Some(ctx);     // ❌ Lifetime error
+    Ok(id)
+}
+```
+
+Session-based operations fail because the context cannot be stored beyond the function scope where it was created.
+
+#### Architectural Impact
+
+This discovery has significant implications for the digest server architecture:
+
+1. **Session-based streaming is impossible** with the current trait design
+2. **One-shot operations are the only viable approach** with `openprot-hal-blocking` traits
+3. **The design document describes an unimplementable architecture** due to trait constraints
+4. **Alternative approaches are needed** for streaming large data sets
+
+#### Resolution Options
+
+1. **One-shot API (Implemented)**: Convert to one-shot operations only
+   - ✅ Compatible with current traits
+   - ✅ Simple and reliable
+   - ❌ Requires complete data in memory
+   - ❌ No streaming capability
+
+2. **Hardware Sessions**: Implement session storage in hardware layer
+   - ✅ Would enable streaming
+   - ❌ Hardware-specific implementation
+   - ❌ Complex context save/restore logic
+
+3. **Different Traits**: Use traits designed for persistent contexts
+   - ✅ Would enable full streaming API
+   - ❌ Requires different trait ecosystem
+   - ❌ Breaks compatibility with `openprot-hal-blocking`
+
+#### Current Implementation Status
+
+The working implementation uses **Option 1: One-shot API**. The digest server successfully compiles and provides:
+- Complete digest operations within single IPC calls
+- Hardware abstraction via `openprot-hal-blocking` traits
+- Mock device support for testing
+- Proper error handling and trait compliance
+
+This critical finding demonstrates the importance of understanding trait design constraints during architecture planning. While the session-based design appears elegant on paper, the lifetime constraints in the trait ecosystem make it impossible to implement as described.
