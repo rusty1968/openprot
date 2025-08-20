@@ -128,11 +128,151 @@ SPDM Client Request
         ↓
    Session validation/allocation
         ↓
-   Hardware abstraction call
+   Hardware context management (save/restore)
         ↓
-   Result processing
+   Direct hardware streaming
+        ↓
+   Result processing  
         ↓
    Response to client
+```
+
+### Hardware-Adaptive Implementation
+
+#### Platform-Specific Trait Implementations
+```rust
+// Single-context hardware (ASPEED HACE) - context management happens in OpContext
+impl DigestInit<Sha2_256> for Ast1060HashDevice {
+    type OpContext<'a> = Ast1060DigestContext<'a> where Self: 'a;
+    type Output = Digest<8>;
+    
+    fn init<'a>(&'a mut self, _: Sha2_256) -> Result<Self::OpContext<'a>, Self::Error> {
+        // Direct hardware initialization - no session management needed
+        Ok(Ast1060DigestContext::new_sha256(self))
+    }
+}
+
+impl DigestOp for Ast1060DigestContext<'_> {
+    fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        // Direct streaming to hardware - blocking until complete
+        self.hardware.stream_data(data)
+    }
+    
+    fn finalize(self) -> Result<Self::Output, Self::Error> {
+        // Complete and return result - hardware auto-resets
+        self.hardware.finalize_sha256()
+    }
+}
+
+// Multi-context hardware (hypothetical) - context switching hidden in traits
+impl DigestInit<Sha2_256> for MultiContextDevice {
+    type OpContext<'a> = MultiContextDigestContext<'a> where Self: 'a;
+    type Output = Digest<8>;
+    
+    fn init<'a>(&'a mut self, _: Sha2_256) -> Result<Self::OpContext<'a>, Self::Error> {
+        // Complex session allocation happens here, hidden from server
+        let context_id = self.allocate_hardware_context()?;
+        Ok(MultiContextDigestContext::new(self, context_id))
+    }
+}
+
+impl DigestOp for MultiContextDigestContext<'_> {
+    fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        // Context switching happens transparently here
+        self.hardware.ensure_context_active(self.context_id)?;
+        self.hardware.stream_data(data)
+    }
+}
+```
+
+#### Hardware-Specific Processing Patterns
+
+**Single-Context Hardware (ASPEED HACE Pattern)**
+```mermaid
+sequenceDiagram
+    participant C1 as SPDM Client
+    participant C2 as PLDM Client
+    participant DS as Digest Server
+    participant HW as ASPEED HACE
+    
+    Note over C1,HW: Clients naturally serialize via blocking IPC
+    
+    C1->>DS: init_sha256()
+    DS->>HW: Initialize SHA-256 (direct hardware access)
+    HW-->>DS: Context initialized
+    DS-->>C1: session_id = 1
+    
+    par Client 2 blocks waiting
+        C2->>DS: init_sha384() (BLOCKS until C1 finishes)
+    end
+    
+    C1->>DS: update(session_id=1, data_chunk_1)
+    DS->>HW: Stream data directly to hardware
+    HW->>HW: Process data incrementally
+    HW-->>DS: Update complete
+    DS-->>C1: Success
+    
+    C1->>DS: finalize_sha256(session_id=1)
+    DS->>HW: Finalize computation
+    HW->>HW: Complete hash calculation
+    HW-->>DS: Final digest result
+    DS-->>C1: SHA-256 digest
+    
+    Note over DS,HW: Hardware available for next client
+    
+    DS->>HW: Initialize SHA-384 for Client 2
+    HW-->>DS: Context initialized
+    DS-->>C2: session_id = 2 (C2 unblocks)
+```
+
+**Multi-Context Hardware Pattern (Hypothetical)**
+```mermaid
+sequenceDiagram
+    participant C1 as SPDM Client
+    participant C2 as PLDM Client
+    participant DS as Digest Server
+    participant HW as Multi-Context Hardware
+    participant RAM as Context Storage
+    
+    Note over C1,RAM: Complex session management with context switching
+    
+    C1->>DS: init_sha256()
+    DS->>HW: Initialize SHA-256 context
+    DS->>DS: current_session = 0
+    DS-->>C1: session_id = 1
+    
+    C1->>DS: update(session_id=1, data_chunk_1)
+    DS->>HW: Stream data to active context
+    HW-->>DS: Update complete
+    DS-->>C1: Success
+    
+    C2->>DS: init_sha384()
+    Note over DS,RAM: Context switching required
+    DS->>RAM: Save session 0 context (SHA-256 state)
+    DS->>HW: Initialize SHA-384 context  
+    DS->>DS: current_session = 1
+    DS-->>C2: session_id = 2
+    
+    C2->>DS: update(session_id=2, data_chunk_2)
+    DS->>HW: Stream data to active context
+    HW-->>DS: Update complete
+    DS-->>C2: Success
+    
+    C1->>DS: update(session_id=1, data_chunk_3)
+    Note over DS,RAM: Switch back to session 0
+    DS->>RAM: Save session 1 context (SHA-384 state)
+    DS->>RAM: Restore session 0 context (SHA-256 state)
+    DS->>HW: Load SHA-256 context to hardware
+    DS->>DS: current_session = 0
+    DS->>HW: Stream data to restored context
+    HW-->>DS: Update complete
+    DS-->>C1: Success
+    
+    C1->>DS: finalize_sha256(session_id=1)
+    DS->>HW: Finalize computation
+    HW-->>DS: Final digest result
+    DS-->>C1: SHA-256 digest
+    DS->>DS: current_session = None
 ```
 
 ## Detailed Design
@@ -147,29 +287,111 @@ SPDM Client Request
 └─────────┘                             └─────────┘
      ↑                                       │
      │ finalize_sha256/384/512()             │ update(data)
-     │ reset()                               │ (accumulate)
+     │ reset()                               │ (stream to hardware)
      │ timeout_cleanup()                     │
      └───────────────────────────────────────┘
 ```
 
-#### Session Data Structure
+#### Hardware-Specific Session Management
+
+Different hardware platforms have varying capabilities for concurrent session support:
+
 ```rust
-pub struct SessionData {
-    algorithm: SessionAlgorithm,      // Algorithm type (Free/Sha256/Sha384/Sha512)
-    buffer: [u8; SESSION_BUFFER_SIZE], // Accumulated data buffer (512 bytes)
-    length: usize,                     // Current data length
-    timeout: Option<u64>,              // Expiration timestamp
+// Platform-specific capability trait
+pub trait DigestHardwareCapabilities {
+    const MAX_CONCURRENT_SESSIONS: usize;
+    const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool;
+}
+
+// AST1060 implementation - single session, simple and efficient
+impl DigestHardwareCapabilities for Ast1060HashDevice {
+    const MAX_CONCURRENT_SESSIONS: usize = 1;  // Work with hardware, not against it
+    const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool = false;
+}
+
+// Example hypothetical multi-context implementation  
+impl DigestHardwareCapabilities for HypotheticalMultiContextDevice {
+    const MAX_CONCURRENT_SESSIONS: usize = 8;  // Multiple contexts supported
+    const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool = true;
+}
+
+// Generic server implementation
+pub struct ServerImpl<D: DigestHardwareCapabilities> {
+    sessions: FnvIndexMap<u32, DigestSession, {D::MAX_CONCURRENT_SESSIONS}>,
+    hardware: D,
+    next_session_id: u32,
+}
+
+pub struct DigestSession {
+    algorithm: SessionAlgorithm,
+    timeout: Option<u64>,
+    // Hardware-specific context data only if supported
 }
 ```
 
-### Generic Hardware Abstraction
+### Generic Hardware Abstraction with Platform-Adaptive Session Management
 
 #### Trait Requirements
 The server is generic over type `D` where:
 ```rust
-D: DigestInit<Sha2_256, Output = Digest<8>> 
- + DigestInit<Sha2_384, Output = Digest<12>> 
- + DigestInit<Sha2_512, Output = Digest<16>>
+D: DigestInit<Sha2_256> + DigestInit<Sha2_384> + DigestInit<Sha2_512> + ErrorType
+```
+
+With the actual `openprot-hal-blocking` trait structure:
+```rust
+// Hardware device implements DigestInit for each algorithm
+impl DigestInit<Sha2_256> for MyDigestDevice {
+    type OpContext<'a> = MyDigestContext<'a> where Self: 'a;
+    type Output = Digest<8>;
+    
+    fn init<'a>(&'a mut self, _: Sha2_256) -> Result<Self::OpContext<'a>, Self::Error> {
+        // All hardware complexity (context management, save/restore) handled here
+    }
+}
+
+// The context handles streaming operations
+impl DigestOp for MyDigestContext<'_> {
+    type Output = Digest<8>;
+    
+    fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        // Hardware-specific streaming implementation
+        // Context switching (if needed) happens transparently
+    }
+    
+    fn finalize(self) -> Result<Self::Output, Self::Error> {
+        // Complete digest computation
+        // Context cleanup happens automatically
+    }
+}
+```
+
+#### Hardware-Adaptive Architecture
+- **Single-Context Hardware**: Direct operations, clients naturally serialize via blocking IPC
+- **Multi-Context Hardware**: Native hardware session switching when supported
+- **Compile-time optimization**: Session management code only included when needed
+- **Platform-specific limits**: `MAX_CONCURRENT_SESSIONS` based on hardware capabilities
+- **Synchronous IPC alignment**: Works naturally with Hubris blocking message passing
+
+#### Concurrency Patterns by Hardware Type
+
+**Single-Context Hardware (ASPEED HACE):**
+```
+Client A calls init_sha256() → Blocks until complete → Returns session_id
+Client B calls init_sha384() → Blocks waiting for A to finish → Eventually proceeds
+Client C calls update()       → Blocks waiting for B to finish → Eventually proceeds
+```
+
+**Multi-Context Hardware (Hypothetical):**
+```
+Client A calls init_sha256() → Creates session context → Returns immediately
+Client B calls init_sha384() → Creates different context → Returns immediately  
+Client C calls update()       → Uses appropriate context → Returns immediately
+```
+
+#### Session Management Flow (Hardware-Dependent)
+```
+Single-Context Hardware: Direct Operation → Hardware → Result
+Multi-Context Hardware: Session Request → Hardware Context → Process → Save Context → Result
 ```
 
 #### Static Dispatch Pattern
@@ -180,33 +402,116 @@ D: DigestInit<Sha2_256, Output = Digest<8>>
 
 ### Memory Management
 
-#### Static Allocation Strategy
+#### Static Allocation Strategy (Hardware-Adaptive)
 ```rust
-static mut SESSION_STORAGE: [SessionData; MAX_SESSIONS] = [...];
+// Session storage sized based on hardware capabilities
+static mut SESSION_STORAGE: [SessionData; D::MAX_CONCURRENT_SESSIONS] = [...];
 ```
+- **Hardware-aligned limits**: Session count matches hardware capabilities
+- **Single-context optimization**: No session overhead for simple hardware
+- **Multi-context support**: Full session management when hardware supports it
 - **Deterministic memory usage**: No dynamic allocation
-- **Stack overflow prevention**: Large session data not on stack
 - **Real-time guarantees**: Bounded memory access patterns
-- **Resource limits**: Fixed maximum number of concurrent sessions
 
-#### Data Flow Optimization
+#### Hardware-Adaptive Data Flow
 - **Zero-copy IPC**: Uses Hubris leased memory system
-- **Bounded updates**: Maximum 1024 bytes per update call
-- **Incremental processing**: Large data processed in chunks
+- **Platform optimization**: Direct operations for single-context hardware
+- **Session management**: Only when hardware supports multiple contexts
+- **Bounded updates**: Maximum 1024 bytes per update call (hardware limitation)
 - **Memory safety**: All buffer accesses bounds-checked
+- **Synchronous semantics**: Natural blocking behavior with Hubris IPC
+
+#### Platform-Specific Processing
+```
+Single-Context: Client Request → Direct Hardware → Result → Client Response
+Multi-Context:   Client Request → Session Management → Hardware Context → Result → Client Response
+```
 
 ### Error Handling Strategy
 
-#### Layered Error Model
+#### Hardware-Adaptive Error Model
 ```
-Hardware Layer Error → DigestError → RequestError<DigestError> → SPDM Client
+Hardware Layer Error → DigestError → RequestError<DigestError> → Client Response
 ```
 
-#### Error Categories
-- **Hardware failures**: `DigestError::HardwareFailure`
-- **Session management**: `DigestError::InvalidSession`, `DigestError::TooManySessions`
-- **Input validation**: `DigestError::InvalidInputLength`
-- **Algorithm support**: `DigestError::UnsupportedAlgorithm`
+#### Platform-Specific Error Categories
+- **Hardware failures**: `DigestError::HardwareFailure` (all platforms)
+- **Session management**: `DigestError::InvalidSession`, `DigestError::TooManySessions` (multi-context only)
+- **Input validation**: `DigestError::InvalidInputLength` (hardware-specific limits)
+- **Algorithm support**: `DigestError::UnsupportedAlgorithm` (capability-dependent)
+
+### Hardware-Adaptive Session Architecture
+
+Instead of imposing a complex context management layer, the digest server adapts to hardware capabilities:
+
+```mermaid
+graph TB
+    subgraph "Single-Context Hardware (ASPEED HACE)"
+        SC1[Client Request]
+        SC2[Direct Hardware Operation]
+        SC3[Immediate Response]
+        SC1 --> SC2 --> SC3
+    end
+    
+    subgraph "Multi-Context Hardware (Hypothetical)"
+        MC1[Session Pool]
+        MC2[Context Scheduler]
+        MC3[Hardware Contexts]
+        MC4[Session Management]
+        MC1 --> MC2 --> MC3 --> MC4
+    end
+```
+
+#### Hardware Capability Detection
+```rust
+pub trait DigestHardwareCapabilities {
+    const MAX_CONCURRENT_SESSIONS: usize;
+    const SUPPORTS_CONTEXT_SWITCHING: bool;
+    const MAX_UPDATE_SIZE: usize;
+}
+```
+
+#### Session Management Strategy
+- **Single-context platforms**: Direct hardware operations, no session state
+- **Multi-context platforms**: Full session management with context switching
+- **Compile-time optimization**: Dead code elimination for unused features
+
+3. **Context Initialization**: When starting new session
+   ```rust
+#### Clean Server Implementation
+
+With proper trait encapsulation, the server implementation becomes much simpler:
+
+```rust
+impl<D> ServerImpl<D> 
+where 
+    D: DigestInit<Sha2_256> + DigestInit<Sha2_384> + DigestInit<Sha2_512> + ErrorType
+{
+    fn update_session(&mut self, session_id: u32, data: &[u8]) -> Result<(), DigestError> {
+        let session = self.get_session_mut(session_id)?;
+        
+        // Generic trait call - all hardware complexity hidden
+        session.op_context.update(data)
+            .map_err(|_| DigestError::HardwareFailure)?;
+        
+        Ok(())
+    }
+    
+    fn finalize_session(&mut self, session_id: u32) -> Result<DigestOutput, DigestError> {
+        let session = self.take_session(session_id)?;
+        
+        // Trait handles finalization and automatic cleanup
+        session.op_context.finalize()
+            .map_err(|_| DigestError::HardwareFailure)
+    }
+}
+```
+
+#### Hardware Complexity Encapsulation
+- **No save/restore methods**: All context management hidden in trait implementations
+- **No platform-specific code**: Server only calls generic trait methods  
+- **Automatic optimization**: Single-context hardware avoids unnecessary overhead
+- **Transparent complexity**: Multi-context hardware handles switching internally
 
 ### Concurrency Model
 
@@ -229,25 +534,52 @@ Hardware Layer Error → DigestError → RequestError<DigestError> → SPDM Clie
 
 ### Session Management Failures
 
-#### Session Exhaustion Scenario
+#### Session Exhaustion Scenarios
+
+**Single-Context Hardware (ASPEED HACE) - No Exhaustion Possible**
 ```mermaid
 sequenceDiagram
     participant S1 as SPDM Client 1
     participant S2 as SPDM Client 2
     participant DS as Digest Server
-    participant HW as Hardware
+    participant HW as ASPEED HACE
 
-    Note over DS: MAX_SESSIONS = 8, all sessions active
+    Note over DS,HW: Hardware only supports one active session
+    
+    S1->>DS: init_sha256()
+    DS->>HW: Direct hardware initialization
+    DS-->>S1: session_id = 1
+    
+    S2->>DS: init_sha384() (BLOCKS on IPC until S1 finishes)
+    Note over S2: Client automatically waits - no error needed
+    
+    S1->>DS: finalize_sha256(session_id=1)
+    DS->>HW: Complete and release hardware
+    DS-->>S1: digest result
+    
+    Note over DS,HW: Hardware now available
+    DS->>HW: Initialize SHA-384 for S2
+    DS-->>S2: session_id = 2 (S2 unblocks)
+```
+
+**Multi-Context Hardware (Hypothetical) - True Session Exhaustion**
+```mermaid
+sequenceDiagram
+    participant S1 as Client 1
+    participant S2 as Client 9
+    participant DS as Digest Server
+    participant HW as Multi-Context Hardware
+
+    Note over DS: MAX_SESSIONS = 8, all contexts active
     
     S2->>DS: init_sha256()
-    DS->>DS: find_free_session()
+    DS->>DS: find_free_hardware_context()
     DS-->>S2: Error: TooManySessions
     
-    Note over S2: Client must wait or use one-shot operations
-    S2->>DS: digest_oneshot_sha256(data)
-    DS->>HW: compute hash directly
-    HW-->>DS: result
-    DS-->>S2: Success: hash result
+    Note over S2: Client must wait for context to free up
+    S2->>DS: init_sha256() (retry after delay)
+    DS->>HW: Allocate available hardware context
+    DS-->>S2: session_id = 9
 ```
 
 #### Session Timeout Recovery
@@ -327,63 +659,75 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> FREE
-    FREE --> ACTIVE_SHA256: init_sha256()
-    FREE --> ACTIVE_SHA384: init_sha384()
-    FREE --> ACTIVE_SHA512: init_sha512()
+    FREE --> ACTIVE_SHA256: init_sha256() + hardware context init
+    FREE --> ACTIVE_SHA384: init_sha384() + hardware context init  
+    FREE --> ACTIVE_SHA512: init_sha512() + hardware context init
     
-    ACTIVE_SHA256 --> ACTIVE_SHA256: update(data)
-    ACTIVE_SHA384 --> ACTIVE_SHA384: update(data)
-    ACTIVE_SHA512 --> ACTIVE_SHA512: update(data)
+    ACTIVE_SHA256 --> ACTIVE_SHA256: update(data) → stream to hardware
+    ACTIVE_SHA384 --> ACTIVE_SHA384: update(data) → stream to hardware
+    ACTIVE_SHA512 --> ACTIVE_SHA512: update(data) → stream to hardware
     
-    ACTIVE_SHA256 --> FREE: finalize_sha256()
-    ACTIVE_SHA384 --> FREE: finalize_sha384()
-    ACTIVE_SHA512 --> FREE: finalize_sha512()
+    ACTIVE_SHA256 --> FREE: finalize_sha256() → hardware result
+    ACTIVE_SHA384 --> FREE: finalize_sha384() → hardware result
+    ACTIVE_SHA512 --> FREE: finalize_sha512() → hardware result
     
-    ACTIVE_SHA256 --> FREE: reset()
-    ACTIVE_SHA384 --> FREE: reset()
-    ACTIVE_SHA512 --> FREE: reset()
+    ACTIVE_SHA256 --> FREE: reset() + context cleanup
+    ACTIVE_SHA384 --> FREE: reset() + context cleanup
+    ACTIVE_SHA512 --> FREE: reset() + context cleanup
     
-    ACTIVE_SHA256 --> FREE: timeout
-    ACTIVE_SHA384 --> FREE: timeout
-    ACTIVE_SHA512 --> FREE: timeout
+    ACTIVE_SHA256 --> FREE: timeout + context cleanup
+    ACTIVE_SHA384 --> FREE: timeout + context cleanup
+    ACTIVE_SHA512 --> FREE: timeout + context cleanup
     
     state ERROR_STATES {
         [*] --> InvalidSession: Wrong session ID
         [*] --> WrongAlgorithm: finalize_sha384() on SHA256 session
-        [*] --> BufferOverflow: update() exceeds buffer
-        [*] --> HardwareError: Hardware failure
+        [*] --> ContextSwitchError: Hardware context save/restore failure
+        [*] --> HardwareError: Hardware streaming failure
     }
     
     ACTIVE_SHA256 --> ERROR_STATES: Error conditions
-    ACTIVE_SHA384 --> ERROR_STATES: Error conditions
+    ACTIVE_SHA384 --> ERROR_STATES: Error conditions  
     ACTIVE_SHA512 --> ERROR_STATES: Error conditions
 ```
 
 ### SPDM Protocol Impact Analysis
 
 #### Certificate Verification Failure Recovery
+
+**Single-Context Hardware (ASPEED HACE) - No Session Exhaustion**
 ```mermaid
 sequenceDiagram
     participant SPDM as SPDM Protocol
     participant DS as Digest Server
-    participant POL as Security Policy
+    participant HW as ASPEED HACE
 
     SPDM->>DS: verify_certificate_chain()
-    DS->>DS: init_sha256()
-    DS-->>SPDM: Error: TooManySessions
+    DS->>HW: Direct hardware operation (blocks until complete)
+    HW-->>DS: Certificate hash result
+    DS-->>SPDM: Success
     
-    SPDM->>SPDM: Fallback strategy decision
+    Note over SPDM: No session management complexity needed
+```
+
+**Multi-Context Hardware (Hypothetical) - True Session Management**
+```mermaid
+sequenceDiagram
+    participant SPDM as SPDM Protocol
+    participant DS as Digest Server
+    participant HW as Multi-Context Hardware
+
+    SPDM->>DS: verify_certificate_chain()
     
-    alt Retry with backoff
-        Note over SPDM: Wait for sessions to free up
-        SPDM->>DS: verify_certificate_chain() (retry)
+    alt Hardware context available
+        DS->>HW: Allocate context and process
+        HW-->>DS: Certificate hash result
         DS-->>SPDM: Success
-    else Use one-shot operation
-        SPDM->>DS: digest_oneshot_sha256()
-        DS-->>SPDM: Success (if cert < 1024 bytes)
-    else Fail authentication
-        SPDM->>POL: Report authentication failure
-        POL-->>SPDM: Security policy decision
+    else All contexts busy
+        DS-->>SPDM: Error: TooManySessions
+        Note over SPDM: Client retry logic or wait
+        SPDM->>DS: verify_certificate_chain() (retry)
+        DS-->>SPDM: Success (context now available)
     end
 ```
 
@@ -676,28 +1020,38 @@ fn compute_transcript_hash(&mut self, messages: &[SpdmMessage]) -> Result<[u32; 
 }
 ```
 
-### Concurrent SPDM Operations (Requirement R2.2)
+### Sequential SPDM Operations (Requirement R2.1)
 ```rust
-// Multiple SPDM operations running simultaneously
+// SPDM task performing sequential operations using incremental hashing
 impl SpdmResponder {
-    fn handle_multiple_requests(&mut self) -> Result<(), SpdmError> {
+    fn handle_certificate_and_transcript(&mut self, cert_data: &[u8], messages: &[SpdmMessage]) -> Result<(), SpdmError> {
         let digest = Digest::from(DIGEST_SERVER_TASK_ID);
         
-        // Session 1: Certificate verification
-        let cert_session = digest.init_sha256()?;
+        // Operation 1: Certificate verification (R2.1: incremental computation)
+        let cert_session = digest.init_sha256()?;  // R1.1: SHA-256 support
         
-        // Session 2: Measurement hashing  
-        let measure_session = digest.init_sha384()?;  // R1.2: SHA-384 support
+        // Process certificate incrementally
+        for chunk in cert_data.chunks(512) {
+            digest.update(cert_session, chunk.len() as u32, chunk)?;
+        }
         
-        // Session 3: Key derivation
-        let key_session = digest.init_sha512()?;      // R1.3: SHA-512 support
+        let mut cert_hash = [0u32; 8];
+        digest.finalize_sha256(cert_session, &mut cert_hash)?;
         
-        // Process all three concurrently (up to 8 sessions total - R2.2)
-        // Each session maintains independent state (R2.3: isolation)
+        // Operation 2: Transcript hash computation (sequential, after cert verification)
+        let transcript_session = digest.init_sha256()?;  // R2.3: new isolated session
         
-        // ... process data in each session ...
+        // Hash all SPDM messages in sequence
+        for msg in messages {
+            let msg_bytes = msg.serialize()?;
+            digest.update(transcript_session, msg_bytes.len() as u32, &msg_bytes)?;
+        }
         
-        Ok(())
+        let mut transcript_hash = [0u32; 8];
+        digest.finalize_sha256(transcript_session, &mut transcript_hash)?;
+        
+        // Use both hashes for SPDM protocol
+        self.process_verification_results(&cert_hash, &transcript_hash)
     }
 }
 ```
@@ -794,28 +1148,28 @@ impl PldmFirmwareUpdate {
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| **R1.1** SHA-256 support | ✅ | `init_sha256()`, `finalize_sha256()` |
-| **R1.2** SHA-384 support | ✅ | `init_sha384()`, `finalize_sha384()` |  
-| **R1.3** SHA-512 support | ✅ | `init_sha512()`, `finalize_sha512()` |
+| **R1.1** SHA-256 support | ✅ | `init_sha256()`, `finalize_sha256()` with hardware context |
+| **R1.2** SHA-384 support | ✅ | `init_sha384()`, `finalize_sha384()` with hardware context |  
+| **R1.3** SHA-512 support | ✅ | `init_sha512()`, `finalize_sha512()` with hardware context |
 | **R1.4** Reject unsupported algorithms | ✅ | SHA-3 functions return `UnsupportedAlgorithm` |
-| **R2.1** Incremental hash computation | ✅ | `update()` method for chunk processing |
-| **R2.2** Multiple concurrent sessions | ✅ | `MAX_SESSIONS = 8` concurrent operations |
-| **R2.3** Session isolation | ✅ | Independent session state and IDs |
-| **R2.4** Automatic cleanup | ✅ | `cleanup_expired_sessions()` |
-| **R2.5** Session timeout | ✅ | `SESSION_TIMEOUT_TICKS` mechanism |
-| **R3.1-R3.5** SPDM use cases | ✅ | All supported via session-based API |
-| **R3.6-R3.8** PLDM use cases | ✅ | Firmware validation, component verification, signature support |
-| **R4.1** Memory efficient | ✅ | Static allocation, fixed buffers |
-| **R4.2** Zero-copy processing | ✅ | Hubris leased memory system |
+| **R2.1** Incremental hash computation | ✅ | True streaming via `update_hardware_context()` |
+| **R2.2** Multiple concurrent sessions | ✅ | `MAX_SESSIONS = 8` with context switching |
+| **R2.3** Session isolation | ✅ | Independent hardware contexts in non-cacheable RAM |
+| **R2.4** Automatic cleanup | ✅ | `cleanup_expired_sessions()` with context cleanup |
+| **R2.5** Session timeout | ✅ | `SESSION_TIMEOUT_TICKS` with hardware context release |
+| **R3.1-R3.5** SPDM use cases | ✅ | All supported via streaming session-based API |
+| **R3.6-R3.8** PLDM use cases | ✅ | Firmware validation, component verification, streaming support |
+| **R4.1** Memory efficient | ✅ | Static allocation, hardware context simulation |
+| **R4.2** Zero-copy processing | ✅ | Direct streaming to hardware, no session buffering |
 | **R4.3** Deterministic allocation | ✅ | No dynamic memory allocation |
-| **R4.4** Bounded execution | ✅ | Fixed session limits, timeouts |
-| **R5.1** Generic hardware interface | ✅ | `ServerImpl<D>` with trait bounds |
-| **R5.2** Mock implementation | ✅ | `MockDigestDevice` available |
-| **R5.3** Type-safe abstraction | ✅ | Associated type constraints |
-| **R5.4** Consistent API | ✅ | Same interface regardless of hardware |
-| **R6.1** Comprehensive errors | ✅ | Full `DigestError` enumeration |
-| **R6.2** Hardware failure handling | ✅ | `HardwareFailure` error propagation |
-| **R6.3** Session state validation | ✅ | `validate_session()` checks |
+| **R4.4** Bounded execution | ✅ | Fixed context switch costs, predictable timing |
+| **R5.1** Generic hardware interface | ✅ | `ServerImpl<D>` with context management traits |
+| **R5.2** Mock implementation | ✅ | `MockDigestDevice` with context simulation |
+| **R5.3** Type-safe abstraction | ✅ | Associated type constraints + context safety |
+| **R5.4** Consistent API | ✅ | Same streaming interface regardless of hardware |
+| **R6.1** Comprehensive errors | ✅ | Full `DigestError` enumeration + context errors |
+| **R6.2** Hardware failure handling | ✅ | `HardwareFailure` error propagation + context cleanup |
+| **R6.3** Session state validation | ✅ | `validate_session()` + context state checks |
 | **R6.4** Clear error propagation | ✅ | `RequestError<DigestError>` wrapper |
 | **R7.1** Synchronous IPC | ✅ | No async/futures dependencies |
 | **R7.2** Idol-generated stubs | ✅ | Type-safe IPC interface |
@@ -832,36 +1186,66 @@ The `ServerImpl<D>` struct is now generic over any device `D` that implements:
 
 ## Key Features
 
-1. **Hardware Agnostic**: Can work with any compatible digest hardware device
-2. **Type Safety**: Associated type constraints ensure digest output sizes match expectations
-3. **Zero Runtime Cost**: Uses static dispatch for optimal performance
-4. **Memory Efficient**: Static session storage allocated at compile time
+1. **True Hardware Streaming**: Data flows directly to hardware contexts with proper save/restore
+2. **Context Management**: Multiple sessions share hardware via non-cacheable RAM context switching  
+3. **Type Safety**: Associated type constraints ensure digest output sizes match expectations
+4. **Zero Runtime Cost**: Uses static dispatch for optimal performance
+5. **Memory Efficient**: Static session storage with hardware context simulation
+6. **Concurrent Sessions**: Up to 8 concurrent digest operations with automatic context switching
 
 ## Usage Example
 
-To use with a custom hardware device:
+To use with a custom hardware device that supports context management:
 
 ```rust
 // Your hardware device must implement the required traits
 struct MyDigestDevice {
-    // Your hardware-specific fields
+    // Hardware-specific context management fields
+    current_context: Option<DigestContext>,
+    context_save_addr: *mut u8,  // Non-cacheable RAM base
 }
 
 impl DigestInit<Sha2_256> for MyDigestDevice {
     type Output = Digest<8>;
-    // Implementation...
+    
+    fn init(&mut self, _: Sha2_256) -> Result<DigestContext, HardwareError> {
+        // Initialize hardware registers for SHA-256
+        // Set up context for streaming operations
+        Ok(DigestContext::new_sha256())
+    }
 }
 
 impl DigestInit<Sha2_384> for MyDigestDevice {
     type Output = Digest<12>;
-    // Implementation...
+    // Similar implementation for SHA-384
 }
 
 impl DigestInit<Sha2_512> for MyDigestDevice {
     type Output = Digest<16>;
-    // Implementation...
+    // Similar implementation for SHA-512  
 }
 
-// Then use it with the server
+impl DigestCtrlReset for MyDigestDevice {
+    fn reset(&mut self) -> Result<(), HardwareError> {
+        // Reset hardware to clean state
+        // Clear any active contexts
+        Ok(())
+    }
+}
+
+// Context management methods (hardware-specific)
+impl MyDigestDevice {
+    fn save_context_to_ram(&mut self, session_id: usize) -> Result<(), HardwareError> {
+        // Save current hardware context to non-cacheable RAM
+        // Hardware-specific register read and memory write operations
+    }
+    
+    fn restore_context_from_ram(&mut self, session_id: usize) -> Result<(), HardwareError> {
+        // Restore session context from non-cacheable RAM to hardware
+        // Hardware-specific memory read and register write operations
+    }
+}
+
+// Then use it with the streaming server
 let server = ServerImpl::new(MyDigestDevice::new());
 ```
