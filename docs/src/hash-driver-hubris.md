@@ -275,6 +275,188 @@ sequenceDiagram
     DS->>DS: current_session = None
 ```
 
+## IPC Interface Definition
+
+The digest server exposes its functionality through a Hubris Idol IPC interface that provides both session-based streaming operations and one-shot convenience methods.
+
+### Idol Interface Specification
+
+```rust
+// digest.idol - Hubris IPC interface definition
+Interface(
+    name: "Digest",
+    ops: {
+        // Session-based streaming operations (enabled by owned API)
+        "init_sha256": (
+            args: {},
+            reply: Result(
+                ok: "u32", // Returns session ID for the digest context
+                err: CLike("DigestError"),
+            ),
+        ),
+        "init_sha384": (
+            args: {},
+            reply: Result(
+                ok: "u32", // Returns session ID for the digest context
+                err: CLike("DigestError"),
+            ),
+        ),
+        "init_sha512": (
+            args: {},
+            reply: Result(
+                ok: "u32", // Returns session ID for the digest context
+                err: CLike("DigestError"),
+            ),
+        ),
+        "update": (
+            args: {
+                "session_id": "u32",
+                "len": "u32",
+            },
+            leases: {
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        "finalize_sha256": (
+            args: {
+                "session_id": "u32",
+            },
+            leases: {
+                "digest_out": (type: "[u32; 8]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        "finalize_sha384": (
+            args: {
+                "session_id": "u32",
+            },
+            leases: {
+                "digest_out": (type: "[u32; 12]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        "finalize_sha512": (
+            args: {
+                "session_id": "u32",
+            },
+            leases: {
+                "digest_out": (type: "[u32; 16]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        "reset": (
+            args: {
+                "session_id": "u32",
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        
+        // One-shot convenience operations (using scoped API internally)
+        "digest_oneshot_sha256": (
+            args: {
+                "len": "u32",
+            },
+            leases: {
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+                "digest_out": (type: "[u32; 8]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        "digest_oneshot_sha384": (
+            args: {
+                "len": "u32",
+            },
+            leases: {
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+                "digest_out": (type: "[u32; 12]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+        "digest_oneshot_sha512": (
+            args: {
+                "len": "u32",
+            },
+            leases: {
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+                "digest_out": (type: "[u32; 16]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("DigestError"),
+            ),
+        ),
+    },
+)
+```
+
+### IPC Design Rationale
+
+#### Session-Based Operations
+- **init_sha256/384/512()**: Creates new session using owned API, returns session ID for storage
+- **update(session_id, data)**: Updates specific session using move-based context operations  
+- **finalize_sha256/384/512(session_id)**: Completes session and recovers controller for reuse
+- **reset(session_id)**: Cancels session early and recovers controller
+
+#### One-Shot Operations  
+- **digest_oneshot_sha256/384/512()**: Complete digest computation in single IPC call using scoped API
+- **Convenience methods**: For simple use cases that don't need streaming
+
+#### Zero-Copy Data Transfer
+- **Leased memory**: All data transfer uses Hubris leased memory system
+- **Read leases**: Input data (`data`) passed by reference, no copying
+- **Write leases**: Output digests (`digest_out`) written directly to client memory  
+- **Bounded transfers**: Maximum 1024 bytes per update for deterministic behavior
+
+#### Type Safety
+- **Algorithm-specific finalize**: `finalize_sha256` only works with SHA-256 sessions
+- **Sized output arrays**: `[u32; 8]` for SHA-256, `[u32; 12]` for SHA-384, `[u32; 16]` for SHA-512
+- **Session validation**: Invalid session IDs return `DigestError::InvalidSession`
+
+### IPC Usage Patterns
+
+#### SPDM Certificate Verification (Streaming)
+```rust
+// Client code using generated Idol stubs
+let digest = Digest::from(DIGEST_SERVER_TASK_ID);
+
+let session_id = digest.init_sha256()?;
+for chunk in certificate_data.chunks(1024) {
+    digest.update(session_id, chunk.len() as u32, chunk)?;
+}
+let mut cert_hash = [0u32; 8];
+digest.finalize_sha256(session_id, &mut cert_hash)?;
+```
+
+#### Simple Hash Computation (One-Shot)
+```rust
+// Client code for simple operations
+let digest = Digest::from(DIGEST_SERVER_TASK_ID);
+let mut hash_output = [0u32; 8];
+digest.digest_oneshot_sha256(data.len() as u32, data, &mut hash_output)?;
+```
+
 ## Detailed Design
 
 ### Session Model
@@ -1402,4 +1584,4 @@ The dual API approach resolves all original limitations:
 3. ✅ **Design document architecture is now implementable** using owned contexts
 4. ✅ **Streaming large data sets fully supported** with persistent session state
 
-The move-based resource management pattern provides the persistent contexts needed for server applications while preserving the simplicity of scoped operations for basic use cases.
+This demonstrates how API design evolution can solve fundamental architectural constraints while maintaining backward compatibility. The move-based resource management pattern provides the persistent contexts needed for server applications while preserving the simplicity of scoped operations for basic use cases.
