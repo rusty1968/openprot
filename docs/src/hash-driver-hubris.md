@@ -1252,17 +1252,17 @@ let server = ServerImpl::new(MyDigestDevice::new());
 
 ## Critical Findings
 
-### Trait Lifetime Incompatibility with Session-Based Operations
+### Trait Lifetime Incompatibility with Session-Based Operations - RESOLVED
 
-During implementation, a fundamental incompatibility was discovered between the `openprot-hal-blocking` digest traits and the session-based streaming operations described in this design document.
+During implementation, a fundamental incompatibility was discovered between the `openprot-hal-blocking` digest traits and the session-based streaming operations described in this design document. **This issue has been resolved through the implementation of a dual API structure with owned context variants.**
 
-#### The Core Problem
+#### The Original Problem
 
-The `openprot-hal-blocking` digest traits are designed for **scoped operations**, but the digest server API expects **persistent sessions**. These requirements are fundamentally incompatible.
+The `openprot-hal-blocking` digest traits were originally designed for **scoped operations**, but the digest server API expected **persistent sessions**. These requirements were fundamentally incompatible due to lifetime constraints.
 
-#### Root Cause: Lifetime Constraints
+#### Root Cause: Lifetime Constraints in Scoped API
 
-The trait definition creates an insurmountable lifetime constraint:
+The original scoped trait definition created lifetime constraints:
 
 ```rust
 pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
@@ -1273,74 +1273,115 @@ pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
 }
 ```
 
-The `OpContext<'a>` has a lifetime tied to `&'a mut self`, meaning:
-- Context cannot outlive the function call that created it
-- Context cannot be stored in a separate struct
-- Context cannot persist across IPC boundaries
-- Sessions cannot maintain persistent state between operations
+The `OpContext<'a>` had a lifetime tied to `&'a mut self`, meaning:
+- Context could not outlive the function call that created it
+- Context could not be stored in a separate struct
+- Context could not persist across IPC boundaries
+- Sessions could not maintain persistent state between operations
 
-#### What Works: One-Shot Operations
+#### The Solution: Dual API with Move-Based Resource Management
 
+The incompatibility has been **completely resolved** through implementation of a dual API structure:
+
+**1. Scoped API (Original)** - For simple, one-shot operations:
 ```rust
-fn compute_hash(&mut self, data: &[u8]) -> Result<Output, Error> {
-    let mut ctx = self.hardware.init(Sha2_256)?;  // Borrow starts
-    ctx.update(data)?;
-    let result = ctx.finalize()?;                  // Borrow ends
-    Ok(result)
-}  // Context is dropped, borrow ends
+pub mod scoped {
+    pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
+        type OpContext<'a>: DigestOp<Output = Self::Output>
+        where Self: 'a;
+        
+        fn init<'a>(&'a mut self, init_params: T) -> Result<Self::OpContext<'a>, Self::Error>;
+    }
+}
 ```
 
-One-shot operations work perfectly because the entire digest computation happens within a single scope.
+**2. Owned API (New)** - For session-based, streaming operations:
+```rust
+pub mod owned {
+    pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
+        type OwnedContext: DigestOp<Output = Self::Output>;
+        
+        fn init_owned(&mut self, init_params: T) -> Result<Self::OwnedContext, Self::Error>;
+    }
+    
+    pub trait DigestOp {
+        type Output;
+        
+        fn update(&mut self, data: &[u8]) -> Result<(), Self::Error>;
+        fn finalize(self) -> Result<Self::Output, Self::Error>;
+        fn cancel(self) -> Self::Controller;
+    }
+}
+```
 
-#### What Doesn't Work: Session Storage
+#### How the Owned API Enables Sessions
+
+The owned API uses **move-based resource management** to solve the lifetime problem:
 
 ```rust
-struct Session<D> {
-    context: Option<D::OpContext<'static>>,  // ❌ IMPOSSIBLE
+// ✅ NOW POSSIBLE: Session storage with owned contexts
+struct Session {
+    context: Option<OwnedDigestContext>,  // No lifetime constraints
+    algorithm: DigestAlgorithm,
 }
 
 fn init_session(&mut self) -> Result<SessionId, Error> {
-    let ctx = self.hardware.init(Sha2_256)?;
-    self.sessions[id].context = Some(ctx);     // ❌ Lifetime error
+    let ctx = self.hardware.init_owned(Sha2_256)?;  // Owned context
+    self.sessions[id].context = Some(ctx);          // ✅ Works perfectly
     Ok(id)
+}
+
+fn update_session(&mut self, id: SessionId, data: &[u8]) -> Result<(), Error> {
+    let session = &mut self.sessions[id];
+    session.context.as_mut().unwrap().update(data)  // ✅ Persistent state
 }
 ```
 
-Session-based operations fail because the context cannot be stored beyond the function scope where it was created.
+#### Key Benefits of the Move-Based Solution
 
-#### Architectural Impact
+1. **True Streaming Support**: Contexts can be stored and updated incrementally
+2. **Session Isolation**: Each session owns its context independently  
+3. **Resource Recovery**: `cancel()` method allows controller recovery
+4. **Rust Ownership Safety**: Move semantics prevent use-after-finalize
+5. **Backward Compatibility**: Scoped API remains unchanged for simple use cases
 
-This discovery has significant implications for the digest server architecture:
+#### Implementation Examples
 
-1. **Session-based streaming is impossible** with the current trait design
-2. **One-shot operations are the only viable approach** with `openprot-hal-blocking` traits
-3. **The design document describes an unimplementable architecture** due to trait constraints
-4. **Alternative approaches are needed** for streaming large data sets
+**Session-Based Streaming (Now Possible)**:
+```rust
+// SPDM certificate chain verification with streaming
+let session_id = digest_server.init_sha256()?;
 
-#### Resolution Options
+for cert_chunk in certificate_chain.chunks(1024) {
+    digest_server.update(session_id, cert_chunk)?;
+}
 
-1. **One-shot API (Implemented)**: Convert to one-shot operations only
-   - ✅ Compatible with current traits
-   - ✅ Simple and reliable
-   - ❌ Requires complete data in memory
-   - ❌ No streaming capability
+let cert_digest = digest_server.finalize_sha256(session_id)?;
+```
 
-2. **Hardware Sessions**: Implement session storage in hardware layer
-   - ✅ Would enable streaming
-   - ❌ Hardware-specific implementation
-   - ❌ Complex context save/restore logic
-
-3. **Different Traits**: Use traits designed for persistent contexts
-   - ✅ Would enable full streaming API
-   - ❌ Requires different trait ecosystem
-   - ❌ Breaks compatibility with `openprot-hal-blocking`
+**One-Shot Operations (Still Supported)**:
+```rust
+// Simple hash computation using scoped API
+let digest = digest_device.compute_sha256(complete_data)?;
+```
 
 #### Current Implementation Status
 
-The working implementation uses **Option 1: One-shot API**. The digest server successfully compiles and provides:
-- Complete digest operations within single IPC calls
-- Hardware abstraction via `openprot-hal-blocking` traits
-- Mock device support for testing
-- Proper error handling and trait compliance
+The dual API solution is **fully implemented and working**:
 
-This critical finding demonstrates the importance of understanding trait design constraints during architecture planning. While the session-based design appears elegant on paper, the lifetime constraints in the trait ecosystem make it impossible to implement as described.
+- ✅ **Scoped API**: Original lifetime-constrained API for simple operations
+- ✅ **Owned API**: New move-based API enabling persistent sessions
+- ✅ **Mock Implementation**: Both APIs implemented in baremetal mock platform
+- ✅ **Comprehensive Testing**: Session storage patterns validated
+- ✅ **Documentation**: Complete analysis comparing both approaches
+
+#### Architectural Resolution
+
+The dual API approach resolves all original limitations:
+
+1. ✅ **Session-based streaming is now possible** with the owned API
+2. ✅ **Both one-shot and streaming operations supported** via appropriate API choice
+3. ✅ **Design document architecture is now implementable** using owned contexts
+4. ✅ **Streaming large data sets fully supported** with persistent session state
+
+The move-based resource management pattern provides the persistent contexts needed for server applications while preserving the simplicity of scoped operations for basic use cases.
