@@ -343,6 +343,6 @@ mod tests {
         // Controller was recovered and can be reused
         manager.create_session().unwrap();
         let result2 = manager.finalize_session().unwrap();
-        assert_eq!(result2.value[0], 0x87654321 + 0); // 0 bytes processed
+        assert_eq!(result2.value[0], 0x87654321); // 0 bytes processed
     }
 }

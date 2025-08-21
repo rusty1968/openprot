@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn test_mock_mac_device_creation() {
         let device = MockMacDevice::new();
-        let device_default = MockMacDevice::default();
+        let device_default = MockMacDevice;
         // Both should be valid instances
         assert_eq!(
             core::mem::size_of_val(&device),
