@@ -102,7 +102,7 @@
 
 use core::fmt::Debug;
 use core::result::Result;
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// A generic digest output container.
 ///
@@ -112,6 +112,100 @@ use zerocopy::IntoBytes;
 ///
 /// The structure is marked with `#[repr(C)]` to ensure a predictable memory layout,
 /// making it suitable for zero-copy operations and hardware interfaces.
+///
+/// ## Integration Benefits
+///
+/// The `Digest<N>` type solves several critical integration challenges:
+///
+/// ### 1. Concrete vs Opaque Types
+/// Unlike opaque associated types (`type Output: IntoBytes`), `Digest<N>` provides
+/// a **concrete type** that generic code can work with directly:
+///
+/// ```rust
+/// # use openprot_hal_blocking::digest::Digest;
+/// // ✅ CONCRETE: We know exactly what this is
+/// fn process_digest(digest: Digest<8>) -> [u32; 8] {
+///     digest.into_array()  // Safe, direct conversion
+/// }
+/// 
+/// // ❌ OPAQUE: We don't know what D::Output actually is  
+/// // fn process_generic<D>(output: D::Output) -> /* Unknown type */ {
+/// //     // Cannot convert to [u32; 8] safely
+/// // }
+/// ```
+///
+/// ### 2. Safe Type Conversions
+/// Provides safe methods to access underlying data without unsafe code:
+///
+/// ```rust
+/// # use openprot_hal_blocking::digest::Digest;
+/// let digest = Digest::<8> { value: [1, 2, 3, 4, 5, 6, 7, 8] };
+/// 
+/// // Safe conversions - no unsafe code needed
+/// let array: [u32; 8] = digest.into_array();      // Owned conversion
+/// let array_ref: &[u32; 8] = digest.as_array();   // Borrowed conversion  
+/// let bytes: &[u8] = digest.as_bytes();           // Byte slice access
+/// ```
+///
+/// ### 3. IPC Integration
+/// Designed specifically for Hubris IPC leased memory operations:
+///
+/// ```rust,no_run
+/// # use openprot_hal_blocking::digest::Digest;
+/// # struct Leased<T, U>(core::marker::PhantomData<(T, U)>);
+/// # impl<T, U> Leased<T, U> { fn write(&self, data: U) -> Result<(), ()> { Ok(()) } }
+/// # let digest_out: Leased<(), [u32; 8]> = Leased(core::marker::PhantomData);
+/// # let digest = Digest::<8> { value: [0; 8] };
+/// // Direct write to IPC lease - no conversion needed
+/// digest_out.write(digest.into_array())?;
+/// # Ok::<(), ()>(())
+/// ```
+///
+/// ### 4. Server Application Support  
+/// Enables servers to store and manipulate digest results safely:
+///
+/// ```rust
+/// # use openprot_hal_blocking::digest::Digest;
+/// struct DigestCache {
+///     sha256_results: Vec<Digest<8>>,   // Can store concrete types
+///     sha384_results: Vec<Digest<12>>,  // Different sizes supported
+/// }
+/// 
+/// impl DigestCache {
+///     fn store_sha256(&mut self, digest: Digest<8>) {
+///         self.sha256_results.push(digest);  // Direct storage
+///     }
+///     
+///     fn get_as_array(&self, index: usize) -> [u32; 8] {
+///         self.sha256_results[index].into_array()  // Safe access
+///     }
+/// }
+/// ```
+///
+/// ### 5. Zero-Copy Operations
+/// Full zerocopy trait support enables efficient memory operations:
+///
+/// ```rust
+/// # use openprot_hal_blocking::digest::Digest;
+/// let digest = Digest::<8> { value: [1, 2, 3, 4, 5, 6, 7, 8] };
+/// 
+/// // Zero-copy byte access via zerocopy traits
+/// let bytes: &[u8] = zerocopy::IntoBytes::as_bytes(&digest);
+/// 
+/// // Safe transmutation between compatible layouts
+/// // (enabled by FromBytes + Immutable derives)
+/// ```
+///
+/// ## Comparison with Opaque Output Types
+///
+/// | Feature | `Digest<N>` (Concrete) | `D::Output` (Opaque) |
+/// |---------|-------------------------|----------------------|
+/// | **Type Known at Compile Time** | ✅ Always `Digest<N>` | ❌ Unknown until runtime |
+/// | **Safe Array Access** | ✅ `into_array()`, `as_array()` | ❌ Requires unsafe casting |
+/// | **IPC Integration** | ✅ Direct `[u32; N]` conversion | ❌ Complex type bridging |
+/// | **Server Storage** | ✅ Can store in structs | ❌ Difficult generic storage |
+/// | **Zero-Copy Support** | ✅ Full zerocopy traits | ❌ Implementation dependent |
+/// | **Embedded Friendly** | ✅ Known size, no allocation | ❌ Unknown size, complex |
 ///
 /// # Type Parameters
 ///
@@ -126,12 +220,49 @@ use zerocopy::IntoBytes;
 ///     value: [0x12345678, 0x9abcdef0, 0x11111111, 0x22222222,
 ///             0x33333333, 0x44444444, 0x55555555, 0x66666666],
 /// };
+/// 
+/// // Safe conversion to array for IPC
+/// let array = sha256_digest.into_array();
+/// 
+/// // Access as bytes for serialization  
+/// let bytes = sha256_digest.as_bytes();
+/// assert_eq!(bytes.len(), 32);
 /// ```
-#[derive(Copy, Clone, PartialEq, Eq, IntoBytes)]
+#[derive(Copy, Clone, PartialEq, Eq, IntoBytes, FromBytes, Immutable)]
 #[repr(C)]
 pub struct Digest<const N: usize> {
     /// The digest value as an array of 32-bit words
     pub value: [u32; N],
+}
+
+impl<const N: usize> Digest<N> {
+    /// Create a new digest from an array of words
+    pub fn new(value: [u32; N]) -> Self {
+        Self { value }
+    }
+
+    /// Get the digest as an array of words
+    ///
+    /// This provides safe access to the underlying array without any conversions.
+    pub fn into_array(self) -> [u32; N] {
+        self.value
+    }
+
+    /// Get a reference to the digest as an array of words
+    pub fn as_array(&self) -> &[u32; N] {
+        &self.value
+    }
+
+    /// Get the digest as a byte slice
+    pub fn as_bytes(&self) -> &[u8] {
+        zerocopy::IntoBytes::as_bytes(self)
+    }
+}
+
+impl<const N: usize> AsRef<[u8]> for Digest<N> {
+    fn as_ref(&self) -> &[u8] {
+        zerocopy::IntoBytes::as_bytes(self)
+    }
 }
 
 /// Trait defining the properties of a cryptographic digest algorithm.
@@ -716,5 +847,68 @@ pub mod owned {
         ///
         /// The recovered controller in a clean state
         fn cancel(self) -> Self::Controller;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_digest_output_conversions() {
+        // Test safe conversion methods on Digest type
+        let sha256_digest = Digest::<8> {
+            value: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        
+        // Test into_array() method
+        let array = sha256_digest.into_array();
+        assert_eq!(array, [1, 2, 3, 4, 5, 6, 7, 8]);
+        
+        // Test as_array() method
+        let sha256_digest = Digest::<8> {
+            value: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let array_ref = sha256_digest.as_array();
+        assert_eq!(array_ref, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        
+        // Test as_bytes() method
+        let bytes = sha256_digest.as_bytes();
+        assert_eq!(bytes.len(), 32); // 8 words * 4 bytes each
+        
+        // Verify the bytes match the expected layout (little endian)
+        let expected_bytes = [
+            1, 0, 0, 0,  // word 1
+            2, 0, 0, 0,  // word 2  
+            3, 0, 0, 0,  // word 3
+            4, 0, 0, 0,  // word 4
+            5, 0, 0, 0,  // word 5
+            6, 0, 0, 0,  // word 6
+            7, 0, 0, 0,  // word 7
+            8, 0, 0, 0,  // word 8
+        ];
+        assert_eq!(bytes, &expected_bytes);
+    }
+
+    #[test]
+    fn test_output_type_sizes() {
+        use core::mem;
+        
+        // Verify that digest output types have correct sizes for IPC
+        assert_eq!(mem::size_of::<Digest<8>>(), 32);   // SHA-256: 8 words * 4 bytes
+        assert_eq!(mem::size_of::<Digest<12>>(), 48);  // SHA-384: 12 words * 4 bytes  
+        assert_eq!(mem::size_of::<Digest<16>>(), 64);  // SHA-512: 16 words * 4 bytes
+        
+        // Test alignment requirements
+        assert_eq!(mem::align_of::<Digest<8>>(), 4);   // Aligned to u32
+    }
+
+    #[test]
+    fn test_digest_new_constructor() {
+        let array = [0x12345678, 0x9abcdef0, 0x11111111, 0x22222222,
+                     0x33333333, 0x44444444, 0x55555555, 0x66666666];
+        let digest = Digest::new(array);
+        assert_eq!(digest.value, array);
+        assert_eq!(digest.into_array(), array);
     }
 }
