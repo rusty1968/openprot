@@ -1319,21 +1319,39 @@ pub mod owned {
 The owned API uses **move-based resource management** to solve the lifetime problem:
 
 ```rust
-// ✅ NOW POSSIBLE: Session storage with owned contexts
-struct Session {
-    context: Option<OwnedDigestContext>,  // No lifetime constraints
-    algorithm: DigestAlgorithm,
+// ✅ NOW POSSIBLE: Digest server with owned contexts and controller
+use openprot_hal_blocking::digest::owned::{DigestInit, DigestOp};
+
+struct DigestServer<H, C> {
+    controller: Option<H>,      // Hardware controller
+    active_session: Option<C>,  // Single active session
 }
 
-fn init_session(&mut self) -> Result<SessionId, Error> {
-    let ctx = self.hardware.init_owned(Sha2_256)?;  // Owned context
-    self.sessions[id].context = Some(ctx);          // ✅ Works perfectly
-    Ok(id)
-}
+impl<H, C> DigestServer<H, C> 
+where 
+    H: DigestInit<Sha2_256, Context = C>,
+    C: DigestOp<Controller = H>,
+{
+    fn init_session(&mut self) -> Result<(), Error> {
+        let controller = self.controller.take().ok_or(Error::Busy)?;
+        let context = controller.init(Sha2_256)?;  // ✅ Owned context
+        self.active_session = Some(context);       // ✅ Store in server
+        Ok(())
+    }
 
-fn update_session(&mut self, id: SessionId, data: &[u8]) -> Result<(), Error> {
-    let session = &mut self.sessions[id];
-    session.context.as_mut().unwrap().update(data)  // ✅ Persistent state
+    fn update_session(&mut self, data: &[u8]) -> Result<(), Error> {
+        let context = self.active_session.take().ok_or(Error::NoSession)?;
+        let updated_context = context.update(data)?;  // ✅ Move-based update
+        self.active_session = Some(updated_context);   // ✅ Store updated state
+        Ok(())
+    }
+    
+    fn finalize_session(&mut self) -> Result<Digest<8>, Error> {
+        let context = self.active_session.take().ok_or(Error::NoSession)?;
+        let (digest, controller) = context.finalize()?;
+        self.controller = Some(controller);  // ✅ Controller recovery
+        Ok(digest)
+    }
 }
 ```
 
