@@ -127,7 +127,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 /// fn process_digest(digest: Digest<8>) -> [u32; 8] {
 ///     digest.into_array()  // Safe, direct conversion
 /// }
-/// 
+///
 /// // ❌ OPAQUE: We don't know what D::Output actually is  
 /// // fn process_generic<D>(output: D::Output) -> /* Unknown type */ {
 /// //     // Cannot convert to [u32; 8] safely
@@ -140,7 +140,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 /// ```rust
 /// # use openprot_hal_blocking::digest::Digest;
 /// let digest = Digest::<8> { value: [1, 2, 3, 4, 5, 6, 7, 8] };
-/// 
+///
 /// // Safe conversions - no unsafe code needed
 /// let array: [u32; 8] = digest.into_array();      // Owned conversion
 /// let array_ref: &[u32; 8] = digest.as_array();   // Borrowed conversion  
@@ -170,7 +170,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 ///     sha256_results: Vec<Digest<8>>,   // Can store concrete types
 ///     sha384_results: Vec<Digest<12>>,  // Different sizes supported
 /// }
-/// 
+///
 /// impl DigestCache {
 ///     fn store_sha256(&mut self, digest: Digest<8>) {
 ///         self.sha256_results.push(digest);  // Direct storage
@@ -188,10 +188,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 /// ```rust
 /// # use openprot_hal_blocking::digest::Digest;
 /// let digest = Digest::<8> { value: [1, 2, 3, 4, 5, 6, 7, 8] };
-/// 
+///
 /// // Zero-copy byte access via zerocopy traits
 /// let bytes: &[u8] = zerocopy::IntoBytes::as_bytes(&digest);
-/// 
+///
 /// // Safe transmutation between compatible layouts
 /// // (enabled by FromBytes + Immutable derives)
 /// ```
@@ -220,10 +220,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 ///     value: [0x12345678, 0x9abcdef0, 0x11111111, 0x22222222,
 ///             0x33333333, 0x44444444, 0x55555555, 0x66666666],
 /// };
-/// 
+///
 /// // Safe conversion to array for IPC
 /// let array = sha256_digest.into_array();
-/// 
+///
 /// // Access as bytes for serialization  
 /// let bytes = sha256_digest.as_bytes();
 /// assert_eq!(bytes.len(), 32);
@@ -860,32 +860,32 @@ mod tests {
         let sha256_digest = Digest::<8> {
             value: [1, 2, 3, 4, 5, 6, 7, 8],
         };
-        
+
         // Test into_array() method
         let array = sha256_digest.into_array();
         assert_eq!(array, [1, 2, 3, 4, 5, 6, 7, 8]);
-        
+
         // Test as_array() method
         let sha256_digest = Digest::<8> {
             value: [1, 2, 3, 4, 5, 6, 7, 8],
         };
         let array_ref = sha256_digest.as_array();
         assert_eq!(array_ref, &[1, 2, 3, 4, 5, 6, 7, 8]);
-        
+
         // Test as_bytes() method
         let bytes = sha256_digest.as_bytes();
         assert_eq!(bytes.len(), 32); // 8 words * 4 bytes each
-        
+
         // Verify the bytes match the expected layout (little endian)
         let expected_bytes = [
-            1, 0, 0, 0,  // word 1
-            2, 0, 0, 0,  // word 2  
-            3, 0, 0, 0,  // word 3
-            4, 0, 0, 0,  // word 4
-            5, 0, 0, 0,  // word 5
-            6, 0, 0, 0,  // word 6
-            7, 0, 0, 0,  // word 7
-            8, 0, 0, 0,  // word 8
+            1, 0, 0, 0, // word 1
+            2, 0, 0, 0, // word 2
+            3, 0, 0, 0, // word 3
+            4, 0, 0, 0, // word 4
+            5, 0, 0, 0, // word 5
+            6, 0, 0, 0, // word 6
+            7, 0, 0, 0, // word 7
+            8, 0, 0, 0, // word 8
         ];
         assert_eq!(bytes, &expected_bytes);
     }
@@ -893,20 +893,22 @@ mod tests {
     #[test]
     fn test_output_type_sizes() {
         use core::mem;
-        
+
         // Verify that digest output types have correct sizes for IPC
-        assert_eq!(mem::size_of::<Digest<8>>(), 32);   // SHA-256: 8 words * 4 bytes
-        assert_eq!(mem::size_of::<Digest<12>>(), 48);  // SHA-384: 12 words * 4 bytes  
-        assert_eq!(mem::size_of::<Digest<16>>(), 64);  // SHA-512: 16 words * 4 bytes
-        
+        assert_eq!(mem::size_of::<Digest<8>>(), 32); // SHA-256: 8 words * 4 bytes
+        assert_eq!(mem::size_of::<Digest<12>>(), 48); // SHA-384: 12 words * 4 bytes
+        assert_eq!(mem::size_of::<Digest<16>>(), 64); // SHA-512: 16 words * 4 bytes
+
         // Test alignment requirements
-        assert_eq!(mem::align_of::<Digest<8>>(), 4);   // Aligned to u32
+        assert_eq!(mem::align_of::<Digest<8>>(), 4); // Aligned to u32
     }
 
     #[test]
     fn test_digest_new_constructor() {
-        let array = [0x12345678, 0x9abcdef0, 0x11111111, 0x22222222,
-                     0x33333333, 0x44444444, 0x55555555, 0x66666666];
+        let array = [
+            0x12345678, 0x9abcdef0, 0x11111111, 0x22222222, 0x33333333, 0x44444444, 0x55555555,
+            0x66666666,
+        ];
         let digest = Digest::new(array);
         assert_eq!(digest.value, array);
         assert_eq!(digest.into_array(), array);

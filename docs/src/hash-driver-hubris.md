@@ -1,5 +1,7 @@
 # Generic Digest Server Design Document
 
+This document describes the design and architecture of a generic digest server for Hubris OS that supports both SPDM and PLDM protocol implementations.
+
 ## Requirements
 
 ### Primary Requirement
@@ -16,7 +18,7 @@
 
 #### R2: Session Management
 - **R2.1**: Support incremental hash computation for large certificate chains and firmware images
-- **R2.2**: Support multiple concurrent digest sessions (≥8 concurrent operations)
+- **R2.2**: Support multiple concurrent digest sessions (hardware-dependent capacity)
 - **R2.3**: Provide session isolation between different SPDM and PLDM protocol flows
 - **R2.4**: Automatic session cleanup to prevent resource exhaustion
 - **R2.5**: Session timeout mechanism for abandoned operations
@@ -61,9 +63,9 @@
 - **R8.3**: Digest server fails fast on unrecoverable hardware errors rather than returning complex error states
 - **R8.4**: Support debugging via jefe external interface during development
 
-## Implementation Overview
+## Design Overview
 
-This digest server has been successfully converted to a generic implementation that can work with any device implementing the required digest traits from `openprot-hal-blocking`.
+This digest server provides a generic implementation that can work with any device implementing the required digest traits from `openprot-hal-blocking`. The design supports both single-context and multi-context hardware through hardware-adaptive session management.
 
 ## Architecture
 
@@ -108,7 +110,7 @@ ServerImpl<D>
 ├── Generic Type Parameter D
 │   └── Trait Bounds: DigestInit<Sha2_256/384/512>
 ├── Session Management
-│   ├── Static session storage (MAX_SESSIONS = 8)
+│   ├── Static session storage (hardware-dependent capacity)
 │   ├── Session lifecycle (init → update → finalize)
 │   └── Automatic timeout and cleanup
 └── Hardware Abstraction
@@ -493,7 +495,7 @@ impl DigestHardwareCapabilities for Ast1060HashDevice {
 
 // Example hypothetical multi-context implementation  
 impl DigestHardwareCapabilities for HypotheticalMultiContextDevice {
-    const MAX_CONCURRENT_SESSIONS: usize = 8;  // Multiple contexts supported
+    const MAX_CONCURRENT_SESSIONS: usize = 16;  // Hardware-dependent capacity
     const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool = true;
 }
 
@@ -559,15 +561,18 @@ impl DigestOp for MyDigestContext<'_> {
 **Single-Context Hardware (ASPEED HACE):**
 ```
 Client A calls init_sha256() → Blocks until complete → Returns session_id
-Client B calls init_sha384() → Blocks waiting for A to finish → Eventually proceeds
-Client C calls update()       → Blocks waiting for B to finish → Eventually proceeds
+Client B calls init_sha384() → Blocks waiting for A to finish → Still blocked  
+Client A calls update(session_id) → Blocks until complete → Returns success
+Client B calls update(session_id) → Still blocked waiting for A to finalize
+Client A calls finalize() → Releases hardware → Client B can now proceed
 ```
 
 **Multi-Context Hardware (Hypothetical):**
 ```
 Client A calls init_sha256() → Creates session context → Returns immediately
 Client B calls init_sha384() → Creates different context → Returns immediately  
-Client C calls update()       → Uses appropriate context → Returns immediately
+Client A calls update(session_id) → Uses session context → Returns immediately
+Client B calls update(session_id) → Uses different context → Returns immediately
 ```
 
 #### Session Management Flow (Hardware-Dependent)
@@ -645,13 +650,21 @@ graph TB
 ```
 
 #### Hardware Capability Detection
+
+The digest server adapts to different hardware capabilities through compile-time trait bounds:
+
 ```rust
 pub trait DigestHardwareCapabilities {
-    const MAX_CONCURRENT_SESSIONS: usize;
+    const MAX_CONCURRENT_SESSIONS: usize;  // Hardware-dependent: 1 for single-context, 16+ for multi-context
     const SUPPORTS_CONTEXT_SWITCHING: bool;
     const MAX_UPDATE_SIZE: usize;
 }
 ```
+
+Examples of hardware-specific session limits:
+- **ASPEED AST1060**: `MAX_CONCURRENT_SESSIONS = 1` (single hardware context)
+- **Multi-context accelerators**: `MAX_CONCURRENT_SESSIONS = 16` (or higher based on hardware design)
+- **Software implementations**: Can support many concurrent sessions limited by memory
 
 #### Session Management Strategy
 - **Single-context platforms**: Direct hardware operations, no session state
@@ -752,7 +765,7 @@ sequenceDiagram
     participant DS as Digest Server
     participant HW as Multi-Context Hardware
 
-    Note over DS: MAX_SESSIONS = 8, all contexts active
+    Note over DS: Hardware capacity reached, all contexts active
     
     S2->>DS: init_sha256()
     DS->>DS: find_free_hardware_context()
@@ -1311,7 +1324,7 @@ impl PldmFirmwareUpdate {
         // Component 3: FPGA bitstream using SHA-512
         let fpga_session = digest.init_sha512()?;        // R1.3: SHA-512 support
         
-        // All components can be updated concurrently (up to 8 total - R2.2)
+        // All components can be updated concurrently (hardware-dependent capacity - R2.2)
         // Each maintains independent digest state (R2.3: isolation)
         
         // Store sessions for component tracking
@@ -1335,7 +1348,7 @@ impl PldmFirmwareUpdate {
 | **R1.3** SHA-512 support | ✅ | `init_sha512()`, `finalize_sha512()` with hardware context |
 | **R1.4** Reject unsupported algorithms | ✅ | SHA-3 functions return `UnsupportedAlgorithm` |
 | **R2.1** Incremental hash computation | ✅ | True streaming via `update_hardware_context()` |
-| **R2.2** Multiple concurrent sessions | ✅ | `MAX_SESSIONS = 8` with context switching |
+| **R2.2** Multiple concurrent sessions | ✅ | Hardware-dependent capacity with context switching |
 | **R2.3** Session isolation | ✅ | Independent hardware contexts in non-cacheable RAM |
 | **R2.4** Automatic cleanup | ✅ | `cleanup_expired_sessions()` with context cleanup |
 | **R2.5** Session timeout | ✅ | `SESSION_TIMEOUT_TICKS` with hardware context release |
@@ -1373,7 +1386,7 @@ The `ServerImpl<D>` struct is now generic over any device `D` that implements:
 3. **Type Safety**: Associated type constraints ensure digest output sizes match expectations
 4. **Zero Runtime Cost**: Uses static dispatch for optimal performance
 5. **Memory Efficient**: Static session storage with hardware context simulation
-6. **Concurrent Sessions**: Up to 8 concurrent digest operations with automatic context switching
+6. **Concurrent Sessions**: Hardware-dependent concurrent digest operations with automatic context switching
 
 ## Usage Example
 
@@ -1432,7 +1445,11 @@ impl MyDigestDevice {
 let server = ServerImpl::new(MyDigestDevice::new());
 ```
 
-## Critical Findings
+---
+
+# Implementation Status and Development Notes
+
+## Critical Findings and Resolutions
 
 ### Trait Lifetime Incompatibility with Session-Based Operations - RESOLVED
 
