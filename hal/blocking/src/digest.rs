@@ -444,6 +444,24 @@ pub enum ErrorKind {
     NotInitialized,
 }
 
+impl core::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidInputLength => write!(f, "invalid input data length"),
+            Self::UnsupportedAlgorithm => write!(f, "unsupported hash algorithm"),
+            Self::MemoryAllocationFailure => write!(f, "memory allocation failed"),
+            Self::InitializationError => write!(f, "failed to initialize hash computation"),
+            Self::UpdateError => write!(f, "error updating hash computation"),
+            Self::FinalizationError => write!(f, "error finalizing hash computation"),
+            Self::Busy => write!(f, "hardware accelerator is busy"),
+            Self::HardwareFailure => write!(f, "hardware failure during hash computation"),
+            Self::InvalidOutputSize => write!(f, "invalid output size for hash function"),
+            Self::PermissionDenied => write!(f, "insufficient permissions to access hardware"),
+            Self::NotInitialized => write!(f, "hash computation context not initialized"),
+        }
+    }
+}
+
 /// Trait for digest operation errors.
 ///
 /// This trait provides a common interface for all error types that can occur
