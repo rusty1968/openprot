@@ -19,3 +19,5 @@ resolver = "2"
 
 [workspace.dependencies]
 zerocopy = { version = "0.8.25", features = ["derive"] }
+zeroize = { version = "1.7", features = ["derive"] }
+subtle = "2.5"
