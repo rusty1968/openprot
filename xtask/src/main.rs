@@ -31,6 +31,7 @@ fn try_main() -> Result<(), DynError> {
         Some("fmt") => fmt()?,
         Some("clean") => clean()?,
         Some("dist") => dist()?,
+        Some("deny") => cargo_deny()?,
         Some("docs") => docs::docs()?,
         Some("cargo-lock") => cargo_lock::cargo_lock()?,
         Some("precheckin") => precheckin::precheckin()?,
@@ -52,6 +53,7 @@ clippy          Run clippy lints
 fmt             Format code with rustfmt
 clean           Clean build artifacts
 dist            Build a distribution (release build)
+deny            Run cargo deny checks (licenses, advisories, bans)
 docs            Build documentation with mdbook
 cargo-lock      Manage Cargo.lock file
 precheckin      Run all pre-checkin validation checks
@@ -93,6 +95,39 @@ fn clippy() -> Result<(), DynError> {
     sh.change_dir(project_root());
 
     cmd!(sh, "cargo clippy -- -D warnings").run()?;
+
+    Ok(())
+}
+
+fn cargo_deny() -> Result<(), DynError> {
+    let sh = Shell::new()?;
+    sh.change_dir(project_root());
+
+    // Check if cargo-deny is installed, install if not
+    if cmd!(sh, "cargo deny --version").run().is_err() {
+        eprintln!("Installing cargo-deny...");
+        cmd!(sh, "cargo install cargo-deny --locked").run()?;
+    }
+
+    // Check if specific subcommand is passed
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 2 {
+        let subcommand = &args[2];
+        match subcommand.as_str() {
+            "licenses" => cmd!(sh, "cargo deny check licenses").run()?,
+            "advisories" => cmd!(sh, "cargo deny check advisories").run()?,
+            "bans" => cmd!(sh, "cargo deny check bans").run()?,
+            "sources" => cmd!(sh, "cargo deny check sources").run()?,
+            _ => {
+                eprintln!("Unknown deny subcommand: {}", subcommand);
+                eprintln!("Available: licenses, advisories, bans, sources");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Run all checks by default
+        cmd!(sh, "cargo deny check").run()?;
+    }
 
     Ok(())
 }
