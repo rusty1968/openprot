@@ -106,7 +106,7 @@ fn cargo_deny() -> Result<(), DynError> {
     // Check if specific subcommand is passed
     // NOTE: This is a development tool, not security-critical code
     #[allow(clippy::disallowed_methods)] // Allow env::args() for CLI parsing in dev tools
-    // nosemgrep: rust.lang.security.args.args
+    // ok: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 {
         if let Some(subcommand) = args.get(2) {
@@ -137,7 +137,7 @@ fn fmt() -> Result<(), DynError> {
     // Check if --check flag is passed
     // NOTE: This is a development tool, not security-critical code
     #[allow(clippy::disallowed_methods)] // Allow env::args() for CLI parsing in dev tools
-    // nosemgrep: rust.lang.security.args.args
+    // ok: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 && args.get(2).map(|s| s == "--check").unwrap_or(false) {
         cmd!(sh, "cargo fmt -- --check").run()?;
