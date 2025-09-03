@@ -9,6 +9,11 @@
 //! - **Scoped API**: Traditional lifetime-constrained contexts for simple use cases
 //! - **Owned API**: Move-based resource management for server applications
 
+// Allow security lints for mock/test code
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+#![allow(clippy::arithmetic_side_effects)]
+
 use openprot_hal_blocking::digest::{
     DigestAlgorithm, ErrorKind, ErrorType, Sha2_256, Sha2_384, Sha2_512,
 };

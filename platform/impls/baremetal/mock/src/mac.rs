@@ -5,6 +5,11 @@
 //! Provides a stub implementation of MAC operations that can be used
 //! for testing when real hardware acceleration is not available.
 
+// Allow security lints for mock/test code
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+#![allow(clippy::arithmetic_side_effects)]
+
 use openprot_hal_blocking::mac::{
     Error, ErrorKind, ErrorType, HmacSha2_256, HmacSha2_384, HmacSha2_512, MacAlgorithm,
     MacCtrlReset, MacInit, MacOp,
