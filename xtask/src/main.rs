@@ -113,11 +113,11 @@ fn cargo_deny() -> Result<(), DynError> {
                 "bans" => cmd!(sh, "cargo deny check bans").run()?,
                 "sources" => cmd!(sh, "cargo deny check sources").run()?,
                 _ => {
-                eprintln!("Unknown deny subcommand: {subcommand}");
-                eprintln!("Available: licenses, advisories, bans, sources");
-                std::process::exit(1);
+                    eprintln!("Unknown deny subcommand: {subcommand}");
+                    eprintln!("Available: licenses, advisories, bans, sources");
+                    std::process::exit(1);
+                }
             }
-        }
         }
     } else {
         // Run all checks by default

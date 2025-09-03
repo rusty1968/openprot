@@ -68,10 +68,7 @@ pub(crate) fn check() -> Result<(), DynError> {
 }
 
 fn remove_root(path: &Path, project_root: &Path) -> String {
-    let root = project_root
-        .to_str()
-        .unwrap_or_default()
-        .to_owned() + "/";
+    let root = project_root.to_str().unwrap_or_default().to_owned() + "/";
     let path = path.to_str().unwrap_or_default();
     path.strip_prefix(&root).unwrap_or(path).into()
 }
@@ -208,7 +205,8 @@ mod test {
                 Path::new("foo/bar.rs"),
                 "# Licensed under the Apache-2.0 license".as_bytes(),
                 &project_root,
-            ).is_ok(),
+            )
+            .is_ok(),
             "Expected license check to pass for shell comment"
         );
         assert!(
@@ -216,7 +214,8 @@ mod test {
                 Path::new("foo/bar.rs"),
                 "/*\n * Licensed under the Apache-2.0 license\n */".as_bytes(),
                 &project_root,
-            ).is_ok(),
+            )
+            .is_ok(),
             "Expected license check to pass for C-style comment"
         );
     }
@@ -236,11 +235,7 @@ mod test {
             "File \"foo/bar.rs\" doesn't contain \"Licensed under the Apache-2.0 license\" in the first 3 lines"
         );
 
-        let result = check_file_contents(
-            Path::new("bar/foo.sh"),
-            "".as_bytes(),
-            &project_root,
-        );
+        let result = check_file_contents(Path::new("bar/foo.sh"), "".as_bytes(), &project_root);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
