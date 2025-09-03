@@ -106,17 +106,18 @@ fn cargo_deny() -> Result<(), DynError> {
     // Check if specific subcommand is passed
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 {
-        let subcommand = &args[2];
-        match subcommand.as_str() {
-            "licenses" => cmd!(sh, "cargo deny check licenses").run()?,
-            "advisories" => cmd!(sh, "cargo deny check advisories").run()?,
-            "bans" => cmd!(sh, "cargo deny check bans").run()?,
-            "sources" => cmd!(sh, "cargo deny check sources").run()?,
-            _ => {
+        if let Some(subcommand) = args.get(2) {
+            match subcommand.as_str() {
+                "licenses" => cmd!(sh, "cargo deny check licenses").run()?,
+                "advisories" => cmd!(sh, "cargo deny check advisories").run()?,
+                "bans" => cmd!(sh, "cargo deny check bans").run()?,
+                "sources" => cmd!(sh, "cargo deny check sources").run()?,
+                _ => {
                 eprintln!("Unknown deny subcommand: {subcommand}");
                 eprintln!("Available: licenses, advisories, bans, sources");
                 std::process::exit(1);
             }
+        }
         }
     } else {
         // Run all checks by default
@@ -132,7 +133,7 @@ fn fmt() -> Result<(), DynError> {
 
     // Check if --check flag is passed
     let args: Vec<String> = env::args().collect();
-    if args.len() > 2 && args[2] == "--check" {
+    if args.len() > 2 && args.get(2).map(|s| s == "--check").unwrap_or(false) {
         cmd!(sh, "cargo fmt -- --check").run()?;
     } else {
         cmd!(sh, "cargo fmt").run()?;
@@ -182,8 +183,8 @@ fn project_root() -> PathBuf {
     Path::new(&env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(1)
-        .unwrap()
-        .to_path_buf()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn dist_dir() -> PathBuf {

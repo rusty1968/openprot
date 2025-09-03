@@ -68,7 +68,10 @@ pub(crate) fn check() -> Result<(), DynError> {
 }
 
 fn remove_root(path: &Path, project_root: &Path) -> String {
-    let root = project_root.to_str().unwrap().to_owned() + "/";
+    let root = project_root
+        .to_str()
+        .unwrap_or_default()
+        .to_owned() + "/";
     let path = path.to_str().unwrap_or_default();
     path.strip_prefix(&root).unwrap_or(path).into()
 }
@@ -200,42 +203,47 @@ mod test {
     #[test]
     fn test_check_success() {
         let project_root = PathBuf::from("/tmp");
-        check_file_contents(
-            Path::new("foo/bar.rs"),
-            "# Licensed under the Apache-2.0 license".as_bytes(),
-            &project_root,
-        )
-        .unwrap();
-        check_file_contents(
-            Path::new("foo/bar.rs"),
-            "/*\n * Licensed under the Apache-2.0 license\n */".as_bytes(),
-            &project_root,
-        )
-        .unwrap();
+        assert!(
+            check_file_contents(
+                Path::new("foo/bar.rs"),
+                "# Licensed under the Apache-2.0 license".as_bytes(),
+                &project_root,
+            ).is_ok(),
+            "Expected license check to pass for shell comment"
+        );
+        assert!(
+            check_file_contents(
+                Path::new("foo/bar.rs"),
+                "/*\n * Licensed under the Apache-2.0 license\n */".as_bytes(),
+                &project_root,
+            ).is_ok(),
+            "Expected license check to pass for C-style comment"
+        );
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_check_failures() {
         let project_root = PathBuf::from("/tmp");
+        let result = check_file_contents(
+            Path::new("foo/bar.rs"),
+            "int main()\n {\n // foobar\n".as_bytes(),
+            &project_root,
+        );
+        assert!(result.is_err());
         assert_eq!(
-            check_file_contents(
-                Path::new("foo/bar.rs"),
-                "int main()\n {\n // foobar\n".as_bytes(),
-                &project_root,
-            )
-            .unwrap_err()
-            .to_string(),
+            result.unwrap_err().to_string(),
             "File \"foo/bar.rs\" doesn't contain \"Licensed under the Apache-2.0 license\" in the first 3 lines"
         );
 
+        let result = check_file_contents(
+            Path::new("bar/foo.sh"),
+            "".as_bytes(),
+            &project_root,
+        );
+        assert!(result.is_err());
         assert_eq!(
-            check_file_contents(
-                Path::new("bar/foo.sh"),
-                "".as_bytes(),
-                &project_root,
-            )
-            .unwrap_err()
-            .to_string(),
+            result.unwrap_err().to_string(),
             "File \"bar/foo.sh\" doesn't contain \"Licensed under the Apache-2.0 license\" in the first 3 lines"
         );
     }
