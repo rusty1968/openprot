@@ -16,12 +16,13 @@ type DynError = Box<dyn std::error::Error>;
 
 fn main() {
     if let Err(e) = try_main() {
-        eprintln!("{}", e);
+        eprintln!("{e}");
         std::process::exit(-1);
     }
 }
 
 fn try_main() -> Result<(), DynError> {
+    // nosemgrep: rust.lang.security.args.args
     let task = env::args().nth(1);
     match task.as_deref() {
         Some("build") => build()?,
@@ -31,6 +32,7 @@ fn try_main() -> Result<(), DynError> {
         Some("fmt") => fmt()?,
         Some("clean") => clean()?,
         Some("dist") => dist()?,
+        Some("deny") => cargo_deny()?,
         Some("docs") => docs::docs()?,
         Some("cargo-lock") => cargo_lock::cargo_lock()?,
         Some("precheckin") => precheckin::precheckin()?,
@@ -52,6 +54,7 @@ clippy          Run clippy lints
 fmt             Format code with rustfmt
 clean           Clean build artifacts
 dist            Build a distribution (release build)
+deny            Run cargo deny checks (licenses, advisories, bans)
 docs            Build documentation with mdbook
 cargo-lock      Manage Cargo.lock file
 precheckin      Run all pre-checkin validation checks
@@ -97,13 +100,47 @@ fn clippy() -> Result<(), DynError> {
     Ok(())
 }
 
+fn cargo_deny() -> Result<(), DynError> {
+    let sh = Shell::new()?;
+    sh.change_dir(project_root());
+
+    // Check if specific subcommand is passed
+    // NOTE: This is a development tool, not security-critical code
+    #[allow(clippy::disallowed_methods)] // Allow env::args() for CLI parsing in dev tools
+    // nosemgrep: rust.lang.security.args.args
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 2 {
+        if let Some(subcommand) = args.get(2) {
+            match subcommand.as_str() {
+                "licenses" => cmd!(sh, "cargo deny check licenses").run()?,
+                "advisories" => cmd!(sh, "cargo deny check advisories").run()?,
+                "bans" => cmd!(sh, "cargo deny check bans").run()?,
+                "sources" => cmd!(sh, "cargo deny check sources").run()?,
+                _ => {
+                    eprintln!("Unknown deny subcommand: {subcommand}");
+                    eprintln!("Available: licenses, advisories, bans, sources");
+                    std::process::exit(1);
+                }
+            }
+        }
+    } else {
+        // Run all checks by default
+        cmd!(sh, "cargo deny check").run()?;
+    }
+
+    Ok(())
+}
+
 fn fmt() -> Result<(), DynError> {
     let sh = Shell::new()?;
     sh.change_dir(project_root());
 
     // Check if --check flag is passed
+    // NOTE: This is a development tool, not security-critical code
+    #[allow(clippy::disallowed_methods)] // Allow env::args() for CLI parsing in dev tools
+    // nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
-    if args.len() > 2 && args[2] == "--check" {
+    if args.len() > 2 && args.get(2).map(|s| s == "--check").unwrap_or(false) {
         cmd!(sh, "cargo fmt -- --check").run()?;
     } else {
         cmd!(sh, "cargo fmt").run()?;
@@ -153,8 +190,8 @@ fn project_root() -> PathBuf {
     Path::new(&env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(1)
-        .unwrap()
-        .to_path_buf()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn dist_dir() -> PathBuf {

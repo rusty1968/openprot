@@ -10,3 +10,5 @@ license = "Apache-2.0"
 [dependencies]
 embedded-hal = "1.0"
 zerocopy = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }

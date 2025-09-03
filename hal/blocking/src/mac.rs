@@ -2,9 +2,87 @@
 
 use crate::digest::Digest;
 use core::fmt::Debug;
+use subtle::ConstantTimeEq;
 use zerocopy::IntoBytes;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Common error kinds for MAC operations (reused from digest operations).
+/// Secure wrapper for MAC keys that automatically zeros on drop.
+///
+/// This wrapper ensures that cryptographic keys are securely erased from memory
+/// when no longer needed, preventing key material from remaining in memory.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct SecureKey<const N: usize> {
+    /// The actual key bytes, zeroized on drop
+    bytes: [u8; N],
+}
+
+impl<const N: usize> SecureKey<N> {
+    /// Create a new secure key from a byte array.
+    ///
+    /// # Security
+    /// The input array will be zeroized after copying to prevent key material
+    /// from remaining in multiple memory locations.
+    pub fn new(mut key_bytes: [u8; N]) -> Self {
+        let key = Self { bytes: key_bytes };
+        key_bytes.zeroize();
+        key
+    }
+
+    /// Create a new secure key from a byte slice.
+    ///
+    /// # Returns
+    /// - `Ok(SecureKey)` if the slice length matches the key size
+    /// - `Err(ErrorKind::InvalidInputLength)` if the slice is the wrong size
+    pub fn from_slice(key_slice: &[u8]) -> Result<Self, ErrorKind> {
+        if key_slice.len() != N {
+            return Err(ErrorKind::InvalidInputLength);
+        }
+
+        let mut key_bytes = [0u8; N];
+        key_bytes.copy_from_slice(key_slice);
+        Ok(Self::new(key_bytes))
+    }
+
+    /// Get a reference to the key bytes.
+    ///
+    /// # Security
+    /// Use this sparingly and ensure the returned reference doesn't outlive
+    /// the SecureKey instance.
+    pub fn as_bytes(&self) -> &[u8; N] {
+        &self.bytes
+    }
+
+    /// Verify a MAC tag using constant-time comparison.
+    ///
+    /// # Security
+    /// This function uses constant-time comparison to prevent timing attacks
+    /// that could reveal information about the expected MAC value.
+    pub fn verify_mac(&self, computed_mac: &[u8], expected_mac: &[u8]) -> bool {
+        if computed_mac.len() != expected_mac.len() {
+            return false;
+        }
+        computed_mac.ct_eq(expected_mac).into()
+    }
+}
+
+impl<const N: usize> Debug for SecureKey<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SecureKey")
+            .field("len", &N)
+            .field("bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<const N: usize> PartialEq for SecureKey<N> {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes.ct_eq(&other.bytes).into()
+    }
+}
+
+impl<const N: usize> Eq for SecureKey<N> {}
+
+/// Common error kinds for MAC operations.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -30,6 +108,8 @@ pub enum ErrorKind {
     PermissionDenied,
     /// The MAC computation context has not been initialized.
     NotInitialized,
+    /// MAC verification failed - computed MAC does not match expected value.
+    VerificationFailed,
 }
 
 /// Trait for converting implementation-specific errors into a common error kind.
@@ -116,6 +196,31 @@ pub trait MacOp: ErrorType {
     fn finalize(self) -> Result<Self::Output, Self::Error>;
 }
 
+/// Utility function for constant-time MAC verification.
+///
+/// This function provides a secure way to verify MAC values using constant-time
+/// comparison to prevent timing attacks.
+///
+/// # Parameters
+///
+/// - `computed_mac`: The computed MAC bytes
+/// - `expected_mac`: The expected MAC bytes to verify against
+///
+/// # Returns
+///
+/// `true` if the MACs match, `false` otherwise
+///
+/// # Security
+///
+/// This function uses constant-time comparison to prevent timing attacks
+/// that could reveal information about the expected MAC value.
+pub fn verify_mac_constant_time(computed_mac: &[u8], expected_mac: &[u8]) -> bool {
+    if computed_mac.len() != expected_mac.len() {
+        return false;
+    }
+    computed_mac.ct_eq(expected_mac).into()
+}
+
 // =============================================================================
 // MAC Algorithm Marker Types
 // =============================================================================
@@ -133,7 +238,7 @@ pub struct HmacSha2_256;
 impl MacAlgorithm for HmacSha2_256 {
     const OUTPUT_BITS: usize = 256;
     type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
-    type Key = [u8; 32];
+    type Key = SecureKey<32>;
 }
 
 /// HMAC-SHA-384 MAC algorithm marker type.
@@ -149,7 +254,7 @@ pub struct HmacSha2_384;
 impl MacAlgorithm for HmacSha2_384 {
     const OUTPUT_BITS: usize = 384;
     type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
-    type Key = [u8; 48];
+    type Key = SecureKey<48>;
 }
 
 /// HMAC-SHA-512 MAC algorithm marker type.
@@ -165,5 +270,5 @@ pub struct HmacSha2_512;
 impl MacAlgorithm for HmacSha2_512 {
     const OUTPUT_BITS: usize = 512;
     type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
-    type Key = [u8; 64];
+    type Key = SecureKey<64>;
 }

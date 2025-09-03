@@ -1,7 +1,7 @@
 // Licensed under the Apache-2.0 license
 
 pub fn greet(name: &str) -> String {
-    format!("Hello, {}!", name)
+    format!("Hello, {name}!")
 }
 
 #[cfg(test)]

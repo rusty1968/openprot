@@ -5,6 +5,11 @@
 //! Provides a stub implementation of MAC operations that can be used
 //! for testing when real hardware acceleration is not available.
 
+// Allow security lints for mock/test code
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+#![allow(clippy::arithmetic_side_effects)]
+
 use openprot_hal_blocking::mac::{
     Error, ErrorKind, ErrorType, HmacSha2_256, HmacSha2_384, HmacSha2_512, MacAlgorithm,
     MacCtrlReset, MacInit, MacOp,
@@ -89,13 +94,8 @@ macro_rules! impl_hmac {
                 init_params: $algo,
                 key: &<$algo as MacAlgorithm>::Key,
             ) -> Result<Self::OpContext<'a>, Self::Error> {
-                // In a real implementation, we'd configure the hardware here
-                let key_bytes: &[u8] = unsafe {
-                    core::slice::from_raw_parts(
-                        key.as_ptr() as *const u8,
-                        core::mem::size_of_val(key),
-                    )
-                };
+                // Use the secure key's as_bytes method
+                let key_bytes = key.as_bytes();
                 Ok(Self::OpContext {
                     hw: self,
                     _alg: init_params,
@@ -159,8 +159,11 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_mock() {
+        use openprot_hal_blocking::mac::SecureKey;
+
         let mut device = MockMacDevice::new();
-        let key = [0u8; 32];
+        let key_bytes = [0u8; 32];
+        let key = SecureKey::new(key_bytes);
 
         let mut mac_ctx = device
             .init(HmacSha2_256, &key)
@@ -175,11 +178,15 @@ mod tests {
 
     #[test]
     fn test_hmac_different_keys_different_output() {
+        use openprot_hal_blocking::mac::SecureKey;
+
         let mut device1 = MockMacDevice::new();
         let mut device2 = MockMacDevice::new();
 
-        let key1 = [0u8; 32];
-        let key2 = [1u8; 32];
+        let key1_bytes = [0u8; 32];
+        let key2_bytes = [1u8; 32];
+        let key1 = SecureKey::new(key1_bytes);
+        let key2 = SecureKey::new(key2_bytes);
 
         let mut mac_ctx1 = device1
             .init(HmacSha2_256, &key1)
