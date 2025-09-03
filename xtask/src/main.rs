@@ -22,6 +22,7 @@ fn main() {
 }
 
 fn try_main() -> Result<(), DynError> {
+    // nosemgrep: rust.lang.security.args.args
     let task = env::args().nth(1);
     match task.as_deref() {
         Some("build") => build()?,
@@ -106,7 +107,7 @@ fn cargo_deny() -> Result<(), DynError> {
     // Check if specific subcommand is passed
     // NOTE: This is a development tool, not security-critical code
     #[allow(clippy::disallowed_methods)] // Allow env::args() for CLI parsing in dev tools
-    // ok: rust.lang.security.args.args
+    // nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 {
         if let Some(subcommand) = args.get(2) {
@@ -137,7 +138,7 @@ fn fmt() -> Result<(), DynError> {
     // Check if --check flag is passed
     // NOTE: This is a development tool, not security-critical code
     #[allow(clippy::disallowed_methods)] // Allow env::args() for CLI parsing in dev tools
-    // ok: rust.lang.security.args.args
+    // nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 && args.get(2).map(|s| s == "--check").unwrap_or(false) {
         cmd!(sh, "cargo fmt -- --check").run()?;

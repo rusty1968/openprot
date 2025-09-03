@@ -1,0 +1,10 @@
+# Licensed under the Apache-2.0 license
+
+# Ignore xtask development tools - not production code
+xtask/
+
+# Ignore build artifacts
+target/
+
+# Ignore external dependencies and examples
+external/
