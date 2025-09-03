@@ -103,12 +103,6 @@ fn cargo_deny() -> Result<(), DynError> {
     let sh = Shell::new()?;
     sh.change_dir(project_root());
 
-    // Check if cargo-deny is installed, install if not
-    if cmd!(sh, "cargo deny --version").run().is_err() {
-        eprintln!("Installing cargo-deny...");
-        cmd!(sh, "cargo install cargo-deny --locked").run()?;
-    }
-
     // Check if specific subcommand is passed
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 {
