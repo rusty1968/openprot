@@ -16,8 +16,12 @@
 
 /// Cryptographic digest operations (hashing)
 pub mod digest;
+/// ECDSA digital signature operations
+pub mod ecdsa;
 /// Gpio port module
 pub mod gpio_port;
+/// I2C target device operations
+pub mod i2c_target;
 /// Message Authentication Code (MAC) traits and implementations
 pub mod mac;
 /// Reset and clocking traits for OpenPRoT HAL
