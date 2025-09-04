@@ -2,8 +2,8 @@
 
 //! # ECDSA Digital Signature Operations
 //!
-//! This module provides a comprehensive, type-safe abstraction for Elliptic Curve Digital 
-//! Signature Algorithm (ECDSA) operations. The design follows security best practices and 
+//! This module provides a comprehensive, type-safe abstraction for Elliptic Curve Digital
+//! Signature Algorithm (ECDSA) operations. The design follows security best practices and
 //! provides a generic interface that can work with any elliptic curve.
 //!
 //! ## Features
@@ -19,7 +19,7 @@
 //! The module follows a trait-based design with the following key components:
 //!
 //! ```text
-//! Curve (Abstract EC Parameters) 
+//! Curve (Abstract EC Parameters)
 //! ├── DigestType: DigestAlgorithm
 //! └── Scalar: IntoBytes + FromBytes
 //!
@@ -46,40 +46,31 @@
 //! ```rust,no_run
 //! # use openprot_hal_blocking::ecdsa::*;
 //! # use rand_core::{RngCore, CryptoRng};
-//! # 
-//! # // Mock types for example
-//! # struct MockCurve;
-//! # impl Curve for MockCurve {
-//! #     type DigestType = ();
-//! #     type Scalar = [u8; 32];
-//! # }
-//! # struct MockKeyGen;
-//! # impl ErrorType for MockKeyGen { type Error = core::convert::Infallible; }
-//! # impl EcdsaKeyGen<MockCurve> for MockKeyGen {
-//! #     type PrivateKey = MockPrivateKey;
-//! #     type PublicKey = MockPublicKey;
-//! #     fn generate_keypair<R>(&mut self, rng: &mut R) -> Result<(Self::PrivateKey, Self::PublicKey), Self::Error> 
-//! #     where R: RngCore + CryptoRng { unimplemented!() }
-//! # }
 //! #
-//! // Key generation
-//! let mut key_generator = MockKeyGen;
-//! let mut rng = /* your crypto RNG */;
-//! let (private_key, public_key) = key_generator.generate_keypair(&mut rng)?;
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // This example shows the basic pattern for ECDSA operations
+//! // Actual implementations would provide concrete curve types
 //!
-//! // Validate keys before use
-//! private_key.validate()?;
-//! public_key.validate()?;
+//! // Key generation pattern:
+//! // let mut key_generator = YourKeyGenImpl::new();
+//! // let mut rng = YourCryptoRng::new();
+//! // let (private_key, public_key) = key_generator.generate_keypair(&mut rng)?;
 //!
-//! // Sign a message
-//! let mut signer = /* your signer implementation */;
-//! let message_digest = /* hash of your message */;
-//! let signature = signer.sign(&private_key, &message_digest, &mut rng)?;
+//! // Key validation pattern:
+//! // private_key.validate()?;
+//! // public_key.validate()?;
 //!
-//! // Verify signature
-//! let mut verifier = /* your verifier implementation */;
-//! let is_valid = verifier.verify(&public_key, &message_digest, &signature)?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! // Signing pattern:
+//! // let mut signer = YourSignerImpl::new();
+//! // let message_digest = your_hash_function(message);
+//! // let signature = signer.sign(&private_key, &message_digest, &mut rng)?;
+//!
+//! // Verification pattern:
+//! // let mut verifier = YourVerifierImpl::new();
+//! // let is_valid = verifier.verify(&public_key, &message_digest, &signature)?;
+//!
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Security Considerations
@@ -167,7 +158,7 @@ pub trait ErrorType {
 /// different implementations. The enum is `#[non_exhaustive]` to allow for future
 /// additions without breaking API compatibility.
 ///
-/// Implementations are free to define more specific or additional error types. 
+/// Implementations are free to define more specific or additional error types.
 /// However, by providing a mapping to these common errors through the [`Error::kind`]
 /// method, generic code can still react to them appropriately.
 ///
@@ -181,22 +172,23 @@ pub trait ErrorType {
 ///
 /// ```rust
 /// # use openprot_hal_blocking::ecdsa::ErrorKind;
+/// # let error_kind = ErrorKind::Busy;
 /// match error_kind {
 ///     ErrorKind::InvalidSignature => {
 ///         // Handle signature verification failure
-///         log::warn!("Signature verification failed");
+///         eprintln!("Signature verification failed");
 ///     }
 ///     ErrorKind::WeakKey => {
 ///         // Handle weak key detection
-///         log::error!("Weak key detected - regenerate keypair");
+///         eprintln!("Weak key detected - regenerate keypair");
 ///     }
 ///     ErrorKind::Busy => {
 ///         // Handle resource busy - retry later
-///         tokio::time::sleep(Duration::from_millis(10)).await;
+///         eprintln!("ECDSA hardware is busy, retry later");
 ///     }
 ///     _ => {
 ///         // Handle other errors
-///         log::error!("ECDSA operation failed: {:?}", error_kind);
+///         eprintln!("ECDSA operation failed: {:?}", error_kind);
 ///     }
 /// }
 /// ```
@@ -208,7 +200,7 @@ pub enum ErrorKind {
     /// This indicates that the hardware or implementation is currently
     /// busy with another operation. The caller should retry later.
     Busy,
-    
+
     /// The signature is invalid
     ///
     /// Returned when signature verification fails. This could indicate:
@@ -217,21 +209,21 @@ pub enum ErrorKind {
     /// - The message was modified after signing
     /// - The signature components (r, s) are invalid
     InvalidSignature,
-    
+
     /// Key generation failed
     ///
     /// Indicates that the key generation process could not complete successfully.
     /// This might be due to insufficient entropy, hardware failures, or other
     /// random number generation issues.
     KeyGenError,
-    
+
     /// Signing operation failed
     ///
     /// The signing process encountered an error. This is distinct from key
     /// generation errors and typically indicates issues during the actual
     /// signing computation.
     SigningError,
-    
+
     /// Invalid key format or encoding
     ///
     /// The provided key data could not be parsed or is in an unsupported format.
@@ -240,14 +232,14 @@ pub enum ErrorKind {
     /// - Invalid encoding (DER, PEM, etc.)
     /// - Malformed key structure
     InvalidKeyFormat,
-    
+
     /// Point is not on the curve
     ///
     /// The provided coordinates do not represent a valid point on the specified
     /// elliptic curve. This is a critical security check that prevents attacks
     /// using invalid curve points.
     InvalidPoint,
-    
+
     /// Unsupported curve or algorithm
     ///
     /// The requested elliptic curve or algorithm parameters are not supported
@@ -256,7 +248,7 @@ pub enum ErrorKind {
     /// - Disabled curve due to security concerns
     /// - Incompatible curve parameters
     UnsupportedCurve,
-    
+
     /// Weak key detected (e.g., zero key, key equal to curve order)
     ///
     /// The key fails cryptographic strength requirements. This includes:
@@ -265,7 +257,7 @@ pub enum ErrorKind {
     /// - Public keys at the identity point
     /// - Other mathematically weak keys
     WeakKey,
-    
+
     /// Other unspecified error
     ///
     /// A catch-all for errors that don't fit into the specific categories above.
@@ -546,7 +538,7 @@ pub trait PublicKey<C: Curve>: IntoBytes + FromBytes {
 ///     type PrivateKey = MyPrivateKey;
 ///     type PublicKey = MyPublicKey;
 ///
-///     fn generate_keypair<R>(&mut self, rng: &mut R) 
+///     fn generate_keypair<R>(&mut self, rng: &mut R)
 ///         -> Result<(Self::PrivateKey, Self::PublicKey), Self::Error>
 ///     where
 ///         R: RngCore + CryptoRng,
@@ -872,4 +864,3 @@ impl Curve for BrainpoolP512r1 {
     type DigestType = crate::digest::Sha2_512;
     type Scalar = [u8; 64];
 }
-
