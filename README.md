@@ -1,10 +1,13 @@
-# OpenProt
+# OpenPRoT
 
+## Technical Charter
 
+The OpenPRoT Technical Charter can be found at
+[<u>https://github.com/OpenPRoT/.github/blob/main/GOVERNANCE.md</u>](https://github.com/OpenPRoT/.github/blob/main/GOVERNANCE.md)
 
 ## Getting Started
 
-This project uses [cargo-xtask](https://github.com/matklad/cargo-xtask) for build automation and project management.
+This project uses [<u>cargo-xtask</u>](https://github.com/matklad/cargo-xtask) for build automation and project management.
 
 ### Available Tasks
 
