@@ -151,5 +151,5 @@ This partitioned approach represents the optimal balance between performance, se
 
 **SPDM (Security Protocol and Data Model)** - A protocol for device authentication, measurement, and secure communication in platform management scenarios.
 
-![MCTP Architecture Diagram](../images/snapshot.png)
+![MCTP Architecture Diagram](../images/mctp-i2c-domains.png)
 
