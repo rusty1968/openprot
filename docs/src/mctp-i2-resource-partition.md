@@ -15,6 +15,7 @@ The partitioned approach addresses critical reliability and performance concerns
 
 - **Blast Radius Limitation**: I2C failures in one domain (e.g., a stuck sensor) cannot impact the other domain's operations
 - **Blocking Prevention**: Eliminates scenarios where security-critical MCTP tasks could be blocked waiting for I2C server tasks that are servicing slow or unresponsive devices in the general-purpose domain
+- **IPC Complexity Reduction**: A unified I2C server handling both master operations (sensors, PMBus) and slave instances (MCTP endpoints) would require complex IPC protocols to manage bidirectional communication and varying response patterns
 - **Fault Isolation**: Hardware or software failures in sensor management cannot compromise MCTP security protocols
 
 ### **External Components**
@@ -112,12 +113,12 @@ The partitioned approach addresses critical reliability and performance concerns
 
 #### **Implementation Considerations**
 - **Additional tasks**: More tasks required compared to unified I2C server approach, but each with simpler, focused responsibilities
-- **Resource allocation**: Need to carefully assign I2C controllers to appropriate domains during system design
+- **Resource allocation**: I2C controllers need to be assigned to appropriate domains during system design (straightforward with abundant controllers in server SoCs and Hubris's static resource allocation at compile time)
 - **Separate codepaths**: MCTP and general-purpose I2C operations use different patterns, but this enables domain-specific optimizations
 
 #### **Reduced Flexibility**
-- **Static partitioning**: I2C controllers dedicated to MCTP domain cannot be repurposed for other uses
-- **Hardware dependencies**: Architecture requires sufficient I2C controllers to support domain separation
+- **Static partitioning**: I2C controllers dedicated to MCTP domain cannot be repurposed for other uses (though this is typically not a concern given the abundance of I2C controllers in server-class SoCs)
+- **Hardware dependencies**: Architecture requires sufficient I2C controllers to support domain separation (server-class SoCs for datacenter and management applications typically provide 8-16 I2C controllers, making this requirement easily satisfied)
 
 #### **Implementation Challenges**
 - **Task priorities**: Must carefully configure task priorities to ensure MCTP Router Task can preempt when necessary
@@ -125,7 +126,6 @@ The partitioned approach addresses critical reliability and performance concerns
 - **Testing complexity**: Need separate test strategies for both direct ownership and server-based patterns
 
 #### **When This Architecture May Not Be Suitable**
-- **Resource-constrained systems**: Platforms with limited I2C controllers may not support domain separation (note: server-class SoCs typically provide 8+ I2C controllers, making partitioning highly feasible)
 - **Simple deployments**: Systems with minimal I2C traffic may not benefit from the added complexity
 - **Highly dynamic requirements**: Applications needing frequent reassignment of I2C resources between functions
 
