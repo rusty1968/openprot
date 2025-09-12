@@ -440,3 +440,305 @@ The I2C server focuses purely on hardware abstraction and transport, while proto
 **GPIO (General Purpose Input/Output)** - Configurable pins on microcontrollers that can be used for various functions including I2C.
 
 **Alternate Function** - A special mode where GPIO pins are controlled by peripheral hardware (like I2C) instead of software.
+
+## Protocol Flow Examples
+
+The following sequence diagrams demonstrate how the extended IPC operations enable PLDM and MCTP communication through the I2C server.
+
+### Flow 1: PLDM Driver Initialization
+
+```mermaid
+sequenceDiagram
+    participant PLDM as PLDM Driver Task
+    participant MCTP as MCTP Driver Task  
+    participant I2C as I2C Server Task
+    participant HW as MCU I2C Hardware
+
+    Note over PLDM,HW: System Initialization
+
+    PLDM->>MCTP: mctp_api::initialize(our_addr=0x1D)
+    activate MCTP
+    
+    MCTP->>I2C: drv_i2c_api::configure_slave_address(0x1D)
+    activate I2C
+    I2C->>HW: Configure slave address 0x1D in hardware
+    HW-->>I2C: Hardware configured
+    I2C-->>MCTP: ResponseCode::Success
+    deactivate I2C
+    
+    MCTP->>I2C: drv_i2c_api::enable_slave_receive()
+    activate I2C
+    I2C->>HW: Enable slave interrupts
+    HW-->>I2C: Slave mode active
+    I2C-->>MCTP: ResponseCode::Success
+    deactivate I2C
+    
+    MCTP-->>PLDM: MCTP transport ready
+    deactivate MCTP
+    
+    Note over PLDM,HW: Ready to send/receive PLDM messages
+```
+
+### Flow 2: Outgoing PLDM Message (PLDM → Remote Device)
+
+```mermaid
+sequenceDiagram
+    participant PLDM as PLDM Driver Task
+    participant MCTP as MCTP Driver Task
+    participant I2C as I2C Server Task
+    participant HW as MCU I2C Hardware
+    participant Remote as Remote Device (0x20)
+
+    Note over PLDM,Remote: PLDM Driver sends message to remote device
+
+    PLDM->>MCTP: mctp_api::send_message(target=0x20, pldm_data)
+    activate MCTP
+    
+    Note over MCTP: Format MCTP-over-I2C message:<br/>[0x0F, len, 0x1D, mctp_header, pldm_data]
+    
+    MCTP->>I2C: drv_i2c_api::write(addr=0x20, mctp_message)
+    activate I2C
+    
+    Note over I2C: Arbitrate for bus mastership
+    I2C->>HW: Become I2C master, send to 0x20
+    HW->>Remote: START + 0x20 + 0x0F + len + 0x1D + data + STOP
+    Remote-->>HW: ACK (message received)
+    HW-->>I2C: Transaction complete
+    I2C-->>MCTP: ResponseCode::Success
+    deactivate I2C
+    
+    MCTP-->>PLDM: Message sent successfully
+    deactivate MCTP
+    
+    Note over I2C,HW: Return to slave mode, listen for responses
+```
+
+### Flow 3: Incoming PLDM Response (Remote Device → PLDM)
+
+```mermaid
+sequenceDiagram
+    participant Remote as Remote Device (0x20)
+    participant HW as MCU I2C Hardware
+    participant I2C as I2C Server Task
+    participant MCTP as MCTP Driver Task
+    participant PLDM as PLDM Driver Task
+
+    Note over Remote,PLDM: Remote device sends PLDM response
+
+    Remote->>HW: START + 0x1D + 0x0F + len + 0x20 + response_data + STOP
+    HW->>I2C: Slave interrupt (address 0x1D matched)
+    activate I2C
+    
+    Note over I2C: Store message in slave buffer:<br/>source=0x20, data=[0x0F, len, 0x20, response_data]
+    
+    I2C->>HW: Send ACK, complete transaction
+    HW-->>Remote: Transaction acknowledged
+    deactivate I2C
+    
+    Note over MCTP: Periodic polling for incoming messages
+    MCTP->>I2C: drv_i2c_api::check_slave_buffer()
+    activate I2C
+    I2C-->>MCTP: SlaveMessage{source: 0x20, data: [0x0F, len, 0x20, response]}
+    deactivate I2C
+    
+    Note over MCTP: Parse MCTP format, extract PLDM data
+    MCTP->>PLDM: mctp_api::incoming_message(source=0x20, pldm_response)
+    activate PLDM
+    
+    Note over PLDM: Process PLDM response
+    deactivate PLDM
+```
+
+### Flow 4: Multiple Slave Addresses (Service Separation)
+
+```mermaid
+sequenceDiagram
+    participant PLDM as PLDM Driver Task
+    participant MCTP as MCTP Driver Task
+    participant I2C as I2C Server Task
+    participant HW as MCU I2C Hardware
+
+    Note over PLDM,HW: Configure multiple service addresses
+
+    PLDM->>MCTP: mctp_api::add_service_address(0x1D, "PLDM")
+    MCTP->>I2C: drv_i2c_api::configure_slave_address(0x1D)
+    I2C->>HW: Configure address 0x1D
+    
+    PLDM->>MCTP: mctp_api::add_service_address(0x1F, "Vendor")
+    MCTP->>I2C: drv_i2c_api::configure_slave_address(0x1F)
+    I2C->>HW: Configure address 0x1F
+    
+    Note over HW: Hardware now responds to both 0x1D and 0x1F
+    
+    Note over PLDM,HW: Messages can arrive at either address
+    
+    HW->>I2C: Slave interrupt (0x1D - PLDM message)
+    Note over I2C: Buffer message tagged with target address 0x1D
+    
+    HW->>I2C: Slave interrupt (0x1F - Vendor message)  
+    Note over I2C: Buffer message tagged with target address 0x1F
+    
+    MCTP->>I2C: drv_i2c_api::check_slave_buffer()
+    I2C-->>MCTP: Multiple messages with different target addresses
+    
+    Note over MCTP: Route messages based on target address:<br/>0x1D → PLDM service<br/>0x1F → Vendor service
+```
+
+### Flow 5: Error Handling and Bus Recovery
+
+```mermaid
+sequenceDiagram
+    participant MCTP as MCTP Driver Task
+    participant I2C as I2C Server Task
+    participant HW as MCU I2C Hardware
+    participant Remote as Remote Device
+
+    Note over MCTP,Remote: Error scenario - bus lockup during transmission
+
+    MCTP->>I2C: drv_i2c_api::write(addr=0x20, data)
+    activate I2C
+    I2C->>HW: Start I2C transaction
+    HW->>Remote: START + address...
+    
+    Note over Remote: Device malfunctions, holds SDA low
+    Remote-->>HW: SDA stuck low (NACK/timeout)
+    HW-->>I2C: Bus error/timeout
+    
+    Note over I2C: Detect bus lockup condition
+    I2C->>HW: Switch pins to GPIO mode
+    I2C->>HW: Generate clock pulses to clear bus
+    I2C->>HW: Send STOP condition
+    I2C->>HW: Restore I2C alternate function
+    
+    I2C-->>MCTP: ResponseCode::BusLocked (bus recovered)
+    deactivate I2C
+    
+    Note over MCTP: Retry or report error to PLDM layer
+    
+    Note over I2C,HW: Slave mode still active, can receive messages
+```
+
+## Key Protocol Insights
+
+1. **Asynchronous Operation**: Outgoing (master) and incoming (slave) operations are independent
+2. **Bus Arbitration**: Hardware automatically handles master/slave transitions
+3. **Message Buffering**: I2C server buffers slave messages until clients retrieve them
+4. **Address Multiplexing**: Single controller can serve multiple protocol endpoints
+5. **Error Isolation**: Bus errors in master mode don't affect slave reception
+6. **Protocol Layering**: MCTP handles transport details, PLDM focuses on message content
+
+These flows demonstrate how the IPC extensions enable sophisticated management protocols while maintaining clean separation between transport (I2C) and protocol (MCTP/PLDM) layers.
+
+## MCTP Response Handling: Polling vs. Alternatives
+
+The protocol flows above show the MCTP driver using **polling** to check for incoming slave messages. This design choice has important trade-offs:
+
+### **Polling Approach (Current Design)**
+
+**Pros:**
+- **Simple Implementation**: No complex notification routing between I2C server and MCTP driver
+- **Predictable Latency**: Polling interval determines maximum response delay
+- **Robust**: Won't lose messages due to notification delivery failures
+- **Stateless**: I2C server doesn't need to track which tasks want notifications
+- **Low IPC Overhead**: Single `check_slave_buffer()` call retrieves multiple messages
+- **Flexible Timing**: MCTP driver can adjust polling frequency based on expected traffic
+
+**Cons:**
+- **Increased CPU Usage**: Periodic polling even when no messages are pending
+- **Response Latency**: Messages wait until next poll cycle (up to poll interval)
+- **Power Consumption**: Regular wakeups prevent deep sleep modes
+- **Scalability**: Multiple MCTP endpoints polling independently waste cycles
+
+### **Notification-Based Alternative**
+
+**How it would work:**
+```rust
+// I2C server sends notification when slave message arrives
+sys_post_notification(mctp_task_id, SLAVE_MESSAGE_NOTIFICATION);
+
+// MCTP driver waits for notifications
+let notification = sys_recv_notification(SLAVE_MESSAGE_NOTIFICATION);
+if notification & SLAVE_MESSAGE_NOTIFICATION != 0 {
+    let messages = i2c_device.check_slave_buffer()?;
+    // Process messages immediately
+}
+```
+
+**Pros:**
+- **Lower Latency**: Immediate notification when messages arrive
+- **Lower CPU Usage**: No unnecessary polling cycles
+- **Better Power Efficiency**: CPU can sleep until messages arrive
+- **Event-Driven**: More responsive to bursty traffic patterns
+
+**Cons:**
+- **Complex Setup**: I2C server needs to track notification targets
+- **IPC Coupling**: Tighter coupling between I2C server and MCTP driver
+- **Notification Loss**: If notification delivery fails, messages might be missed
+- **Resource Usage**: Each MCTP endpoint needs dedicated notification bits
+- **Race Conditions**: Messages could arrive between notification and buffer check
+
+### **Hybrid Approach**
+
+**Combining notifications with polling backup:**
+```rust
+// Use notifications for immediate response, polling as backup
+loop {
+    // Wait for notification OR timeout
+    let notification = sys_recv_notification_timeout(
+        SLAVE_MESSAGE_NOTIFICATION,
+        POLL_TIMEOUT_MS
+    );
+    
+    // Check for messages regardless of notification reason
+    let messages = i2c_device.check_slave_buffer()?;
+    if !messages.is_empty() {
+        process_messages(messages);
+    }
+}
+```
+
+**Benefits:**
+- **Low latency** when notifications work properly
+- **Guaranteed delivery** via polling backup
+- **Robust** against notification failures
+
+**Drawbacks:**
+- **Complexity**: Implements both approaches, getting downsides of each
+- **Still polls**: Doesn't eliminate polling overhead, just reduces frequency
+- **Resource usage**: Needs notification infrastructure AND timing logic
+- **Debugging complexity**: Two potential failure modes to diagnose
+- **Questionable value**: For low-frequency management protocols, pure polling is often simpler and sufficient
+
+**Reality check**: The hybrid approach adds significant complexity while only marginally improving the pure polling approach for typical MCTP use cases. It's often better to pick one approach and optimize it well rather than trying to combine both.
+
+### **Recommendation for MCTP**
+
+For **MCTP/PLDM protocols**, **polling is likely the better choice** because:
+
+1. **Management Traffic Patterns**: MCTP is typically used for infrequent management operations, not high-throughput data transfer
+2. **Acceptable Latency**: Management operations can tolerate 10-100ms response delays
+3. **Simplicity**: Reduces system complexity and potential failure modes
+4. **Predictability**: Easier to reason about timing and debug issues
+5. **Resource Constraints**: Management protocols need to be lightweight
+
+**Typical MCTP Polling Strategy:**
+```rust
+const MCTP_POLL_INTERVAL_MS: u32 = 50; // 50ms polling = max 50ms latency
+
+loop {
+    // Handle outgoing PLDM requests
+    handle_pldm_requests();
+    
+    // Check for incoming MCTP responses
+    if let Ok(messages) = i2c_device.get_slave_messages(&mut buffer) {
+        for msg in messages {
+            route_mctp_message(msg);
+        }
+    }
+    
+    // Sleep until next poll cycle
+    sys_sleep(MCTP_POLL_INTERVAL_MS);
+}
+```
+
+For **high-frequency protocols** or **real-time requirements**, the notification-based approach would be more appropriate.
