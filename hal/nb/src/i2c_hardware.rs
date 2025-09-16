@@ -8,16 +8,17 @@
 //! These traits complement the blocking traits in `openprot-hal-blocking` by providing
 //! non-blocking alternatives suitable for async code, main loops, and interrupt handlers.
 
+use embedded_hal::i2c::{AddressMode, SevenBitAddress};
 use openprot_hal_blocking::i2c_hardware::slave::{
     I2cSEvent, I2cSlaveBuffer, I2cSlaveCore, I2cSlaveInterrupts,
 };
 
-/// Non-blocking slave event handling (polling pattern)
+/// Non-blocking slave event handling (async/polling pattern)
 ///
 /// This trait provides non-blocking event operations suitable for async code,
 /// main loops, or interrupt-driven architectures. All operations return
 /// immediately without blocking the caller.
-pub trait I2cSlaveEventPolling: I2cSlaveInterrupts {
+pub trait I2cSlaveEventPolling<A: AddressMode = SevenBitAddress>: I2cSlaveInterrupts<A> {
     /// Check for pending slave events without blocking
     ///
     /// Returns the next available slave event if one is pending, or None
@@ -44,7 +45,13 @@ pub trait I2cSlaveEventPolling: I2cSlaveInterrupts {
 /// This trait represents a full non-blocking slave implementation that supports
 /// all non-blocking slave operations. Perfect for interrupt-driven or
 /// polling-based implementations that cannot afford to block.
-pub trait I2cSlaveNonBlocking: I2cSlaveCore + I2cSlaveBuffer + I2cSlaveEventPolling {}
+pub trait I2cSlaveNonBlocking<A: AddressMode = SevenBitAddress>:
+    I2cSlaveCore<A> + I2cSlaveBuffer<A> + I2cSlaveEventPolling<A>
+{
+}
 
 /// Blanket implementation: any type implementing core + buffer + polling events gets non-blocking slave
-impl<T> I2cSlaveNonBlocking for T where T: I2cSlaveCore + I2cSlaveBuffer + I2cSlaveEventPolling {}
+impl<T, A: AddressMode> I2cSlaveNonBlocking<A> for T where
+    T: I2cSlaveCore<A> + I2cSlaveBuffer<A> + I2cSlaveEventPolling<A>
+{
+}
