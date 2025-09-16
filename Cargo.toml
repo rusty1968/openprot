@@ -24,5 +24,5 @@ edition = "2021"
 
 [workspace.dependencies]
 zerocopy = { version = "0.8.27", features = ["derive"] }
-zeroize = { version = "1.7", features = ["derive"] }
-subtle = "2.5"
+zeroize = { version = "1.7", default-features = false, features = ["derive"] }
+subtle = { version = "2.5", default-features = false }
