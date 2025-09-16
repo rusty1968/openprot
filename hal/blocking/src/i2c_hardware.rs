@@ -32,7 +32,7 @@
 //!
 //! For non-blocking slave operations, see `openprot-hal-nb::i2c_hardware`.
 
-use embedded_hal::i2c::{Operation, SevenBitAddress};
+use embedded_hal::i2c::{AddressMode, Operation, SevenBitAddress};
 
 /// Core I2C hardware interface providing basic operations
 ///
@@ -45,11 +45,38 @@ pub trait I2cHardwareCore {
     /// Hardware-specific configuration type for I2C initialization and setup
     type Config;
 
+    /// I2C speed configuration type
+    type I2cSpeed;
+
+    /// Timing configuration type
+    type TimingConfig;
+
     /// Initialize the I2C hardware with the given configuration
     fn init(&mut self, config: &mut Self::Config);
 
     /// Configure timing parameters (clock speed, setup/hold times)
-    fn configure_timing(&mut self, config: &mut Self::Config);
+    ///
+    /// Takes timing parameters as input and returns the calculated clock source frequency.
+    /// This provides type safety by making clear what is read vs. what is computed/returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `speed` - Target I2C bus speed (Standard, Fast, FastPlus, etc.)
+    /// * `timing` - Timing configuration parameters for setup/hold times
+    ///
+    /// # Returns
+    ///
+    /// Returns the actual calculated clock source frequency in Hz.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested timing cannot be achieved with the
+    /// available hardware clock sources or if parameters are invalid.
+    fn configure_timing(
+        &mut self,
+        speed: Self::I2cSpeed,
+        timing: &Self::TimingConfig,
+    ) -> Result<u32, Self::Error>;
 
     /// Enable hardware interrupts with the specified mask
     fn enable_interrupts(&mut self, mask: u32);
@@ -68,25 +95,20 @@ pub trait I2cHardwareCore {
 ///
 /// This trait extends the core interface with master-specific functionality.
 /// Implementations provide the actual I2C master protocol operations.
-pub trait I2cMaster: I2cHardwareCore {
+pub trait I2cMaster<A: AddressMode = SevenBitAddress>: I2cHardwareCore {
     /// Write data to a slave device at the given address
-    fn write(&mut self, addr: SevenBitAddress, bytes: &[u8]) -> Result<(), Self::Error>;
+    fn write(&mut self, addr: A, bytes: &[u8]) -> Result<(), Self::Error>;
 
     /// Read data from a slave device at the given address
-    fn read(&mut self, addr: SevenBitAddress, buffer: &mut [u8]) -> Result<(), Self::Error>;
+    fn read(&mut self, addr: A, buffer: &mut [u8]) -> Result<(), Self::Error>;
 
     /// Combined write-then-read operation with restart condition
-    fn write_read(
-        &mut self,
-        addr: SevenBitAddress,
-        bytes: &[u8],
-        buffer: &mut [u8],
-    ) -> Result<(), Self::Error>;
+    fn write_read(&mut self, addr: A, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error>;
 
     /// Execute a sequence of I2C operations as a single atomic transaction
     fn transaction_slice(
         &mut self,
-        addr: SevenBitAddress,
+        addr: A,
         ops_slice: &mut [Operation<'_>],
     ) -> Result<(), Self::Error>;
 }
@@ -137,9 +159,9 @@ pub mod slave {
     /// This trait provides the fundamental slave operations that all slave
     /// implementations need: setting slave address and enabling/disabling slave mode.
     /// This is the minimal trait for any I2C slave implementation.
-    pub trait I2cSlaveCore: super::I2cHardwareCore {
+    pub trait I2cSlaveCore<A: AddressMode = SevenBitAddress>: super::I2cHardwareCore {
         /// Configure the slave address for this I2C controller
-        fn configure_slave_address(&mut self, addr: SevenBitAddress) -> Result<(), Self::Error>;
+        fn configure_slave_address(&mut self, addr: A) -> Result<(), Self::Error>;
 
         /// Enable slave mode operation
         fn enable_slave_mode(&mut self) -> Result<(), Self::Error>;
@@ -151,7 +173,7 @@ pub mod slave {
         fn is_slave_mode_enabled(&self) -> bool;
 
         /// Get the currently configured slave address
-        fn get_slave_address(&self) -> Option<SevenBitAddress>;
+        fn slave_address(&self) -> Option<A>;
     }
 
     /// Slave buffer operations - data transfer with master
@@ -160,7 +182,7 @@ pub mod slave {
     /// Separate from core to allow different buffer management strategies.
     /// Implementations can choose different buffering approaches (ring buffer,
     /// simple array, DMA, etc.) while maintaining the same interface.
-    pub trait I2cSlaveBuffer: I2cSlaveCore {
+    pub trait I2cSlaveBuffer<A: AddressMode = SevenBitAddress>: I2cSlaveCore<A> {
         /// Read received data from the slave buffer
         ///
         /// Returns the number of bytes actually read. The buffer is filled
@@ -191,20 +213,20 @@ pub mod slave {
         ///
         /// Returns the number of bytes that can be written to the transmit
         /// buffer without overflowing. Useful for flow control.
-        fn get_tx_buffer_space(&self) -> Result<usize, Self::Error>;
+        fn tx_buffer_space(&self) -> Result<usize, Self::Error>;
 
         /// Get number of bytes available in receive buffer
         ///
         /// Returns the current count of bytes waiting to be read from
         /// the receive buffer.
-        fn get_rx_buffer_count(&self) -> Result<usize, Self::Error>;
+        fn rx_buffer_count(&self) -> Result<usize, Self::Error>;
     }
 
     /// Slave interrupt and status management
     ///
     /// Common interrupt and status operations shared by both async and sync event patterns.
     /// This provides the foundation for event-driven slave operations.
-    pub trait I2cSlaveInterrupts: I2cSlaveCore {
+    pub trait I2cSlaveInterrupts<A: AddressMode = SevenBitAddress>: I2cSlaveCore<A> {
         /// Enable slave-specific hardware interrupts
         ///
         /// Configures the hardware to generate interrupts for slave events.
@@ -219,18 +241,18 @@ pub mod slave {
         /// that the interrupt has been handled.
         fn clear_slave_interrupts(&mut self, mask: u32);
 
-        /// Get current slave hardware status
+        /// Current slave hardware status
         ///
         /// Returns comprehensive status information about the slave controller
         /// including enabled state, address, buffer counts, and error conditions.
-        fn get_slave_status(&self) -> Result<SlaveStatus, Self::Error>;
+        fn slave_status(&self) -> Result<SlaveStatus, Self::Error>;
 
-        /// Get the last slave event that occurred
+        /// Last slave event that occurred
         ///
         /// Returns the most recent slave event, useful for debugging
         /// and state tracking. May return None if no events have occurred
         /// since reset or if the hardware doesn't track this information.
-        fn get_last_slave_event(&self) -> Option<I2cSEvent>;
+        fn last_slave_event(&self) -> Option<I2cSEvent>;
     }
 
     /// Blocking slave event handling (sync pattern)
@@ -238,7 +260,7 @@ pub mod slave {
     /// This trait provides blocking operations suitable for synchronous code
     /// that can afford to wait for events. Operations may block the calling
     /// thread until the requested condition is met or timeout occurs.
-    pub trait I2cSlaveEventSync: I2cSlaveInterrupts {
+    pub trait I2cSlaveEventSync<A: AddressMode = SevenBitAddress>: I2cSlaveInterrupts<A> {
         /// Wait for a specific slave event with timeout
         ///
         /// Blocks until the specified event occurs or the timeout expires.
@@ -272,29 +294,41 @@ pub mod slave {
     /// This trait represents a basic slave implementation that combines
     /// core setup and buffer operations. It's suitable for most simple
     /// slave use cases without requiring event handling.
-    pub trait I2cSlaveBasic: I2cSlaveCore + I2cSlaveBuffer {}
+    pub trait I2cSlaveBasic<A: AddressMode = SevenBitAddress>:
+        I2cSlaveCore<A> + I2cSlaveBuffer<A>
+    {
+    }
 
     /// Blanket implementation: any type implementing core + buffer gets basic slave
-    impl<T> I2cSlaveBasic for T where T: I2cSlaveCore + I2cSlaveBuffer {}
+    impl<T, A: AddressMode> I2cSlaveBasic<A> for T where T: I2cSlaveCore<A> + I2cSlaveBuffer<A> {}
 
     /// Complete sync slave implementation
     ///
     /// This trait represents a full sync slave implementation that supports
     /// all blocking slave operations. Perfect for traditional blocking
     /// implementations that can afford to wait.
-    pub trait I2cSlaveSync: I2cSlaveCore + I2cSlaveBuffer + I2cSlaveEventSync {}
+    pub trait I2cSlaveSync<A: AddressMode = SevenBitAddress>:
+        I2cSlaveCore<A> + I2cSlaveBuffer<A> + I2cSlaveEventSync<A>
+    {
+    }
 
     /// Blanket implementation: any type implementing core + buffer + sync events gets sync slave
-    impl<T> I2cSlaveSync for T where T: I2cSlaveCore + I2cSlaveBuffer + I2cSlaveEventSync {}
+    impl<T, A: AddressMode> I2cSlaveSync<A> for T where
+        T: I2cSlaveCore<A> + I2cSlaveBuffer<A> + I2cSlaveEventSync<A>
+    {
+    }
 
     /// Combined trait for controllers supporting both master and slave modes
     ///
     /// This is a convenience trait for hardware that supports both modes.
     /// Implementations get this automatically via blanket implementation.
-    pub trait I2cMasterSlave: super::I2cMaster + I2cSlaveSync {}
+    pub trait I2cMasterSlave<A: AddressMode = SevenBitAddress>:
+        super::I2cMaster<A> + I2cSlaveSync<A>
+    {
+    }
 
     /// Blanket implementation: any type implementing both master and sync slave gets this trait
-    impl<T: super::I2cMaster + I2cSlaveSync> I2cMasterSlave for T {}
+    impl<T, A: AddressMode> I2cMasterSlave<A> for T where T: super::I2cMaster<A> + I2cSlaveSync<A> {}
 }
 
 /// Re-export slave traits for convenience
