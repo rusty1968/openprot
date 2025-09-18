@@ -52,7 +52,7 @@ pub trait I2cHardwareCore {
     type TimingConfig;
 
     /// Initialize the I2C hardware with the given configuration
-    fn init(&mut self, config: &mut Self::Config);
+    fn init(&mut self, config: &mut Self::Config) -> Result<(), Self::Error>;
 
     /// Configure timing parameters (clock speed, setup/hold times)
     ///
