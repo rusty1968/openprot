@@ -433,9 +433,10 @@ impl I2cHardwareCore for MockI2cHardware {
     /// mock.init(&mut config);
     /// assert!(mock.is_initialized());
     /// ```
-    fn init(&mut self, config: &mut Self::Config) {
+    fn init(&mut self, config: &mut Self::Config) -> Result<(), Self::Error> {
         self.config = *config;
         self.initialized = true;
+        Ok(())
     }
 
     /// Configure I2C timing parameters
