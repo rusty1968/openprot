@@ -32,6 +32,7 @@
 //!
 //! For non-blocking slave operations, see `openprot-hal-nb::i2c_hardware`.
 
+use crate::system_control::{ClockControl, ErrorType};
 use embedded_hal::i2c::{AddressMode, Operation, SevenBitAddress};
 
 /// Core I2C hardware interface providing basic operations
@@ -53,6 +54,215 @@ pub trait I2cHardwareCore {
 
     /// Initialize the I2C hardware with the given configuration
     fn init(&mut self, config: &mut Self::Config) -> Result<(), Self::Error>;
+
+    /// Initialize the I2C hardware with external clock control configuration
+    ///
+    /// This method provides a flexible way to initialize I2C hardware while allowing
+    /// external clock configuration through a closure. The closure receives a mutable
+    /// reference to a clock controller implementing the `ClockControl` trait, enabling
+    /// platform-specific clock setup operations.
+    ///
+    /// This approach supports dependency injection patterns while maintaining zero-cost
+    /// abstractions through compile-time monomorphization of the closure.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Mutable reference to I2C-specific configuration parameters
+    /// * `clock_setup` - Closure that configures the clock controller for I2C operation.
+    ///   The closure receives a mutable reference to the clock controller and should
+    ///   perform all necessary clock configuration operations (enable, set frequency, etc.)
+    ///
+    /// # Generic Parameters
+    ///
+    /// * `F` - Closure type that takes a mutable clock controller reference and returns
+    ///   a Result. The closure is called exactly once during initialization.
+    /// * `C` - Clock controller type that implements the `ClockControl` trait, providing
+    ///   methods for enabling, disabling, and configuring peripheral clocks.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - I2C hardware initialization completed successfully
+    /// * `Err(Self::Error)` - Initialization failed due to either I2C hardware error
+    ///   or clock configuration error (automatically converted via `From<<C as ErrorType>::Error>`)
+    ///
+    /// # Errors
+    ///
+    /// This method can return errors from two sources:
+    /// - **Clock configuration errors**: Any error returned by the clock controller
+    ///   operations within the closure will be automatically converted to `Self::Error`
+    /// - **I2C hardware errors**: Errors from I2C-specific initialization operations.
+    /// # Examples
+    ///
+    /// ## Basic Clock Setup
+    /// ```text
+    /// use openprot_hal_blocking::i2c_hardware::I2cHardwareCore;
+    /// use openprot_hal_blocking::system_control::ClockControl;
+    ///
+    /// fn initialize_i2c<T: I2cHardwareCore>(
+    ///     mut i2c: T,
+    ///     mut clock_controller: impl ClockControl
+    /// ) -> Result<(), T::Error> {
+    ///     let mut config = create_i2c_config();
+    ///     
+    ///     i2c.init_with_clock_control(&mut config, |clock| {
+    ///         // Enable I2C peripheral clock
+    ///         clock.enable(&ClockId::I2c1)?;
+    ///         
+    ///         // Set desired frequency (400kHz)
+    ///         clock.set_frequency(&ClockId::I2c1, 400_000)?;
+    ///         
+    ///         Ok(())
+    ///     })?;
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    fn init_with_clock_control<F, C>(
+        &mut self,
+        config: &mut Self::Config,
+        clock_setup: F,
+    ) -> Result<(), Self::Error>
+    where
+        F: FnOnce(&mut C) -> Result<(), <C as ErrorType>::Error>,
+        C: ClockControl,
+        Self::Error: From<<C as ErrorType>::Error>; // Let the I2C error type handle conversion
+
+    /// Configure I2C timing parameters with external clock control
+    ///
+    /// This method provides flexible timing configuration by accepting a closure
+    /// that can interact with a clock controller implementing the `ClockControl` trait.
+    /// This enables runtime clock adjustments, frequency validation, and platform-specific
+    /// clock tree configuration during timing setup.
+    ///
+    /// Unlike the basic `configure_timing` method, this version allows the timing
+    /// configuration process to interact with system-level clock management,
+    /// enabling more sophisticated timing calculations and hardware optimization.
+    ///
+    /// # Arguments
+    ///
+    /// * `speed` - Target I2C bus speed (e.g., 100_000 for 100kHz, 400_000 for 400kHz)
+    /// * `timing` - Platform-specific timing configuration parameters
+    /// * `clock_config` - Closure that configures the clock controller for optimal I2C timing.
+    ///   The closure receives a mutable reference to the clock controller and should
+    ///   perform any necessary clock adjustments for the specified speed.
+    ///
+    /// # Generic Parameters
+    ///
+    /// * `F` - Closure type that takes a mutable clock controller reference and returns
+    ///   a Result with the actual configured frequency. Called once during timing setup.
+    /// * `C` - Clock controller type implementing the `ClockControl` trait, providing
+    ///   methods for clock frequency management and configuration.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(actual_frequency)` - Timing configuration successful, returns the actual
+    ///   frequency achieved after clock and timing adjustments
+    /// * `Err(Self::Error)` - Configuration failed due to either I2C timing error
+    ///   or clock configuration error (automatically converted via `From<C::Error>`)
+    ///
+    /// # Errors
+    ///
+    /// This method can return errors from multiple sources:
+    /// - **Clock configuration errors**: Any error from clock controller operations
+    ///   within the closure will be automatically converted to `Self::Error`
+    /// - **Timing calculation errors**: Errors from I2C-specific timing calculations
+    /// - **Hardware constraint errors**: When requested speed cannot be achieved
+    ///   with current clock configuration
+    /// - **Validation errors**: When the configured timing parameters are invalid
+    ///
+    /// # Examples
+    ///
+    /// ## Basic Clock-Aware Timing Configuration
+    /// ```text
+    /// use openprot_hal_blocking::i2c_hardware::I2cHardwareCore;
+    /// use openprot_hal_blocking::system_control::ClockControl;
+    ///
+    /// fn configure_i2c_timing<T: I2cHardwareCore>(
+    ///     mut i2c: T,
+    ///     mut clock_controller: impl ClockControl
+    /// ) -> Result<u32, T::Error> {
+    ///     let timing_config = create_timing_config();
+    ///     
+    ///     let actual_freq = i2c.configure_timing_with_clock_control(
+    ///         400_000, // 400kHz target
+    ///         &timing_config,
+    ///         |clock| {
+    ///             // Optimize clock for I2C timing
+    ///             clock.enable(&ClockId::I2c1)?;
+    ///             
+    ///             // Set optimal source frequency for I2C timing calculations
+    ///             clock.set_frequency(&ClockId::I2c1, 48_000_000)?; // 48MHz source
+    ///             
+    ///             // Return the actual source frequency for timing calculations
+    ///             clock.get_frequency(&ClockId::I2c1)
+    ///         }
+    ///     )?;
+    ///     
+    ///     Ok(actual_freq)
+    /// }
+    /// ```
+    ///
+    /// ## STM32 Platform with Precise Timing
+    /// ```text
+    /// # use openprot_hal_blocking::i2c_hardware::I2cHardwareCore;
+    /// # use openprot_hal_blocking::system_control::ClockControl;
+    ///
+    /// fn stm32_precise_timing_config(
+    ///     mut i2c: Stm32I2c
+    /// ) -> Result<u32, Stm32I2cError> {
+    ///     let mut stm32_clock = Stm32ClockController::new();
+    ///     
+    ///     let timing_config = Stm32TimingConfig {
+    ///         prescaler: 1,
+    ///         scl_delay: 4,
+    ///         sda_delay: 2,
+    ///         scl_high_period: 15,
+    ///         scl_low_period: 19,
+    ///     };
+    ///     
+    ///     let actual_freq = i2c.configure_timing_with_clock_control(
+    ///         400_000,
+    ///         &timing_config,
+    ///         |clock: &mut Stm32ClockController| {
+    ///             // Configure I2C clock source for precise timing
+    ///             let clock_config = Stm32ClockConfig {
+    ///                 source: Stm32ClockSource::Sysclk, // Use SYSCLK for precision
+    ///                 prescaler: 1,
+    ///             };
+    ///             clock.configure(&Stm32ClockId::I2c1, clock_config)?;
+    ///             
+    ///             // Set the optimal frequency for timing calculations
+    ///             clock.set_frequency(&Stm32ClockId::I2c1, 48_000_000)?;
+    ///             
+    ///             // Verify the frequency is stable
+    ///             let freq = clock.get_frequency(&Stm32ClockId::I2c1)?;
+    ///             if freq < 45_000_000 || freq > 50_000_000 {
+    ///                 return Err(Stm32ClockError::FrequencyOutOfRange);
+    ///             }
+    ///             
+    ///             Ok(freq)
+    ///         }
+    ///     )?;
+    ///     
+    ///     Ok(actual_freq)
+    /// }
+    /// ```
+    ///
+    /// # Design Notes
+    ///
+    /// The integration with `ClockControl` allows the I2C timing configuration to be
+    /// aware of and coordinate with system-level clock management, resulting in more
+    /// accurate timing and better hardware utilization.
+    fn configure_timing_with_clock_control<F, C>(
+        &mut self,
+        speed: Self::I2cSpeed,
+        timing: &Self::TimingConfig,
+        clock_config: F,
+    ) -> Result<u32, Self::Error>
+    where
+        F: FnOnce(&mut C) -> Result<u64, <C as ErrorType>::Error>,
+        C: ClockControl,
+        Self::Error: From<<C as ErrorType>::Error>;
 
     /// Configure timing parameters (clock speed, setup/hold times)
     ///
