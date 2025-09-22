@@ -34,3 +34,6 @@ pub use embedded_hal::delay::DelayNs;
 pub use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};
 pub use embedded_hal::i2c::{I2c, SevenBitAddress, TenBitAddress};
 pub use embedded_hal::spi::{SpiBus, SpiDevice};
+
+// Re-export system control traits
+pub use system_control::{ClockControl, ResetControl, SystemControl};
