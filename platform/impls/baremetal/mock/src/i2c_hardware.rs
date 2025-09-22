@@ -598,15 +598,15 @@ impl I2cHardwareCore for MockI2cHardware {
     /// The closure is called with a mutable reference to the provided clock controller,
     /// enabling validation of clock configuration calls and simulation of various
     /// clock-related scenarios.
-    fn init_with_clock_control<F, C>(
+    fn init_with_system_control<F, S>(
         &mut self,
         config: &mut Self::Config,
-        _clock_setup: F,
+        _system_setup: F,
     ) -> Result<(), Self::Error>
     where
-        F: FnOnce(&mut C) -> Result<(), <C as system_control::ErrorType>::Error>,
-        C: system_control::ClockControl,
-        Self::Error: From<<C as system_control::ErrorType>::Error>,
+        F: FnOnce(&mut S) -> Result<(), <S as system_control::ErrorType>::Error>,
+        S: system_control::SystemControl,
+        Self::Error: From<<S as system_control::ErrorType>::Error>,
     {
         // First check if the mock is configured to succeed
         self.check_success()?;
@@ -615,9 +615,9 @@ impl I2cHardwareCore for MockI2cHardware {
         self.config = *config;
         self.initialized = true;
 
-        // The mock doesn't actually call the closure since we don't have a real clock controller
-        // In a real test, you would provide a mock clock controller and call:
-        // clock_setup(&mut mock_clock_controller)?;
+        // The mock doesn't actually call the closure since we don't have a real system controller
+        // In a real test, you would provide a mock system controller and call:
+        // system_setup(&mut mock_system_controller)?;
 
         Ok(())
     }
@@ -660,16 +660,16 @@ impl I2cHardwareCore for MockI2cHardware {
     ///
     /// assert!(result.is_ok());
     /// ```
-    fn configure_timing_with_clock_control<F, C>(
+    fn configure_timing_with_system_control<F, S>(
         &mut self,
         speed: Self::I2cSpeed,
         _timing: &Self::TimingConfig,
-        _clock_config: F,
+        _system_config: F,
     ) -> Result<u32, Self::Error>
     where
-        F: FnOnce(&mut C) -> Result<u64, <C as system_control::ErrorType>::Error>,
-        C: system_control::ClockControl,
-        Self::Error: From<<C as system_control::ErrorType>::Error>,
+        F: FnOnce(&mut S) -> Result<u64, <S as system_control::ErrorType>::Error>,
+        S: system_control::SystemControl,
+        Self::Error: From<<S as system_control::ErrorType>::Error>,
     {
         // Check if the mock is configured to succeed
         self.check_success()?;
@@ -677,9 +677,9 @@ impl I2cHardwareCore for MockI2cHardware {
         // Update the mock's frequency setting
         self.config.frequency = speed;
 
-        // The mock doesn't actually call the closure since we don't have a real clock controller
-        // In a real test, you would provide a mock clock controller and call:
-        // let _clock_freq = clock_config(&mut mock_clock_controller)?;
+        // The mock doesn't actually call the closure since we don't have a real system controller
+        // In a real test, you would provide a mock system controller and call:
+        // let _system_freq = system_config(&mut mock_system_controller)?;
 
         // Return the requested speed as the "actual" frequency for the mock
         Ok(speed)
