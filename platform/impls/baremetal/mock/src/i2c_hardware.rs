@@ -95,6 +95,37 @@
 //! }
 //! ```
 //!
+//! ## SystemControl Integration
+//!
+//! ```text
+//! use openprot_platform_mock::i2c_hardware::MockI2cHardwareWithSystem;
+//! use openprot_platform_mock::system_control::{MockSystemControl, MockClockId, MockResetId};
+//! use openprot_hal_blocking::i2c_hardware::{I2cHardwareCore, I2cMaster};
+//! use openprot_hal_blocking::system_control::SystemControl;
+//!
+//! // Create mock system controller
+//! let system_control = MockSystemControl::new();
+//! let mut i2c_with_system = MockI2cHardwareWithSystem::new(system_control, MockClockId::I2c1, MockResetId::I2c1);
+//!
+//! // Initialize with system control integration
+//! let mut config = MockI2cConfig::default();
+//! match i2c_with_system.init(&mut config) {
+//!     Ok(()) => {
+//!         // System control automatically enabled I2C clock and released reset
+//!     },
+//!     Err(_) => return,
+//! }
+//!
+//! // Configure timing with automatic clock source management
+//! match i2c_with_system.configure_timing(400_000, &()) {
+//!     Ok(actual_freq) => {
+//!         // System controller configured optimal clock source frequency
+//!         // I2C timing registers configured based on actual frequency
+//!     },
+//!     Err(_) => return,
+//! }
+//! ```
+//!
 //! ## Non-blocking Event Handling
 //!
 //! ```text
@@ -134,7 +165,6 @@
 
 use embedded_hal::i2c::{Operation, SevenBitAddress};
 use openprot_hal_blocking::i2c_hardware::{I2cHardwareCore, I2cMaster};
-use openprot_hal_blocking::system_control;
 
 /// Mock error type for I2C operations
 ///
@@ -591,99 +621,6 @@ impl I2cHardwareCore for MockI2cHardware {
     fn recover_bus(&mut self) -> Result<(), Self::Error> {
         self.check_success()
     }
-
-    /// Initialize the I2C hardware with external clock control configuration
-    ///
-    /// Mock implementation that allows testing of clock control integration patterns.
-    /// The closure is called with a mutable reference to the provided clock controller,
-    /// enabling validation of clock configuration calls and simulation of various
-    /// clock-related scenarios.
-    fn init_with_system_control<F, S>(
-        &mut self,
-        config: &mut Self::Config,
-        _system_setup: F,
-    ) -> Result<(), Self::Error>
-    where
-        F: FnOnce(&mut S) -> Result<(), <S as system_control::ErrorType>::Error>,
-        S: system_control::SystemControl,
-        Self::Error: From<<S as system_control::ErrorType>::Error>,
-    {
-        // First check if the mock is configured to succeed
-        self.check_success()?;
-
-        // Store the original config
-        self.config = *config;
-        self.initialized = true;
-
-        // The mock doesn't actually call the closure since we don't have a real system controller
-        // In a real test, you would provide a mock system controller and call:
-        // system_setup(&mut mock_system_controller)?;
-
-        Ok(())
-    }
-
-    /// Configure I2C timing parameters with external clock control
-    ///
-    /// Mock implementation that simulates timing configuration with clock control integration.
-    /// Useful for testing clock-timing coordination patterns and validating that timing
-    /// calculations work correctly with different clock configurations.
-    ///
-    /// # Arguments
-    ///
-    /// * `speed` - Target I2C bus speed in Hz
-    /// * `timing` - Mock timing configuration (stored but not used in calculations)
-    /// * `clock_config` - Closure for clock configuration that returns the actual clock frequency
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(frequency)` - Returns the target speed as the "actual" frequency
-    /// * `Err(MockI2cError::Bus)` - Configuration failed (if mock is configured to fail)
-    ///
-    /// # Examples
-    ///
-    /// ```text
-    /// use openprot_platform_mock::i2c_hardware::MockI2cHardware;
-    /// use openprot_hal_blocking::i2c_hardware::I2cHardwareCore;
-    ///
-    /// let mut mock = MockI2cHardware::new();
-    /// let timing_config = ();
-    ///
-    /// let result = mock.configure_timing_with_clock_control(
-    ///     400_000,
-    ///     &timing_config,
-    ///     |clock| {
-    ///         // Mock clock configuration
-    ///         clock.set_frequency(&ClockId::I2c1, 48_000_000)?;
-    ///         clock.get_frequency(&ClockId::I2c1)
-    ///     }
-    /// );
-    ///
-    /// assert!(result.is_ok());
-    /// ```
-    fn configure_timing_with_system_control<F, S>(
-        &mut self,
-        speed: Self::I2cSpeed,
-        _timing: &Self::TimingConfig,
-        _system_config: F,
-    ) -> Result<u32, Self::Error>
-    where
-        F: FnOnce(&mut S) -> Result<u64, <S as system_control::ErrorType>::Error>,
-        S: system_control::SystemControl,
-        Self::Error: From<<S as system_control::ErrorType>::Error>,
-    {
-        // Check if the mock is configured to succeed
-        self.check_success()?;
-
-        // Update the mock's frequency setting
-        self.config.frequency = speed;
-
-        // The mock doesn't actually call the closure since we don't have a real system controller
-        // In a real test, you would provide a mock system controller and call:
-        // let _system_freq = system_config(&mut mock_system_controller)?;
-
-        // Return the requested speed as the "actual" frequency for the mock
-        Ok(speed)
-    }
 }
 
 impl I2cMaster<SevenBitAddress> for MockI2cHardware {
@@ -872,7 +809,7 @@ impl openprot_hal_blocking::i2c_hardware::slave::I2cSlaveInterrupts<SevenBitAddr
     }
 }
 
-// Non-blocking trait implementations for testing
+// Non-blocking trait implementations
 impl MockI2cHardware {
     /// Inject data into the slave receive buffer for testing
     ///
@@ -994,34 +931,353 @@ impl MockI2cHardware {
     }
 }
 
+/// I2C hardware implementation with external SystemControl integration
+///
+/// This implementation demonstrates how to integrate external system control
+/// dependencies into I2C hardware initialization and timing configuration.
+/// It combines the basic MockI2cHardware functionality with SystemControl
+/// operations for realistic hardware abstraction patterns.
+///
+/// # Type Parameters
+///
+/// * `S` - SystemControl implementation (clock and reset control)
+///
+/// # Examples
+///
+/// ```text
+/// use openprot_platform_mock::i2c_hardware::MockI2cHardwareWithSystem;
+/// use openprot_platform_mock::system_control::{MockSystemControl, MockClockId, MockResetId};
+///
+/// let system_control = MockSystemControl::new();
+/// let mut i2c = MockI2cHardwareWithSystem::new(
+///     system_control,
+///     MockClockId::I2c1,
+///     MockResetId::I2c1
+/// );
+///
+/// let mut config = MockI2cConfig::default();
+/// i2c.init(&mut config).unwrap();
+/// ```
+pub struct MockI2cHardwareWithSystem<S> {
+    /// Underlying I2C hardware mock
+    base_hardware: MockI2cHardware,
+    /// External system control for clock and reset management
+    system_control: S,
+    /// Clock identifier for this I2C instance
+    clock_id: crate::system_control::MockClockId,
+    /// Reset identifier for this I2C instance
+    reset_id: crate::system_control::MockResetId,
+}
+
+impl<S> MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    /// Create a new I2C hardware instance with system control integration
+    ///
+    /// # Parameters
+    ///
+    /// * `system_control` - System control implementation for clock and reset management
+    /// * `clock_id` - Clock identifier for this I2C peripheral
+    /// * `reset_id` - Reset identifier for this I2C peripheral
+    pub fn new(
+        system_control: S,
+        clock_id: crate::system_control::MockClockId,
+        reset_id: crate::system_control::MockResetId,
+    ) -> Self {
+        Self {
+            base_hardware: MockI2cHardware::new(),
+            system_control,
+            clock_id,
+            reset_id,
+        }
+    }
+
+    /// Create a failing instance for error testing
+    pub fn new_failing(
+        system_control: S,
+        clock_id: crate::system_control::MockClockId,
+        reset_id: crate::system_control::MockResetId,
+    ) -> Self {
+        Self {
+            base_hardware: MockI2cHardware::new_failing(),
+            system_control,
+            clock_id,
+            reset_id,
+        }
+    }
+
+    /// Get reference to the system control for testing
+    pub fn system_control(&self) -> &S {
+        &self.system_control
+    }
+
+    /// Get mutable reference to the system control for testing
+    pub fn system_control_mut(&mut self) -> &mut S {
+        &mut self.system_control
+    }
+}
+
+impl<S> I2cHardwareCore for MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    type Error = MockI2cError;
+    type Config = MockI2cConfig;
+    type I2cSpeed = u32;
+    type TimingConfig = ();
+
+    /// Initialize I2C hardware with SystemControl integration
+    ///
+    /// This demonstrates the integration pattern where system control
+    /// operations are performed during hardware initialization:
+    /// 1. Enable peripheral clock
+    /// 2. Release peripheral from reset
+    /// 3. Initialize I2C-specific hardware
+    fn init(&mut self, config: &mut Self::Config) -> Result<(), Self::Error> {
+        // Step 1: Enable peripheral clock via system control
+        self.system_control
+            .enable(&self.clock_id)
+            .map_err(|_| MockI2cError::Bus)?;
+
+        // Step 2: Release peripheral from reset
+        self.system_control
+            .reset_deassert(&self.reset_id)
+            .map_err(|_| MockI2cError::Bus)?;
+
+        // Step 3: Initialize I2C hardware (delegate to base implementation)
+        self.base_hardware.init(config)
+    }
+
+    /// Configure timing with SystemControl clock management
+    ///
+    /// This shows how external system control can manage clock sources
+    /// while I2C hardware configures its internal timing registers.
+    fn configure_timing(
+        &mut self,
+        speed: Self::I2cSpeed,
+        timing: &Self::TimingConfig,
+    ) -> Result<u32, Self::Error> {
+        // Calculate optimal source frequency for requested I2C speed
+        // In real hardware, this would consider setup/hold times, filter delays, etc.
+        let source_freq = calculate_optimal_source_frequency(speed);
+
+        // Configure system clock source via SystemControl
+        self.system_control
+            .set_frequency(&self.clock_id, source_freq)
+            .map_err(|_| MockI2cError::Bus)?;
+
+        // Get actual configured frequency (may differ from requested)
+        let actual_source_freq = self
+            .system_control
+            .get_frequency(&self.clock_id)
+            .map_err(|_| MockI2cError::Bus)?;
+
+        // Configure I2C internal timing based on actual source frequency
+        self.base_hardware.configure_timing(speed, timing)?;
+
+        Ok(actual_source_freq as u32)
+    }
+
+    fn enable_interrupts(&mut self, mask: u32) {
+        self.base_hardware.enable_interrupts(mask);
+    }
+
+    fn clear_interrupts(&mut self, mask: u32) {
+        self.base_hardware.clear_interrupts(mask);
+    }
+
+    fn handle_interrupt(&mut self) {
+        self.base_hardware.handle_interrupt();
+    }
+
+    fn recover_bus(&mut self) -> Result<(), Self::Error> {
+        // In real hardware, bus recovery might require system-level operations
+        // For now, delegate to base implementation
+        self.base_hardware.recover_bus()
+    }
+}
+
+// Forward all I2C master operations to the base hardware
+impl<S> I2cMaster<SevenBitAddress> for MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    fn write(&mut self, addr: SevenBitAddress, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.base_hardware.write(addr, bytes)
+    }
+
+    fn read(&mut self, addr: SevenBitAddress, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.base_hardware.read(addr, buffer)
+    }
+
+    fn write_read(
+        &mut self,
+        addr: SevenBitAddress,
+        bytes: &[u8],
+        buffer: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        self.base_hardware.write_read(addr, bytes, buffer)
+    }
+
+    fn transaction_slice(
+        &mut self,
+        addr: SevenBitAddress,
+        ops_slice: &mut [Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        self.base_hardware.transaction_slice(addr, ops_slice)
+    }
+}
+
+// Forward all slave operations to the base hardware
+impl<S> openprot_hal_blocking::i2c_hardware::slave::I2cSlaveCore<SevenBitAddress>
+    for MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    fn configure_slave_address(&mut self, addr: SevenBitAddress) -> Result<(), Self::Error> {
+        self.base_hardware.configure_slave_address(addr)
+    }
+
+    fn enable_slave_mode(&mut self) -> Result<(), Self::Error> {
+        self.base_hardware.enable_slave_mode()
+    }
+
+    fn disable_slave_mode(&mut self) -> Result<(), Self::Error> {
+        self.base_hardware.disable_slave_mode()
+    }
+
+    fn is_slave_mode_enabled(&self) -> bool {
+        self.base_hardware.is_slave_mode_enabled()
+    }
+
+    fn slave_address(&self) -> Option<SevenBitAddress> {
+        self.base_hardware.slave_address()
+    }
+}
+
+impl<S> openprot_hal_blocking::i2c_hardware::slave::I2cSlaveBuffer<SevenBitAddress>
+    for MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    fn read_slave_buffer(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        self.base_hardware.read_slave_buffer(buffer)
+    }
+
+    fn write_slave_response(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        self.base_hardware.write_slave_response(data)
+    }
+
+    fn poll_slave_data(&mut self) -> Result<Option<usize>, Self::Error> {
+        self.base_hardware.poll_slave_data()
+    }
+
+    fn clear_slave_buffer(&mut self) -> Result<(), Self::Error> {
+        self.base_hardware.clear_slave_buffer()
+    }
+
+    fn tx_buffer_space(&self) -> Result<usize, Self::Error> {
+        self.base_hardware.tx_buffer_space()
+    }
+
+    fn rx_buffer_count(&self) -> Result<usize, Self::Error> {
+        self.base_hardware.rx_buffer_count()
+    }
+}
+
+impl<S> openprot_hal_blocking::i2c_hardware::slave::I2cSlaveInterrupts<SevenBitAddress>
+    for MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    fn enable_slave_interrupts(&mut self, mask: u32) {
+        self.base_hardware.enable_slave_interrupts(mask);
+    }
+
+    fn clear_slave_interrupts(&mut self, mask: u32) {
+        self.base_hardware.clear_slave_interrupts(mask);
+    }
+
+    fn slave_status(
+        &self,
+    ) -> Result<openprot_hal_blocking::i2c_hardware::slave::SlaveStatus, Self::Error> {
+        self.base_hardware.slave_status()
+    }
+
+    fn last_slave_event(&self) -> Option<openprot_hal_blocking::i2c_hardware::slave::I2cSEvent> {
+        self.base_hardware.last_slave_event()
+    }
+}
+
+// Additional testing methods for SystemControl integration
+impl<S> MockI2cHardwareWithSystem<S>
+where
+    S: openprot_hal_blocking::system_control::SystemControl<
+        ClockId = crate::system_control::MockClockId,
+        ResetId = crate::system_control::MockResetId,
+    >,
+{
+    /// Inject data into slave buffer (for testing)
+    pub fn inject_slave_data(&mut self, data: &[u8]) {
+        self.base_hardware.inject_slave_data(data);
+    }
+
+    /// Inject slave event (for testing)
+    pub fn inject_slave_event(
+        &mut self,
+        event: openprot_hal_blocking::i2c_hardware::slave::I2cSEvent,
+    ) {
+        self.base_hardware.inject_slave_event(event);
+    }
+
+    /// Poll slave events (for testing)
+    pub fn poll_slave_events(
+        &mut self,
+    ) -> Result<Option<openprot_hal_blocking::i2c_hardware::slave::I2cSEvent>, MockI2cError> {
+        self.base_hardware.poll_slave_events()
+    }
+}
+
+/// Calculate optimal source clock frequency for given I2C speed
+///
+/// This is a simplified calculation for the mock. In real hardware,
+/// this would consider the I2C timing requirements, peripheral limitations,
+/// and available clock sources to determine the optimal frequency.
+fn calculate_optimal_source_frequency(i2c_speed: u32) -> u64 {
+    // Simple heuristic: use 8x the I2C speed as source frequency
+    // This allows for clock division and timing margin
+    match i2c_speed {
+        speed if speed <= 100_000 => 8_000_000, // 8 MHz for standard mode
+        speed if speed <= 400_000 => 24_000_000, // 24 MHz for fast mode
+        speed if speed <= 1_000_000 => 48_000_000, // 48 MHz for fast mode plus
+        _ => 96_000_000,                        // 96 MHz for high speed modes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openprot_hal_blocking::system_control::ClockControl;
-    // Minimal mock clock control agent for testing
-    struct TestClockControl {
-        pub enabled: bool,
-        pub frequency: u32,
-    }
 
-    impl openprot_hal_blocking::system_control::ClockControl for TestClockControl {
-        fn enable(&mut self, _id: &u8) -> Result<(), Self::Error> {
-            self.enabled = true;
-            Ok(())
-        }
-        fn set_frequency(&mut self, _id: &u8, freq: u32) -> Result<(), Self::Error> {
-            self.frequency = freq;
-            Ok(())
-        }
-        fn get_frequency(&mut self, _id: &u8) -> Result<u64, Self::Error> {
-            Ok(self.frequency as u64)
-        }
-    }
-
-    impl openprot_hal_blocking::system_control::ErrorType for TestClockControl {
-        type Error = ();
-    }
-
+    #[allow(clippy::assertions_on_constants)] // Allow assert!(false, "message") in tests for clear error messages
     #[test]
     fn test_mock_creation() {
         let mock = MockI2cHardware::new();
@@ -1034,35 +1290,15 @@ mod tests {
         let mut mock = MockI2cHardware::new();
         let mut config = MockI2cConfig::default();
 
-        let _ = mock.init(&mut config);
+        mock.init(&mut config).expect("Failed to init");
         assert!(mock.initialized);
-    }
-
-    #[test]
-    fn test_init_with_clock_control() {
-        let mut mock = MockI2cHardware::new();
-        let mut config = MockI2cConfig::default();
-        let mut clock = TestClockControl {
-            enabled: false,
-            frequency: 0,
-        };
-
-        let result = mock.init_with_clock_control(&mut config, |clk: &mut TestClockControl| {
-            clk.enable(&0x01)?;
-            clk.set_frequency(&0x01, 400_000)?;
-            Ok(())
-        });
-        assert!(result.is_ok());
-        assert!(mock.initialized);
-        assert!(clock.enabled);
-        assert_eq!(clock.frequency, 400_000);
     }
 
     #[test]
     fn test_successful_operations() {
         let mut mock = MockI2cHardware::new();
         let mut config = MockI2cConfig::default();
-        let _ = mock.init(&mut config);
+        mock.init(&mut config).expect("Failed to init mock");
 
         // Test write
         assert!(mock.write(0x50, &[0x01, 0x02]).is_ok());
@@ -1097,7 +1333,7 @@ mod tests {
     fn test_transaction_slice() {
         let mut mock = MockI2cHardware::new();
         let mut config = MockI2cConfig::default();
-        mock.init(&mut config);
+        mock.init(&mut config).expect("Failed to init mock");
 
         let write_data = [0x01, 0x02];
         let mut read_buffer = [0u8; 4];
@@ -1149,6 +1385,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn test_slave_buffer_operations() {
         let mut mock = MockI2cHardware::new();
 
@@ -1165,8 +1402,7 @@ mod tests {
             }
             Err(_) => {
                 // Test failure - use assert! with message instead of panic!
-                assert!(false, "Failed to read slave buffer");
-                return;
+                panic!("Failed to read slave buffer");
             }
         }
 
@@ -1174,16 +1410,14 @@ mod tests {
         match mock.write_slave_response(&[0xAA, 0xBB]) {
             Ok(()) => {}
             Err(_) => {
-                assert!(false, "Failed to write slave response");
-                return;
+                panic!("Failed to write slave response");
             }
         }
 
         match mock.tx_buffer_space() {
             Ok(space) => assert_eq!(space, 62), // 64 - 2
             Err(_) => {
-                assert!(false, "Failed to get buffer space");
-                return;
+                panic!("Failed to get buffer space");
             }
         }
 
@@ -1192,29 +1426,27 @@ mod tests {
         match mock.rx_buffer_count() {
             Ok(count) => assert_eq!(count, 2),
             Err(_) => {
-                assert!(false, "Failed to get buffer count");
-                return;
+                panic!("Failed to get buffer count");
             }
         }
 
         match mock.clear_slave_buffer() {
             Ok(()) => {}
             Err(_) => {
-                assert!(false, "Failed to clear buffer");
-                return;
+                panic!("Failed to clear buffer");
             }
         }
 
         match mock.rx_buffer_count() {
             Ok(count) => assert_eq!(count, 0),
             Err(_) => {
-                assert!(false, "Failed to get buffer count after clear");
-                return;
+                panic!("Failed to get buffer count after clear");
             }
         }
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn test_slave_events() {
         let mut mock = MockI2cHardware::new();
 
@@ -1227,16 +1459,14 @@ mod tests {
         match mock.poll_slave_events() {
             Ok(event) => assert_eq!(event, Some(I2cSEvent::SlaveWrReq)),
             Err(_) => {
-                assert!(false, "Failed to poll events");
-                return;
+                panic!("Failed to poll events");
             }
         }
 
         match mock.poll_slave_events() {
             Ok(event) => assert_eq!(event, None),
             Err(_) => {
-                assert!(false, "Failed to poll events");
-                return;
+                panic!("Failed to poll events");
             }
         }
 
@@ -1244,8 +1474,7 @@ mod tests {
         match mock.handle_slave_event_nb(I2cSEvent::SlaveWrRecvd) {
             Ok(()) => {}
             Err(_) => {
-                assert!(false, "Failed to handle event");
-                return;
+                panic!("Failed to handle event");
             }
         }
         assert_eq!(mock.last_slave_event(), Some(I2cSEvent::SlaveWrRecvd));
@@ -1257,8 +1486,7 @@ mod tests {
                 assert_eq!(status.last_event, Some(I2cSEvent::SlaveWrRecvd));
             }
             Err(_) => {
-                assert!(false, "Failed to get status");
-                return;
+                panic!("Failed to get status");
             }
         }
     }
@@ -1273,8 +1501,7 @@ mod tests {
         match mock.is_event_pending_nb(I2cSEvent::SlaveWrReq) {
             Ok(pending) => assert!(!pending),
             Err(_) => {
-                assert!(false, "Failed to check pending");
-                return;
+                panic!("Failed to check pending");
             }
         }
 
@@ -1283,15 +1510,13 @@ mod tests {
         match mock.is_event_pending_nb(I2cSEvent::SlaveWrReq) {
             Ok(pending) => assert!(pending),
             Err(_) => {
-                assert!(false, "Failed to check pending");
-                return;
+                panic!("Failed to check pending");
             }
         }
         match mock.is_event_pending_nb(I2cSEvent::SlaveRdReq) {
             Ok(pending) => assert!(!pending),
             Err(_) => {
-                assert!(false, "Failed to check pending");
-                return;
+                panic!("Failed to check pending");
             }
         }
 
@@ -1299,15 +1524,13 @@ mod tests {
         match mock.poll_slave_events() {
             Ok(_) => {}
             Err(_) => {
-                assert!(false, "Failed to poll events");
-                return;
+                panic!("Failed to poll events");
             }
         }
         match mock.is_event_pending_nb(I2cSEvent::SlaveWrReq) {
             Ok(pending) => assert!(!pending),
             Err(_) => {
-                assert!(false, "Failed to check pending");
-                return;
+                panic!("Failed to check pending");
             }
         }
     }
@@ -1332,5 +1555,211 @@ mod tests {
                 openprot_hal_blocking::i2c_hardware::slave::I2cSEvent::SlaveWrReq
             )
             .is_err());
+    }
+
+    #[test]
+    fn test_system_control_integration() {
+        use crate::system_control::{MockClockId, MockResetId, MockSystemControl};
+
+        let system_control = MockSystemControl::new();
+        let mut i2c_with_system =
+            MockI2cHardwareWithSystem::new(system_control, MockClockId::I2c1, MockResetId::I2c1);
+
+        // Initially, clock should be disabled and reset should be asserted
+        match i2c_with_system
+            .system_control()
+            .is_clock_enabled(&MockClockId::I2c1)
+        {
+            Ok(enabled) => assert!(!enabled),
+            Err(e) => assert!(false, "is_clock_enabled failed: {:?}", e),
+        }
+
+        match i2c_with_system
+            .system_control()
+            .is_reset_asserted(&MockResetId::I2c1)
+        {
+            Ok(asserted) => assert!(asserted),
+            Err(e) => assert!(false, "is_reset_asserted failed: {:?}", e),
+        }
+        // Initialize - should enable clock and release reset
+        let mut config = MockI2cConfig::default();
+        assert!(i2c_with_system.init(&mut config).is_ok());
+
+        // After init, clock should be enabled and reset should be deasserted
+        match i2c_with_system
+            .system_control()
+            .is_clock_enabled(&MockClockId::I2c1)
+        {
+            Ok(enabled) => assert!(enabled),
+            Err(e) => assert!(false, "is_clock_enabled failed: {:?}", e),
+        }
+        match i2c_with_system
+            .system_control()
+            .is_reset_asserted(&MockResetId::I2c1)
+        {
+            Ok(asserted) => assert!(!asserted),
+            Err(e) => assert!(false, "is_reset_asserted failed: {:?}", e),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn test_system_control_timing_configuration() {
+        use crate::system_control::{MockClockId, MockResetId, MockSystemControl};
+        use openprot_hal_blocking::system_control::ClockControl;
+
+        let system_control = MockSystemControl::new();
+        let mut i2c_with_system =
+            MockI2cHardwareWithSystem::new(system_control, MockClockId::I2c1, MockResetId::I2c1);
+
+        // Configure timing for 400kHz I2C
+        match i2c_with_system.configure_timing(400_000, &()) {
+            Ok(actual_freq) => {
+                // Should return the configured source frequency
+                assert_eq!(actual_freq, 24_000_000); // Expected 24MHz for 400kHz I2C
+
+                // Verify system control has the correct frequency set
+                match i2c_with_system
+                    .system_control()
+                    .get_frequency(&MockClockId::I2c1)
+                {
+                    Ok(freq) => assert_eq!(freq, 24_000_000),
+                    Err(_) => {
+                        panic!("Failed to get frequency");
+                    }
+                }
+            }
+            Err(_) => {
+                panic!("Failed to configure timing");
+            }
+        }
+
+        // Test different I2C speeds
+        match i2c_with_system.configure_timing(100_000, &()) {
+            Ok(actual_freq) => assert_eq!(actual_freq, 8_000_000), // 8MHz for 100kHz
+            Err(_) => {
+                panic!("Failed to configure 100kHz timing");
+            }
+        }
+
+        match i2c_with_system.configure_timing(1_000_000, &()) {
+            Ok(actual_freq) => assert_eq!(actual_freq, 48_000_000), // 48MHz for 1MHz
+            Err(_) => {
+                panic!("Failed to configure 1MHz timing");
+            }
+        }
+    }
+
+    #[test]
+    fn test_system_control_failing_operations() {
+        use crate::system_control::{MockClockId, MockResetId, MockSystemControl};
+
+        // Create failing system control
+        let failing_system_control = MockSystemControl::new_failing();
+        let mut failing_i2c = MockI2cHardwareWithSystem::new_failing(
+            failing_system_control,
+            MockClockId::I2c1,
+            MockResetId::I2c1,
+        );
+
+        // Init should fail due to system control operations failing
+        let mut config = MockI2cConfig::default();
+        assert!(failing_i2c.init(&mut config).is_err());
+
+        // Timing configuration should also fail
+        assert!(failing_i2c.configure_timing(400_000, &()).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn test_system_control_i2c_operations() {
+        use crate::system_control::{MockClockId, MockResetId, MockSystemControl};
+
+        let system_control = MockSystemControl::new();
+        let mut i2c_with_system =
+            MockI2cHardwareWithSystem::new(system_control, MockClockId::I2c1, MockResetId::I2c1);
+
+        // Initialize first
+        let mut config = MockI2cConfig::default();
+        assert!(i2c_with_system.init(&mut config).is_ok());
+
+        // Test basic I2C operations work with system control integration
+        assert!(i2c_with_system.write(0x50, &[0x01, 0x02]).is_ok());
+
+        let mut buffer = [0u8; 4];
+        assert!(i2c_with_system.read(0x50, &mut buffer).is_ok());
+        assert_eq!(buffer, [0xFF; 4]); // Mock returns 0xFF
+
+        // Test slave operations
+        use openprot_hal_blocking::i2c_hardware::slave::{I2cSlaveBuffer, I2cSlaveCore};
+        assert!(i2c_with_system.configure_slave_address(0x42).is_ok());
+        assert!(i2c_with_system.enable_slave_mode().is_ok());
+        assert!(i2c_with_system.is_slave_mode_enabled());
+
+        // Test slave data injection and reading
+        i2c_with_system.inject_slave_data(&[0xAA, 0xBB, 0xCC]);
+        let mut slave_buffer = [0u8; 3];
+        match i2c_with_system.read_slave_buffer(&mut slave_buffer) {
+            Ok(count) => {
+                assert_eq!(count, 3);
+                assert_eq!(slave_buffer, [0xAA, 0xBB, 0xCC]);
+            }
+            Err(_) => {
+                panic!("Failed to read slave buffer");
+            }
+        }
+    }
+
+    #[test]
+    fn test_system_control_access_methods() {
+        use crate::system_control::{MockClockId, MockResetId, MockSystemControl};
+        use openprot_hal_blocking::system_control::ClockControl;
+
+        let mut system_control = MockSystemControl::new();
+
+        // Pre-configure the system control
+        system_control
+            .enable(&MockClockId::I2c1)
+            .expect("Failed to enable clock");
+        system_control
+            .set_frequency(&MockClockId::I2c1, 12_000_000)
+            .expect("Failed to set frequency");
+
+        let mut i2c_with_system =
+            MockI2cHardwareWithSystem::new(system_control, MockClockId::I2c1, MockResetId::I2c1);
+
+        // Test immutable access
+        let sys_ctrl_ref = i2c_with_system.system_control();
+
+        match sys_ctrl_ref.is_clock_enabled(&MockClockId::I2c1) {
+            Ok(enabled) => assert!(enabled),
+            Err(e) => assert!(false, "is_clock_enabled failed: {:?}", e),
+        }
+        match sys_ctrl_ref.get_frequency(&MockClockId::I2c1) {
+            Ok(freq) => assert_eq!(freq, 12_000_000),
+            Err(_) => {
+                panic!("Failed to get frequency");
+            }
+        }
+
+        // Test mutable access
+        let sys_ctrl_mut = i2c_with_system.system_control_mut();
+        match sys_ctrl_mut.set_frequency(&MockClockId::I2c1, 20_000_000) {
+            Ok(()) => {}
+            Err(_) => {
+                panic!("Failed to set frequency");
+            }
+        }
+
+        // Verify the change took effect
+        match i2c_with_system
+            .system_control()
+            .get_frequency(&MockClockId::I2c1)
+        {
+            Ok(freq) => assert_eq!(freq, 20_000_000),
+            Err(_) => {
+                panic!("Failed to get updated frequency");
+            }
+        }
     }
 }
