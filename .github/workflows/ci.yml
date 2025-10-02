@@ -115,7 +115,7 @@ jobs:
     
     - name: Run security-focused clippy lints
       run: |
-        cargo clippy --all-targets --all-features -- \
+        cargo clippy --all-targets --all-features --workspace --exclude openprot-platform-mock -- \
           -D warnings \
           -W clippy::arithmetic_side_effects \
           -W clippy::float_arithmetic \
@@ -131,7 +131,7 @@ jobs:
     
     - name: Run strict security lints on non-test code
       run: |
-        cargo clippy --lib --bins -- \
+        cargo clippy --lib --bins --workspace --exclude openprot-platform-mock -- \
           -D warnings \
           -D clippy::arithmetic_side_effects \
           -D clippy::float_arithmetic \
