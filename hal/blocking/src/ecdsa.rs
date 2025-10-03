@@ -62,19 +62,19 @@
 //! // let mut key_generator = SoftwareKeyGen::new();
 //! // let mut rng = YourCryptoRng::new();
 //! // let (private_key, public_key) = key_generator.generate_keypair(&mut rng)?;
-//! 
+//!
 //! // Software keys can be serialized:
 //! // let private_bytes = private_key.as_bytes(); // SerializablePrivateKey
 //! // let public_bytes = public_key.as_bytes();   // SerializablePublicKey
-//! 
+//!
 //! // HARDWARE KEYS (no serialization):
 //! // let mut hsm_generator = HsmKeyGen::new();
 //! // let (hsm_private, hsm_public) = hsm_generator.generate_keypair(&mut rng)?;
-//! 
+//!
 //! // Hardware keys cannot be serialized (no IntoBytes/FromBytes bounds)
 //! // but can still be used for cryptographic operations:
 //! // hsm_private.validate()?; // PrivateKey trait method
-//! 
+//!
 //! // Both key types work the same for crypto operations:
 //! // let mut signer = YourSignerImpl::new();
 //! // let message_digest = your_hash_function(message);
@@ -438,7 +438,6 @@ pub trait Signature<C: Curve> {
     fn from_coordinates(r: C::Scalar, s: C::Scalar) -> Result<Self, ErrorKind>
     where
         Self: Sized;
-
 
     /// Write coordinates to output buffers (zero-allocation for embedded).
     ///
