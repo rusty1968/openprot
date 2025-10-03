@@ -12,7 +12,7 @@
 //! - **Security First**: Mandatory cryptographic RNG, proper key validation, secure memory clearing
 //! - **No-std Compatible**: Works in embedded environments without standard library
 //! - **Comprehensive Error Handling**: Detailed error types for proper debugging and security
-//! - **Zero-copy Serialization**: Efficient serialization using `zerocopy` traits
+//! - **Optional Serialization**: Flexible serialization support for software keys, with hardware key compatibility
 //!
 //! ## Architecture
 //!
@@ -24,11 +24,14 @@
 //! └── Scalar: IntoBytes + FromBytes
 //!
 //! Key Management
-//! ├── PrivateKey<C>: Zeroize + Serialization + Validation
-//! └── PublicKey<C>: Serialization + Coordinate Access + Validation
+//! ├── PrivateKey<C>: Zeroize + Validation
+//! ├── SerializablePrivateKey<C>: PrivateKey<C> + Serialization (optional)
+//! ├── PublicKey<C>: Coordinate Access + Validation  
+//! └── SerializablePublicKey<C>: PublicKey<C> + Serialization (optional)
 //!
 //! Signatures
-//! └── Signature<C>: Serialization + Component Access + Validation
+//! ├── Signature<C>: Component Access + Validation
+//! └── SerializableSignature<C>: Signature<C> + Serialization (optional)
 //!
 //! Operations
 //! ├── EcdsaKeyGen<C>: Key pair generation
@@ -39,6 +42,11 @@
 //! ├── Error: Debug → ErrorKind mapping
 //! ├── ErrorType: Associated error types
 //! └── ErrorKind: Common error classifications
+//!
+//! Key Storage Patterns
+//! ├── Software Keys: Implement SerializablePrivateKey for persistence
+//! ├── Hardware Keys: Implement only PrivateKey for HSM/secure enclave
+//! └── Hybrid Systems: Mix both patterns as needed
 //! ```
 //!
 //! ## Usage Example
@@ -48,26 +56,30 @@
 //! # use rand_core::{RngCore, CryptoRng};
 //! #
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // This example shows the basic pattern for ECDSA operations
-//! // Actual implementations would provide concrete curve types
+//! // This example shows both software and hardware key patterns
 //!
-//! // Key generation pattern:
-//! // let mut key_generator = YourKeyGenImpl::new();
+//! // SOFTWARE KEYS (with optional serialization):
+//! // let mut key_generator = SoftwareKeyGen::new();
 //! // let mut rng = YourCryptoRng::new();
 //! // let (private_key, public_key) = key_generator.generate_keypair(&mut rng)?;
-//!
-//! // Key validation pattern:
-//! // private_key.validate()?;
-//! // public_key.validate()?;
-//!
-//! // Signing pattern:
+//! 
+//! // Software keys can be serialized:
+//! // let private_bytes = private_key.as_bytes(); // SerializablePrivateKey
+//! // let public_bytes = public_key.as_bytes();   // SerializablePublicKey
+//! 
+//! // HARDWARE KEYS (no serialization):
+//! // let mut hsm_generator = HsmKeyGen::new();
+//! // let (hsm_private, hsm_public) = hsm_generator.generate_keypair(&mut rng)?;
+//! 
+//! // Hardware keys cannot be serialized (no IntoBytes/FromBytes bounds)
+//! // but can still be used for cryptographic operations:
+//! // hsm_private.validate()?; // PrivateKey trait method
+//! 
+//! // Both key types work the same for crypto operations:
 //! // let mut signer = YourSignerImpl::new();
 //! // let message_digest = your_hash_function(message);
 //! // let signature = signer.sign(&private_key, &message_digest, &mut rng)?;
-//!
-//! // Verification pattern:
-//! // let mut verifier = YourVerifierImpl::new();
-//! // let is_valid = verifier.verify(&public_key, &message_digest, &signature)?;
+//! // let signature_hsm = signer.sign(&hsm_private, &message_digest, &mut rng)?;
 //!
 //! # Ok(())
 //! # }
@@ -78,6 +90,7 @@
 //! - **Always validate inputs**: Use the `validate()` methods on keys and signatures
 //! - **Use cryptographic RNG**: Only `CryptoRng + RngCore` is accepted for signing
 //! - **Clear sensitive data**: Private keys implement `Zeroize` for secure memory clearing
+//! - **Hardware key support**: Private keys can be non-serializable for HSM/secure enclave use
 //! - **Constant-time operations**: Implementers should use constant-time algorithms where possible
 //! - **Side-channel protection**: Be aware of timing attacks in verification operations
 
@@ -276,16 +289,28 @@ pub enum ErrorKind {
 /// - Validate keys are within the valid scalar range (1 < key < curve_order)
 /// - Implement constant-time operations where possible
 /// - Clear sensitive data from memory using [`Zeroize`]
+/// - Hardware keys may store only handles/references, not actual key material
+///
+/// # Hardware Key Considerations
+///
+/// For hardware-based keys (HSMs, TPMs, secure enclaves):
+/// - The `Zeroize` implementation may clear key handles/references
+/// - Actual key material remains securely stored in hardware
+/// - Consider calling hardware APIs to invalidate keys during zeroization
+/// - Some implementations may use no-op zeroization if hardware manages lifecycle
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use openprot_hal_blocking::ecdsa::{PrivateKey, Curve, ErrorKind};
+/// use openprot_hal_blocking::ecdsa::{PrivateKey, SerializablePrivateKey, Curve, ErrorKind};
 /// use zeroize::Zeroize;
+/// use zerocopy::{IntoBytes, FromBytes};
 ///
-/// struct MyPrivateKey([u8; 32]);
+/// // Software private key (can be serialized)
+/// #[derive(IntoBytes, FromBytes)]
+/// struct SoftwarePrivateKey([u8; 32]);
 ///
-/// impl<C: Curve> PrivateKey<C> for MyPrivateKey {
+/// impl<C: Curve> PrivateKey<C> for SoftwarePrivateKey {
 ///     fn validate(&self) -> Result<(), ErrorKind> {
 ///         // Check if key is zero or equal to curve order
 ///         if self.0.iter().all(|&b| b == 0) {
@@ -294,8 +319,26 @@ pub enum ErrorKind {
 ///         Ok(())
 ///     }
 /// }
+///
+/// // Implement optional serialization
+/// impl<C: Curve> SerializablePrivateKey<C> for SoftwarePrivateKey {}
+///
+/// // Hardware private key (cannot be serialized)
+/// struct HardwarePrivateKey {
+///     key_handle: u32, // Handle to key in HSM
+/// }
+///
+/// impl<C: Curve> PrivateKey<C> for HardwarePrivateKey {
+///     fn validate(&self) -> Result<(), ErrorKind> {
+///         // Validate key exists in hardware
+///         // (implementation would call into HSM API)
+///         Ok(())
+///     }
+/// }
+///
+/// // No SerializablePrivateKey implementation for hardware keys
 /// ```
-pub trait PrivateKey<C: Curve>: IntoBytes + FromBytes + Zeroize {
+pub trait PrivateKey<C: Curve>: Zeroize {
     /// Validate that this private key is valid for the curve.
     ///
     /// This method should verify that the private key is within the valid
@@ -364,33 +407,22 @@ pub trait Curve {
 /// }
 ///
 /// impl<C: Curve> Signature<C> for MySignature {
-///     fn r(&self) -> &C::Scalar {
-///         // Return reference to r component
-///         unimplemented!()
+///     fn from_coordinates(r: C::Scalar, s: C::Scalar) -> Result<Self, ErrorKind> {
+///         // Validate that r and s are in valid range [1, curve_order)
+///         if r.iter().all(|&b| b == 0) || s.iter().all(|&b| b == 0) {
+///             return Err(ErrorKind::InvalidSignature);
+///         }
+///         Ok(Self { r, s })
 ///     }
 ///
-///     fn s(&self) -> &C::Scalar {
-///         // Return reference to s component  
-///         unimplemented!()
-///     }
-///
-///     fn from_components(r: C::Scalar, s: C::Scalar) -> Result<Self, ErrorKind> {
-///         // Validate components and create signature
-///         unimplemented!()
-///     }
-///
-///     fn new_unchecked(r: C::Scalar, s: C::Scalar) -> Self {
-///         // Create signature without validation (use with caution)
-///         unimplemented!()
+///     fn coordinates(&self, r_out: &mut C::Scalar, s_out: &mut C::Scalar) {
+///         // Zero-allocation coordinate access for embedded environments
+///         *r_out = self.r;
+///         *s_out = self.s;
 ///     }
 /// }
 /// ```
-pub trait Signature<C: Curve>: IntoBytes + FromBytes {
-    /// Get the r component of the signature.
-    fn r(&self) -> &C::Scalar;
-    /// Get the s component of the signature.
-    fn s(&self) -> &C::Scalar;
-
+pub trait Signature<C: Curve> {
     /// Create a new signature from r and s components with validation.
     ///
     /// This method validates that both r and s are within the valid range
@@ -403,24 +435,17 @@ pub trait Signature<C: Curve>: IntoBytes + FromBytes {
     /// # Returns
     /// - `Ok(Self)`: Valid signature
     /// - `Err(ErrorKind::InvalidSignature)`: If r or s are invalid (zero or ≥ curve order)
-    fn from_components(r: C::Scalar, s: C::Scalar) -> Result<Self, ErrorKind>
+    fn from_coordinates(r: C::Scalar, s: C::Scalar) -> Result<Self, ErrorKind>
     where
         Self: Sized;
 
-    /// Validate that this signature has valid r and s components.
-    ///
-    /// # Returns
-    /// - `Ok(())`: The signature components are valid
-    /// - `Err(ErrorKind::InvalidSignature)`: Invalid r or s component
-    fn validate(&self) -> Result<(), ErrorKind>;
 
-    /// Create a new signature from r and s components without validation.
+    /// Write coordinates to output buffers (zero-allocation for embedded).
     ///
-    /// # Safety
-    /// This method should only be used when the caller can guarantee that
-    /// r and s are valid for the curve. Use `from_components` for safe
-    /// construction with validation.
-    fn new_unchecked(r: C::Scalar, s: C::Scalar) -> Self;
+    /// This method provides zero-allocation coordinate access for embedded
+    /// environments. Implementations can extract coordinates directly into
+    /// the provided buffers without temporary allocation.
+    fn coordinates(&self, x_out: &mut C::Scalar, y_out: &mut C::Scalar);
 }
 
 /// A trait representing a public key associated with a specific elliptic curve.
@@ -447,41 +472,32 @@ pub trait Signature<C: Curve>: IntoBytes + FromBytes {
 /// }
 ///
 /// impl<C: Curve> PublicKey<C> for MyPublicKey {
-///     fn x(&self) -> &C::Scalar {
-///         // Return reference to x coordinate
-///         unimplemented!()
-///     }
-///
-///     fn y(&self) -> &C::Scalar {
-///         // Return reference to y coordinate
-///         unimplemented!()
+///     fn coordinates(&self, x_out: &mut C::Scalar, y_out: &mut C::Scalar) {
+///         // Zero-allocation coordinate access
+///         *x_out = self.x;
+///         *y_out = self.y;
 ///     }
 ///
 ///     fn from_coordinates(x: C::Scalar, y: C::Scalar) -> Result<Self, ErrorKind> {
-///         // Validate point is on curve and create public key
-///         unimplemented!()
-///     }
-///
-///     fn validate(&self) -> Result<(), ErrorKind> {
-///         // Check if point lies on the curve
-///         unimplemented!()
-///     }
-///
-///     fn new_unchecked(x: C::Scalar, y: C::Scalar) -> Self {
-///         // Create key without validation (use with caution)
-///         unimplemented!()
+///         // Validate point is on curve during construction
+///         // (validation logic would go here)
+///         Ok(Self { x, y })
 ///     }
 /// }
 /// ```
-pub trait PublicKey<C: Curve>: IntoBytes + FromBytes {
-    /// Get the x coordinate of the public key.
-    fn x(&self) -> &C::Scalar;
-    /// Get the y coordinate of the public key.
-    fn y(&self) -> &C::Scalar;
+pub trait PublicKey<C: Curve> {
+    /// Write coordinates to output buffers (zero-allocation for embedded).
+    ///
+    /// This method provides zero-allocation coordinate access for embedded
+    /// environments. Implementations can extract coordinates directly into
+    /// the provided buffers without temporary allocation.
+    fn coordinates(&self, x_out: &mut C::Scalar, y_out: &mut C::Scalar);
 
     /// Create a new public key from x and y coordinates with validation.
     ///
-    /// This method validates that the point (x, y) lies on the specified curve.
+    /// This method validates that the point (x, y) lies on the specified curve
+    /// and is cryptographically valid. Validation is performed during construction
+    /// to ensure all created public keys are valid.
     ///
     /// # Parameters
     /// - `x`: The x coordinate of the point
@@ -494,26 +510,72 @@ pub trait PublicKey<C: Curve>: IntoBytes + FromBytes {
     fn from_coordinates(x: C::Scalar, y: C::Scalar) -> Result<Self, ErrorKind>
     where
         Self: Sized;
-
-    /// Validate that this public key represents a valid point on the curve.
-    ///
-    /// This method should be called before using a public key for verification
-    /// to ensure it represents a valid curve point and is not a weak key.
-    ///
-    /// # Returns
-    /// - `Ok(())`: The public key is valid
-    /// - `Err(ErrorKind::InvalidPoint)`: The point is not on the curve
-    /// - `Err(ErrorKind::WeakKey)`: The point is the identity element or otherwise weak
-    fn validate(&self) -> Result<(), ErrorKind>;
-
-    /// Create a new public key from x and y coordinates without validation.
-    ///
-    /// # Safety
-    /// This method should only be used when the caller can guarantee that
-    /// the coordinates represent a valid point on the curve. Use `from_coordinates`
-    /// for safe construction with validation.
-    fn new_unchecked(x: C::Scalar, y: C::Scalar) -> Self;
 }
+
+/// Optional serialization support for private keys.
+///
+/// This trait provides serialization capabilities for private keys that support it,
+/// such as software-based keys. Hardware-based keys (HSMs, secure enclaves, etc.)
+/// do not need to implement this trait.
+///
+/// # Security Note
+///
+/// Implementing this trait exposes private key material as bytes. Only implement
+/// this for software keys where serialization is appropriate and secure.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use openprot_hal_blocking::ecdsa::{PrivateKey, SerializablePrivateKey, Curve};
+/// use zerocopy::{IntoBytes, FromBytes};
+///
+/// #[derive(IntoBytes, FromBytes)]
+/// struct SoftwarePrivateKey([u8; 32]);
+///
+/// impl<C: Curve> PrivateKey<C> for SoftwarePrivateKey { /* ... */ }
+/// impl<C: Curve> SerializablePrivateKey<C> for SoftwarePrivateKey {}
+/// ```
+pub trait SerializablePrivateKey<C: Curve>: PrivateKey<C> + IntoBytes + FromBytes {}
+
+/// Optional serialization support for public keys.
+///
+/// This trait provides serialization capabilities for public keys that support it.
+/// Most public key implementations should implement this since public keys are
+/// not sensitive and often need to be transmitted or stored.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use openprot_hal_blocking::ecdsa::{PublicKey, SerializablePublicKey, Curve};
+/// use zerocopy::{IntoBytes, FromBytes};
+///
+/// #[derive(IntoBytes, FromBytes)]
+/// struct MyPublicKey { /* ... */ }
+///
+/// impl<C: Curve> PublicKey<C> for MyPublicKey { /* ... */ }
+/// impl<C: Curve> SerializablePublicKey<C> for MyPublicKey {}
+/// ```
+pub trait SerializablePublicKey<C: Curve>: PublicKey<C> + IntoBytes + FromBytes {}
+
+/// Optional serialization support for signatures.
+///
+/// This trait provides serialization capabilities for signatures that support it.
+/// Most signature implementations should implement this since signatures need
+/// to be transmitted and verified.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use openprot_hal_blocking::ecdsa::{Signature, SerializableSignature, Curve};
+/// use zerocopy::{IntoBytes, FromBytes};
+///
+/// #[derive(IntoBytes, FromBytes)]
+/// struct MySignature { /* ... */ }
+///
+/// impl<C: Curve> Signature<C> for MySignature { /* ... */ }
+/// impl<C: Curve> SerializableSignature<C> for MySignature {}
+/// ```
+pub trait SerializableSignature<C: Curve>: Signature<C> + IntoBytes + FromBytes {}
 
 /// Trait for ECDSA key generation over a specific elliptic curve.
 ///
