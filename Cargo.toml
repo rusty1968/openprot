@@ -26,3 +26,6 @@ edition = "2021"
 zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = { version = "1.7", default-features = false, features = ["derive"] }
 subtle = { version = "2", default-features = false }
+# Pin to match Hubris ecosystem
+rand_core = { version = "0.6", default-features = false }
+embedded-hal = "1.0"
