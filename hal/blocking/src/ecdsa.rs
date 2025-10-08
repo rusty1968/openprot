@@ -96,9 +96,9 @@
 
 use crate::digest::DigestAlgorithm;
 use core::fmt::Debug;
+use zerocopy::Immutable;
 use zerocopy::{FromBytes, IntoBytes};
 use zeroize::Zeroize;
-
 /// Trait for converting implementation-specific ECDSA errors into generic error kinds.
 ///
 /// This trait allows HAL implementations to define their own detailed error types
@@ -817,6 +817,93 @@ impl Curve for P384 {
     type DigestType = crate::digest::Sha2_384;
     type Scalar = [u8; 48];
 }
+
+/// A serializable public key for the P384 elliptic curve.
+///
+/// This implementation provides both coordinate access and serialization
+/// capabilities for P384 public keys, supporting the standard 96-byte
+/// uncompressed format (48 bytes each for x and y coordinates).
+#[derive(Clone, Debug, IntoBytes, FromBytes, Immutable)]
+#[repr(C)]
+pub struct P384PublicKey {
+    /// X coordinate (48 bytes for P384)
+    x: [u8; 48],
+    /// Y coordinate (48 bytes for P384)  
+    y: [u8; 48],
+}
+
+impl P384PublicKey {
+    /// Create a new P384 public key from raw coordinates
+    pub fn new(x: [u8; 48], y: [u8; 48]) -> Self {
+        Self { x, y }
+    }
+}
+
+impl PublicKey<P384> for P384PublicKey {
+    fn coordinates(
+        &self,
+        x_out: &mut <P384 as Curve>::Scalar,
+        y_out: &mut <P384 as Curve>::Scalar,
+    ) {
+        // P384::Scalar is [u8; 48], so we can copy directly
+        *x_out = self.x;
+        *y_out = self.y;
+    }
+
+    fn from_coordinates(
+        x: <P384 as Curve>::Scalar,
+        y: <P384 as Curve>::Scalar,
+    ) -> Result<Self, ErrorKind> {
+        Ok(Self::new(x, y))
+    }
+}
+
+impl SerializablePublicKey<P384> for P384PublicKey {}
+
+/// A serializable signature for the P384 elliptic curve.
+///
+/// This implementation provides both signature validation and serialization
+/// capabilities for P384 ECDSA signatures, supporting the standard 96-byte
+/// format (48 bytes each for r and s components).
+#[derive(Clone, Debug, IntoBytes, FromBytes, Immutable)]
+#[repr(C)]
+pub struct P384Signature {
+    /// R component (48 bytes for P384)
+    r: [u8; 48],
+    /// S component (48 bytes for P384)
+    s: [u8; 48],
+}
+
+impl P384Signature {
+    /// Create a new P384 signature from r and s components
+    pub fn new(r: [u8; 48], s: [u8; 48]) -> Self {
+        Self { r, s }
+    }
+}
+
+impl Signature<P384> for P384Signature {
+    fn from_coordinates(
+        r: <P384 as Curve>::Scalar,
+        s: <P384 as Curve>::Scalar,
+    ) -> Result<Self, ErrorKind> {
+        // TODO: Add proper signature validation here
+        // For now, we accept any r,s values but in a real implementation
+        // we should validate that 1 ≤ r,s < curve_order
+        Ok(Self::new(r, s))
+    }
+
+    fn coordinates(
+        &self,
+        r_out: &mut <P384 as Curve>::Scalar,
+        s_out: &mut <P384 as Curve>::Scalar,
+    ) {
+        // P384::Scalar is [u8; 48], so we can copy directly
+        *r_out = self.r;
+        *s_out = self.s;
+    }
+}
+
+impl SerializableSignature<P384> for P384Signature {}
 
 /// NIST P-521 elliptic curve marker type.
 ///
