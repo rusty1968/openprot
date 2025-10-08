@@ -8,8 +8,8 @@ description = "Blocking/synchronous HAL traits for OpenPRoT"
 license = "Apache-2.0"
 
 [dependencies]
-embedded-hal = "1.0"
 zerocopy = { workspace = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }
-rand_core = "0.9"
+rand_core = { workspace = true }
+embedded-hal = { workspace = true }
