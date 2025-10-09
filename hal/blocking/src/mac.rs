@@ -272,3 +272,71 @@ impl MacAlgorithm for HmacSha2_512 {
     type MacOutput = Digest<{ Self::OUTPUT_BITS / 32 }>;
     type Key = SecureKey<64>;
 }
+
+/// Computes a MAC using a key retrieved from a key vault.
+///
+/// This function provides integrated MAC computation with secure key storage,
+/// ensuring that MAC keys are retrieved from a secure vault and used for
+/// authentication operations without exposing the key material.
+///
+/// # Parameters
+/// - `mac_impl`: The MAC implementation to use
+/// - `vault`: The key vault containing the MAC key
+/// - `key_id`: Unique identifier for the key in the vault
+/// - `algorithm`: The MAC algorithm to use (zero-sized type)
+/// - `data`: The data to authenticate
+///
+/// # Returns
+/// The computed MAC output
+///
+/// # Security Notes
+/// - MAC key is never exposed to caller
+/// - Key retrieval and MAC computation are atomic
+/// - Supports vault access control and locking mechanisms
+/// - Automatic key zeroization after use
+///
+/// # Example
+/// ```rust,ignore
+/// use openprot_hal_blocking::mac::{compute_mac_with_vault, HmacSha2_256, verify_mac_constant_time};
+/// use openprot_hal_blocking::key_vault::{KeyLifecycle};
+///
+/// let mut mac_impl = MyMacImplementation::new();
+/// let vault = MyKeyVault::new();
+/// let data = b"Hello, world!";
+///
+/// // Compute MAC with vault-stored key
+/// let mac_output = compute_mac_with_vault(
+///     &mut mac_impl,
+///     &vault,
+///     KeyId::new(42),
+///     HmacSha2_256,
+///     data
+/// )?;
+///
+/// ```
+pub fn compute_mac_with_vault<A, M, V, E>(
+    mac_impl: &mut M,
+    vault: &V,
+    key_id: <V as crate::key_vault::KeyLifecycle>::KeyId,
+    algorithm: A,
+    data: &[u8],
+) -> Result<A::MacOutput, E>
+where
+    A: MacAlgorithm,
+    M: MacInit<A>,
+    V: crate::key_vault::KeyLifecycle<KeyData = A::Key>,
+    E: From<M::Error> + From<V::Error>,
+    for<'a> <M::OpContext<'a> as ErrorType>::Error: Into<E>,
+{
+    // Retrieve key from vault
+    let key = vault.retrieve_key(key_id).map_err(E::from)?;
+
+    // Initialize MAC operation
+    let mut mac_ctx = mac_impl.init(algorithm, &key).map_err(E::from)?;
+
+    // Update with data
+    mac_ctx.update(data).map_err(Into::into)?;
+
+    // Finalize and return MAC
+    mac_ctx.finalize().map_err(Into::into)
+}

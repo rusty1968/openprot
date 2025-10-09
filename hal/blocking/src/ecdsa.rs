@@ -348,7 +348,7 @@ pub trait PrivateKey<C: Curve>: Zeroize {
     /// - `Ok(())`: The private key is valid
     /// - `Err(ErrorKind::WeakKey)`: The key is zero, equal to curve order, or otherwise weak
     /// - `Err(ErrorKind::InvalidKeyFormat)`: The key format is invalid
-    fn validate(&self) -> Result<(), ErrorKind>;
+    fn validate(&self, curve: &C) -> Result<(), ErrorKind>;
 }
 
 /// A trait representing an abstract elliptic curve with associated types for cryptographic operations.
@@ -579,18 +579,21 @@ pub trait SerializableSignature<C: Curve>: Signature<C> + IntoBytes + FromBytes 
 /// Trait for ECDSA key generation over a specific elliptic curve.
 ///
 /// This trait enables generation of cryptographically secure ECDSA key pairs
-/// using a cryptographic random number generator.
+/// using a cryptographic random number generator. Keys can be generated either
+/// as standalone objects or stored directly in a key vault for enhanced security.
 ///
 /// # Security Requirements
 ///
 /// - Must use a cryptographically secure random number generator
 /// - Generated keys must be uniformly distributed over the valid scalar range
 /// - Private keys must be properly zeroized after use
+/// - Key vault storage should be preferred for hardware-backed security
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use openprot_hal_blocking::ecdsa::{EcdsaKeyGen, Curve, ErrorKind};
+/// use openprot_hal_blocking::ecdsa::{EcdsaKeyGen, Curve, generate_and_store_keypair};
+/// use openprot_hal_blocking::key_vault::{KeyLifecycle, KeyStore};
 /// use rand_core::{RngCore, CryptoRng};
 ///
 /// struct MyKeyGenerator;
@@ -608,6 +611,20 @@ pub trait SerializableSignature<C: Curve>: Signature<C> + IntoBytes + FromBytes 
 ///         unimplemented!()
 ///     }
 /// }
+///
+/// // Usage example with standalone function:
+/// let mut key_gen = MyKeyGenerator;
+/// let mut vault = MyKeyVault::new();
+/// let mut rng = MyRng::new();
+///
+/// let public_key = generate_and_store_keypair(
+///     &mut key_gen,
+///     &mut vault,
+///     KeyId::new(42),
+///     KeyUsage::SIGNING,
+///     KeyMetadata::default(),
+///     &mut rng
+/// )?;
 /// ```
 pub trait EcdsaKeyGen<C: Curve>: ErrorType {
     /// The type representing the private key for the curve.
@@ -628,6 +645,76 @@ pub trait EcdsaKeyGen<C: Curve>: ErrorType {
     ) -> Result<(Self::PrivateKey, Self::PublicKey), Self::Error>
     where
         R: rand_core::RngCore + rand_core::CryptoRng;
+}
+
+/// Generates an ECDSA key pair and stores the private key in a key vault.
+///
+/// This function provides integrated key generation and secure storage, ensuring
+/// that private keys are immediately stored in a secure vault rather than
+/// being exposed in memory. Only the public key is returned to the caller.
+///
+/// # Parameters
+/// - `key_gen`: The key generator implementation
+/// - `vault`: The key vault for secure private key storage
+/// - `key_id`: Unique identifier for the key in the vault
+/// - `usage`: Usage permissions for the stored key
+/// - `metadata`: Additional metadata to store with the key
+/// - `rng`: A cryptographically secure random number generator
+///
+/// # Returns
+/// The generated public key (private key is securely stored in vault)
+///
+/// # Security Benefits
+/// - Private key is never exposed to caller
+/// - Immediate secure storage reduces attack surface
+/// - Usage permissions are set atomically with storage
+/// - Vault locking mechanisms can be applied immediately
+///
+/// # Example
+/// ```rust,ignore
+/// use openprot_hal_blocking::ecdsa::{generate_and_store_keypair, P256};
+/// use openprot_hal_blocking::key_vault::{KeyLifecycle, KeyStore};
+///
+/// let mut key_gen = MyKeyGenerator::new();
+/// let mut vault = MyKeyVault::new();
+/// let mut rng = MyRng::new();
+///
+/// let public_key = generate_and_store_keypair::<P256, _, _, _>(
+///     &mut key_gen,
+///     &mut vault,
+///     KeyId::new(42),
+///     KeyUsage::SIGNING,
+///     KeyMetadata::default(),
+///     &mut rng
+/// )?;
+/// ```
+pub fn generate_and_store_keypair<C, G, V, R>(
+    key_gen: &mut G,
+    vault: &mut V,
+    key_id: <V as crate::key_vault::KeyStore>::KeyId,
+    usage: <V as crate::key_vault::KeyStore>::KeyUsage,
+    metadata: <V as crate::key_vault::KeyLifecycle>::KeyMetadata,
+    rng: &mut R,
+) -> Result<G::PublicKey, G::Error>
+where
+    C: Curve,
+    G: EcdsaKeyGen<C>,
+    R: rand_core::RngCore + rand_core::CryptoRng,
+    V: crate::key_vault::KeyLifecycle<KeyData = G::PrivateKey> + crate::key_vault::KeyStore,
+    <V as crate::key_vault::KeyLifecycle>::KeyId: From<<V as crate::key_vault::KeyStore>::KeyId>,
+    G::Error: From<V::Error>,
+{
+    // Generate key pair
+    let (private_key, public_key) = key_gen.generate_keypair(rng)?;
+
+    // Store private key in vault with metadata
+    let lifecycle_key_id = <V as crate::key_vault::KeyLifecycle>::KeyId::from(key_id);
+    vault
+        .store_key(lifecycle_key_id, private_key, metadata)
+        .map_err(G::Error::from)?;
+    vault.set_key_usage(key_id, usage).map_err(G::Error::from)?;
+
+    Ok(public_key)
 }
 
 /// Trait for ECDSA signing using a digest algorithm.

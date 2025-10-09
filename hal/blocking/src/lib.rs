@@ -29,6 +29,9 @@ pub mod mac;
 /// Reset and clocking traits for OpenPRoT HAL
 pub mod system_control;
 
+/// Key management traits
+pub mod key_vault;
+
 // Re-export embedded-hal 1.0 traits
 pub use embedded_hal::delay::DelayNs;
 pub use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};
