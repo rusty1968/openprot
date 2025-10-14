@@ -12,6 +12,7 @@ members = [
     "platform/impls/linux",
     "platform/impls/tock",
     "platform/impls/hubris",
+    "platform/impls/rustcrypto",
     "services/telemetry",
     "services/storage",
 ]
