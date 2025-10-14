@@ -367,7 +367,7 @@ impl CipherStatus for AesCtrContext {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]  // Allow unwrap in tests for cleaner test code
+#[allow(clippy::unwrap_used)] // Allow unwrap in tests for cleaner test code
 mod tests {
     use super::*;
     use openprot_hal_blocking::cipher::BlockAligned;
