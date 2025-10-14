@@ -1,3 +1,5 @@
+// Licensed under the Apache-2.0 license
+
 use core::fmt::Debug;
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -77,8 +79,8 @@ pub trait ErrorType {
 /// impl SymmetricCipher for MyAesCipher {
 ///     type Key = [u8; 32];           // AES-256 key
 ///     type Nonce = [u8; 16];         // 128-bit nonce/IV
-///     type PlainText = Vec<u8>;      // Variable-length plaintext
-///     type CipherText = Vec<u8>;     // Variable-length ciphertext
+///     type PlainText = [u8; 64];     // Fixed-size plaintext buffer
+///     type CipherText = [u8; 80];    // Fixed-size ciphertext buffer (with padding)
 ///     type Error = CryptoError;
 /// }
 /// ```
@@ -144,8 +146,8 @@ pub trait SymmetricCipher: ErrorType {
     /// # Common Types
     ///
     /// - `&[u8]` for read-only operations
-    /// - `Vec<u8>` for owned data
-    /// - `[u8; N]` for fixed-size messages
+    /// - `[u8; N]` for fixed-size owned data
+    /// - Custom container types for variable-length data
     type PlainText: FromBytes + IntoBytes;
 
     /// The ciphertext data type.
@@ -161,9 +163,9 @@ pub trait SymmetricCipher: ErrorType {
     ///
     /// # Common Types
     ///
-    /// - `Vec<u8>` for variable-length encrypted data
     /// - `[u8; N]` for fixed-size encrypted blocks
-    /// - Custom types that include metadata or tags
+    /// - Custom container types for variable-length encrypted data
+    /// - Types that include metadata or authentication tags
     type CipherText: FromBytes + IntoBytes;
 }
 
@@ -395,7 +397,6 @@ impl<const BLOCK_SIZE: usize, const MAX_BLOCKS: usize> BlockAligned<BLOCK_SIZE, 
 /// This trait is deliberately independent of `CipherOp` to allow:
 /// - Security managers that don't perform encryption/decryption
 /// - Key stores and vaults with secure cleanup
-/// - Hardware security modules with specialized cleanup procedures
 /// - Flexible composition with other cipher traits
 pub trait SecureCipherOp: ErrorType {
     /// Securely clear internal state and zeroize sensitive data.
@@ -574,7 +575,7 @@ pub trait AeadCipherOp: SymmetricCipher + ErrorType {
     /// # Common Types
     ///
     /// - `&[u8]` for read-only associated data
-    /// - `Vec<u8>` for owned associated data
+    /// - `[u8; N]` for fixed-size owned associated data
     /// - `()` or empty slice if no associated data is needed
     type AssociatedData: FromBytes + IntoBytes;
 
@@ -743,7 +744,7 @@ mod tests {
         container.push_block(block2).unwrap();
         container.push_block(block3).unwrap();
 
-        // Test iterator manually without collecting into Vec
+        // Test iterator manually
         let mut iter = container.iter_blocks();
         assert_eq!(iter.next(), Some(&block1));
         assert_eq!(iter.next(), Some(&block2));
