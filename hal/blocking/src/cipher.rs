@@ -645,6 +645,7 @@ pub trait AeadCipherOp: SymmetricCipher + ErrorType {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // Allow unwrap in tests for cleaner test code
 mod tests {
     use super::*;
 
