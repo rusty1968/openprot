@@ -328,7 +328,7 @@ pub struct MockI2cHardware {
     // Slave mode fields
     /// Whether slave mode is currently enabled (1 byte)
     slave_enabled: bool,
-    /// Currently configured slave address (1 byte: Option<u8>)
+    /// Currently configured slave address (1 byte: `Option<u8>`)
     slave_address: Option<SevenBitAddress>,
     /// Slave receive buffer (64 bytes) - realistic I2C message size
     slave_rx_buffer: [u8; 64],
@@ -338,7 +338,7 @@ pub struct MockI2cHardware {
     slave_tx_buffer: [u8; 64],
     /// Number of valid bytes in transmit buffer (8 bytes: usize on 64-bit)
     slave_tx_count: usize,
-    /// Most recent slave event that occurred (1 byte: Option<enum>)
+    /// Most recent slave event that occurred (1 byte: `Option<enum>`)
     last_slave_event: Option<openprot_hal_blocking::i2c_hardware::slave::I2cSEvent>,
 }
 
