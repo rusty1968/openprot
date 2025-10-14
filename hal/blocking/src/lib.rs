@@ -32,6 +32,9 @@ pub mod system_control;
 /// Key management traits
 pub mod key_vault;
 
+/// Symmetric cipher abstractions with zero-copy support
+pub mod cipher;
+
 // Re-export embedded-hal 1.0 traits
 pub use embedded_hal::delay::DelayNs;
 pub use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};
