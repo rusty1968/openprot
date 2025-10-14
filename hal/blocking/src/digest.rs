@@ -25,17 +25,17 @@
 //!
 //! ## Key Components
 //!
-//! - [`Digest`] - A generic container for digest output values
-//! - [`DigestAlgorithm`] - Trait defining digest algorithm properties
+//! - `Digest` - A generic container for digest output values
+//! - `DigestAlgorithm` - Trait defining digest algorithm properties
 //!
 //! ### Scoped API
-//! - [`scoped::DigestInit`] - Trait for initializing digest operations (borrowed contexts)
-//! - [`scoped::DigestOp`] - Trait for performing digest computations (borrowed contexts)
-//! - [`scoped::DigestCtrlReset`] - Trait for resetting digest contexts
+//! - `scoped::DigestInit` - Trait for initializing digest operations (borrowed contexts)
+//! - `scoped::DigestOp` - Trait for performing digest computations (borrowed contexts)
+//! - `scoped::DigestCtrlReset` - Trait for resetting digest contexts
 //!
 //! ### Owned API (Typestate)
-//! - [`owned::DigestInit`] - Trait for initializing digest operations (owned contexts)
-//! - [`owned::DigestOp`] - Trait for performing digest computations (owned contexts)
+//! - `owned::DigestInit` - Trait for initializing digest operations (owned contexts)
+//! - `owned::DigestOp` - Trait for performing digest computations (owned contexts)
 //!
 //! ## Supported Algorithms
 //!

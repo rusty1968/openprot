@@ -90,12 +90,12 @@
 //!
 //! The traits are organized in a composable hierarchy:
 //!
-//! - [`I2CCoreTarget`]: Core transaction lifecycle (required for all devices)
-//! - [`WriteTarget`]: Handle write operations from master
-//! - [`ReadTarget`]: Handle read operations from master  
-//! - [`WriteReadTarget`]: Handle combined write-read transactions
-//! - [`RegisterAccess`]: Higher-level register-based access patterns
-//! - [`I2CTarget`]: Convenience trait combining all capabilities
+//! - `I2CCoreTarget`: Core transaction lifecycle (required for all devices)
+//! - `WriteTarget`: Handle write operations from master
+//! - `ReadTarget`: Handle read operations from master  
+//! - `WriteReadTarget`: Handle combined write-read transactions
+//! - `RegisterAccess`: Higher-level register-based access patterns
+//! - `I2CTarget`: Convenience trait combining all capabilities
 //!
 //! ## Transaction Flow
 //!
