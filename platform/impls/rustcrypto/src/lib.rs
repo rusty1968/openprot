@@ -10,13 +10,9 @@
 
 #![no_std]
 
-pub mod buffer;
 pub mod cipher;
 
 // Re-export commonly used ECDSA types
-
-// Re-export commonly used buffer types
-pub use buffer::{BufferError, FixedCipherText, FixedPlainText, DEFAULT_MAX_MESSAGE_SIZE};
 
 // Re-export commonly used cipher types
 pub use cipher::{Aes256CtrCipher, Aes256GcmCipher, RustCryptoCipherError};
