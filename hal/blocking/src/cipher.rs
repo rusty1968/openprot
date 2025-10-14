@@ -346,7 +346,7 @@ impl<const BLOCK_SIZE: usize, const MAX_BLOCKS: usize> BlockAligned<BLOCK_SIZE, 
             .get_mut(self.block_count)
             .ok_or(BlockAlignedError::CapacityExceeded)?;
         *block_slot = block;
-        self.block_count += 1;
+        self.block_count = self.block_count.saturating_add(1);
         Ok(())
     }
 
@@ -357,7 +357,7 @@ impl<const BLOCK_SIZE: usize, const MAX_BLOCKS: usize> BlockAligned<BLOCK_SIZE, 
 
     /// Get the total number of bytes in valid blocks.
     pub const fn len(&self) -> usize {
-        self.block_count * BLOCK_SIZE
+        self.block_count.saturating_mul(BLOCK_SIZE)
     }
 
     /// Check if the container is empty.
@@ -740,7 +740,7 @@ mod tests {
 
         let blocks = container.blocks();
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks.get(0).unwrap(), &block1);
+        assert_eq!(blocks.first().unwrap(), &block1);
         assert_eq!(blocks.get(1).unwrap(), &block2);
     }
 
@@ -808,7 +808,7 @@ mod tests {
 
         // Third block should have one byte of data and 15 bytes of padding
         let third_block = container.get_block(2).unwrap();
-        assert_eq!(third_block.get(0).unwrap(), &0x42);
+        assert_eq!(third_block.first().unwrap(), &0x42);
         assert_eq!(&third_block[1..], &[0xFF; 15]);
     }
 
