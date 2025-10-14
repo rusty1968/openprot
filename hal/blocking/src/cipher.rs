@@ -314,8 +314,15 @@ impl<const BLOCK_SIZE: usize, const MAX_BLOCKS: usize> BlockAligned<BLOCK_SIZE, 
 
         // Fill complete blocks
         for (i, chunk) in data.chunks(BLOCK_SIZE).enumerate() {
-            result.blocks[i].fill(padding_byte);
-            result.blocks[i][..chunk.len()].copy_from_slice(chunk);
+            let block = result
+                .blocks
+                .get_mut(i)
+                .ok_or(BlockAlignedError::DataTooLarge)?;
+            block.fill(padding_byte);
+            let slice = block
+                .get_mut(..chunk.len())
+                .ok_or(BlockAlignedError::DataTooLarge)?;
+            slice.copy_from_slice(chunk);
         }
 
         Ok(result)
@@ -334,7 +341,11 @@ impl<const BLOCK_SIZE: usize, const MAX_BLOCKS: usize> BlockAligned<BLOCK_SIZE, 
             return Err(BlockAlignedError::CapacityExceeded);
         }
 
-        self.blocks[self.block_count] = block;
+        let block_slot = self
+            .blocks
+            .get_mut(self.block_count)
+            .ok_or(BlockAlignedError::CapacityExceeded)?;
+        *block_slot = block;
         self.block_count += 1;
         Ok(())
     }
@@ -367,7 +378,7 @@ impl<const BLOCK_SIZE: usize, const MAX_BLOCKS: usize> BlockAligned<BLOCK_SIZE, 
     /// Get a specific block by index.
     pub fn get_block(&self, index: usize) -> Option<&[u8; BLOCK_SIZE]> {
         if index < self.block_count {
-            Some(&self.blocks[index])
+            self.blocks.get(index)
         } else {
             None
         }
@@ -729,8 +740,8 @@ mod tests {
 
         let blocks = container.blocks();
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0], block1);
-        assert_eq!(blocks[1], block2);
+        assert_eq!(blocks.get(0).unwrap(), &block1);
+        assert_eq!(blocks.get(1).unwrap(), &block2);
     }
 
     #[test]
@@ -797,7 +808,7 @@ mod tests {
 
         // Third block should have one byte of data and 15 bytes of padding
         let third_block = container.get_block(2).unwrap();
-        assert_eq!(third_block[0], 0x42);
+        assert_eq!(third_block.get(0).unwrap(), &0x42);
         assert_eq!(&third_block[1..], &[0xFF; 15]);
     }
 
