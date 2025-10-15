@@ -88,6 +88,8 @@ impl<const N: usize> AsRef<[u8]> for SecureKey<N> {
     }
 }
 
+impl<const N: usize> KeyHandle for SecureKey<N> {}
+
 /// Common error kinds for MAC operations.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[non_exhaustive]
@@ -145,8 +147,32 @@ pub trait MacAlgorithm: Copy + Debug {
     type MacOutput: IntoBytes;
 }
 
+/// Trait for key handles - implementation determines security model.
+///
+/// This is a marker trait with no methods, which means there's no way to extract
+/// raw key bytes through this interface. Different implementations can provide
+/// different security properties:
+/// - Software keys may contain raw bytes internally
+/// - Hardware keys may be opaque handles to secure storage
+/// - TPM keys may be persistent handle references
+pub trait KeyHandle {
+    // Marker trait - no methods means no way to extract raw bytes
+    // Different implementations can have different security properties
+}
+
 /// Trait for initializing a MAC operation for a specific algorithm.
+///
+/// This trait is generic over the key type, allowing different implementations
+/// to accept different kinds of keys with varying security properties.
 pub trait MacInit<A: MacAlgorithm>: ErrorType {
+    /// The key type this implementation accepts.
+    ///
+    /// Each implementation specifies what kind of keys it can work with:
+    /// - Software implementations might use `SecureKey<N>`
+    /// - Hardware implementations might use `HardwareKeySlot`
+    /// - TPM implementations might use `TpmKeyHandle`
+    type Key: KeyHandle;
+
     /// The type representing the operational context for the MAC.
     type OpContext<'a>: MacOp<Output = A::MacOutput>
     where
@@ -157,13 +183,19 @@ pub trait MacInit<A: MacAlgorithm>: ErrorType {
     /// # Parameters
     ///
     /// - `algo`: A zero-sized type representing the MAC algorithm to use.
-    /// - `key`: The key material as a byte slice. The implementation should
-    ///   validate the key length according to the algorithm requirements.
+    /// - `key`: The key handle. The type is determined by the implementation's
+    ///   security model and requirements.
     ///
     /// # Returns
     ///
     /// A result containing the operational context for the MAC, or an error.
-    fn init<'a>(&'a mut self, algo: A, key: &[u8]) -> Result<Self::OpContext<'a>, Self::Error>;
+    ///
+    /// # Security
+    ///
+    /// The key parameter's type determines the security properties:
+    /// - Software keys may expose raw bytes to the implementation
+    /// - Hardware keys remain opaque and never expose raw material
+    fn init<'a>(&'a mut self, algo: A, key: Self::Key) -> Result<Self::OpContext<'a>, Self::Error>;
 }
 
 /// Optional trait for resetting a MAC context to its initial state.
@@ -291,10 +323,11 @@ impl MacAlgorithm for HmacSha2_512 {
 /// The computed MAC output
 ///
 /// # Security Notes
-/// - MAC key is never exposed to caller
+/// - MAC key is retrieved securely from vault
+/// - Key material is only exposed to the MAC implementation during initialization
 /// - Key retrieval and MAC computation are atomic
 /// - Supports vault access control and locking mechanisms
-/// - Automatic key zeroization after use
+/// - Automatic key zeroization after use (vault dependent)
 ///
 /// # Example
 /// ```rust,ignore
@@ -315,26 +348,75 @@ impl MacAlgorithm for HmacSha2_512 {
 /// )?;
 ///
 /// ```
-pub fn compute_mac_with_vault<A, M, V, E>(
+/// Computes a MAC using a key retrieved from a key vault.
+///
+/// This function provides integrated MAC computation with secure key storage,
+/// ensuring that MAC keys are retrieved from a secure vault and used for
+/// authentication operations. The security properties depend on the vault
+/// and MAC implementation types.
+///
+/// # Type Parameters
+/// - `A`: The MAC algorithm type
+/// - `M`: The MAC implementation type
+/// - `V`: The key vault type
+/// - `E`: The unified error type
+///
+/// # Parameters
+/// - `mac_impl`: The MAC implementation to use
+/// - `vault`: The key vault containing the MAC key
+/// - `key_id`: Unique identifier for the key in the vault
+/// - `algorithm`: The MAC algorithm to use (zero-sized type)
+/// - `data`: The data to authenticate
+///
+/// # Returns
+/// The computed MAC output
+///
+/// # Security Notes
+/// - MAC key is retrieved securely from vault
+/// - Key exposure depends on implementation types:
+///   - Software implementations may see raw key bytes during initialization
+///   - Hardware implementations may keep keys opaque throughout
+/// - Key retrieval and MAC computation are atomic
+/// - Supports vault access control and locking mechanisms
+/// - Automatic key zeroization after use (vault dependent)
+///
+/// # Example
+/// ```rust,ignore
+/// use openprot_hal_blocking::mac::{compute_mac_with_vault_generic, HmacSha2_256};
+/// use openprot_hal_blocking::key_vault::{KeyVault};
+///
+/// let mut mac_impl = MyMacImplementation::new();
+/// let vault = MyKeyVault::new();
+/// let data = b"Hello, world!";
+///
+/// // Compute MAC with vault-stored key
+/// let mac_output = compute_mac_with_vault_generic(
+///     &mut mac_impl,
+///     &vault,
+///     KeyId::new(42),
+///     HmacSha2_256,
+///     data
+/// )?;
+/// ```
+pub fn compute_mac_with_vault_generic<A, M, V, E>(
     mac_impl: &mut M,
     vault: &V,
-    key_id: <V as crate::key_vault::KeyLifecycle>::KeyId,
+    key_id: V::KeyId,
     algorithm: A,
     data: &[u8],
 ) -> Result<A::MacOutput, E>
 where
     A: MacAlgorithm,
-    M: MacInit<A>,
-    V: crate::key_vault::KeyLifecycle,
-    V::KeyData: AsRef<[u8]>,
+    M: MacInit<A, Key = V::Key>, // MAC impl must accept vault's key type
+    V: KeyVault,
     E: From<M::Error> + From<V::Error>,
     for<'a> <M::OpContext<'a> as ErrorType>::Error: Into<E>,
 {
     // Retrieve key from vault
-    let key_data = vault.retrieve_key(key_id).map_err(E::from)?;
+    let key = vault.retrieve_key(key_id).map_err(E::from)?;
 
-    // Initialize MAC operation using key as byte slice
-    let mut mac_ctx = mac_impl.init(algorithm, key_data.as_ref()).map_err(E::from)?;
+    // Initialize MAC operation with key handle
+    let mut mac_ctx = mac_impl.init(algorithm, key).map_err(E::from)?;
 
     // Update with data
     mac_ctx.update(data).map_err(Into::into)?;
@@ -343,19 +425,47 @@ where
     mac_ctx.finalize().map_err(Into::into)
 }
 
-/// Scoped MAC API with borrowed contexts (legacy)
+/// Trait for key vaults that can provide different key types.
 ///
-/// This module provides the traditional scoped MAC API where contexts are borrowed
-/// and have lifetime constraints. This API is suitable for simple embedded applications
-/// and direct hardware mapping.
+/// This trait abstracts over different key storage mechanisms, allowing
+/// implementations to provide different security models through the type system.
+pub trait KeyVault {
+    /// The type used to identify keys in this vault.
+    type KeyId;
+
+    /// The type of keys this vault provides.
+    ///
+    /// This determines the security properties:
+    /// - Software vaults might provide `SecureKey<N>`
+    /// - Hardware vaults might provide opaque `HardwareKeySlot`
+    /// - TPM vaults might provide `TpmKeyHandle`
+    type Key: KeyHandle;
+
+    /// The error type for vault operations.
+    type Error;
+
+    /// Retrieve a key from the vault.
+    ///
+    /// # Parameters
+    /// - `key_id`: The identifier for the key to retrieve
+    ///
+    /// # Returns
+    /// The key handle, or an error if the key cannot be retrieved
+    fn retrieve_key(&self, key_id: Self::KeyId) -> Result<Self::Key, Self::Error>;
+}
+
 pub mod scoped {
-    //! Scoped MAC API with borrowed contexts
+    //! Scoped MAC API with borrowed contexts (legacy)
+    //!
+    //! This module provides the traditional scoped MAC API where contexts are borrowed
+    //! and have lifetime constraints. This API is suitable for simple embedded applications
+    //! and direct hardware mapping.
     //!
     //! This module re-exports the traditional MAC traits that use borrowed contexts
     //! with lifetime constraints. These traits are suitable for embedded applications
     //! where MAC contexts cannot be stored in structs due to lifetime constraints.
 
-    pub use super::{MacAlgorithm, MacCtrlReset, MacInit, MacOp, ErrorType};
+    pub use super::{ErrorType, MacAlgorithm, MacCtrlReset, MacInit, MacOp};
 }
 
 pub mod owned {
@@ -372,7 +482,7 @@ pub mod owned {
     //! This API is specifically designed for server applications like Hubris
     //! MAC servers that need to maintain long-lived sessions.
 
-    use super::{MacAlgorithm, ErrorType, IntoBytes};
+    use super::{ErrorType, IntoBytes, KeyHandle, MacAlgorithm};
     use core::result::Result;
 
     /// Trait for initializing MAC operations with owned contexts.
@@ -380,6 +490,10 @@ pub mod owned {
     /// This trait takes ownership of the controller and returns an owned context
     /// that can be stored, moved, and persisted across function boundaries.
     /// Unlike the scoped API, there are no lifetime constraints.
+    ///
+    /// Like the scoped API, this trait is generic over the key type, allowing
+    /// different implementations to accept different kinds of keys with varying
+    /// security properties.
     ///
     /// # Type Parameters
     ///
@@ -394,6 +508,9 @@ pub mod owned {
     /// # impl ErrorType for MyController { type Error = core::convert::Infallible; }
     /// # struct MyContext;
     /// # impl ErrorType for MyContext { type Error = core::convert::Infallible; }
+    /// # #[derive(Debug, Clone)]
+    /// # struct MyKey([u8; 32]);
+    /// # impl KeyHandle for MyKey {}
     /// # impl MacOp for MyContext {
     /// #     type Output = [u8; 32];
     /// #     type Controller = MyController;
@@ -402,17 +519,26 @@ pub mod owned {
     /// #     fn cancel(self) -> Self::Controller { todo!() }
     /// # }
     /// # impl MacInit<HmacSha2_256> for MyController {
+    /// #     type Key = MyKey;
     /// #     type Context = MyContext;
     /// #     type Output = [u8; 32];
-    /// #     fn init(self, _: HmacSha2_256, _key: &[u8]) -> Result<Self::Context, Self::Error> { todo!() }
+    /// #     fn init(self, _: HmacSha2_256, _key: MyKey) -> Result<Self::Context, Self::Error> { todo!() }
     /// # }
     /// let controller = MyController;
-    /// let key = b"secret_key_bytes";
+    /// let key = MyKey([0u8; 32]); // Key handle type determined by implementation
     /// let context = controller.init(HmacSha2_256, key)?;
     /// // Context can be stored in structs, moved across functions, etc.
     /// # Ok::<(), core::convert::Infallible>(())
     /// ```
     pub trait MacInit<A: MacAlgorithm>: ErrorType + Sized {
+        /// The key type this implementation accepts.
+        ///
+        /// Each implementation specifies what kind of keys it can work with:
+        /// - Software implementations might use `SecureKey<N>`
+        /// - Hardware implementations might use `HardwareKeySlot`
+        /// - TPM implementations might use `TpmKeyHandle`
+        type Key: KeyHandle;
+
         /// The owned context type that will handle the MAC computation.
         ///
         /// This context has no lifetime constraints and can be stored in structs,
@@ -433,13 +559,19 @@ pub mod owned {
         /// # Parameters
         ///
         /// - `algorithm`: Algorithm-specific initialization parameters
-        /// - `key`: The secret key material as a byte slice. The implementation should
-        ///   validate the key length according to the algorithm requirements.
+        /// - `key`: The key handle. The type is determined by the implementation's
+        ///   security model and requirements.
         ///
         /// # Returns
         ///
         /// An owned context that can be used for MAC operations.
-        fn init(self, algorithm: A, key: &[u8]) -> Result<Self::Context, Self::Error>;
+        ///
+        /// # Security
+        ///
+        /// The key parameter's type determines the security properties:
+        /// - Software keys may expose raw bytes to the implementation
+        /// - Hardware keys remain opaque and never expose raw material
+        fn init(self, algorithm: A, key: Self::Key) -> Result<Self::Context, Self::Error>;
     }
 
     /// Trait for performing MAC operations with owned contexts.
@@ -581,29 +713,82 @@ pub mod owned {
 ///     b"Next message"
 /// )?;
 /// ```
-pub fn compute_mac_with_vault_owned<A, C, V, E>(
+/// Computes a MAC using an owned controller and a key retrieved from a key vault.
+///
+/// This function provides integrated MAC computation with secure key storage using
+/// the owned API pattern. It enables server applications to perform MAC operations
+/// with vault-stored keys while maintaining resource recovery patterns.
+///
+/// # Type Parameters
+///
+/// * `A` - The MAC algorithm type
+/// * `C` - The owned MAC controller type
+/// * `V` - The key vault type
+/// * `E` - The unified error type
+///
+/// # Parameters
+///
+/// * `controller` - The owned MAC controller (consumed by this function)
+/// * `vault` - Reference to the key vault
+/// * `key_id` - Identifier for the key to retrieve from the vault
+/// * `algorithm` - The MAC algorithm to use
+/// * `data` - The data to authenticate
+///
+/// # Returns
+///
+/// A tuple containing the MAC output and the recovered controller, or an error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use openprot_hal_blocking::mac::{compute_mac_with_vault_owned_generic, HmacSha2_256};
+/// use openprot_hal_blocking::mac::owned::{MacInit, MacOp};
+/// use openprot_hal_blocking::mac::KeyVault;
+///
+/// let controller = MyOwnedMacController::new();
+/// let vault = MyKeyVault::new();
+/// let data = b"Hello, world!";
+///
+/// // Compute MAC with vault-stored key using owned API
+/// let (mac_output, recovered_controller) = compute_mac_with_vault_owned_generic(
+///     controller,
+///     &vault,
+///     KeyId::new(42),
+///     HmacSha2_256,
+///     data
+/// )?;
+///
+/// // Reuse the recovered controller for next operation
+/// let (next_mac, _) = compute_mac_with_vault_owned_generic(
+///     recovered_controller,
+///     &vault,
+///     KeyId::new(43),
+///     HmacSha2_256,
+///     b"Next message"
+/// )?;
+/// ```
+pub fn compute_mac_with_vault_owned_generic<A, C, V, E>(
     controller: C,
     vault: &V,
-    key_id: <V as crate::key_vault::KeyLifecycle>::KeyId,
+    key_id: V::KeyId,
     algorithm: A,
     data: &[u8],
 ) -> Result<(A::MacOutput, C), E>
 where
     A: MacAlgorithm,
-    C: owned::MacInit<A, Output = A::MacOutput>,
+    C: owned::MacInit<A, Key = V::Key, Output = A::MacOutput>,
     C::Context: owned::MacOp<Output = A::MacOutput, Controller = C>,
-    V: crate::key_vault::KeyLifecycle,
-    V::KeyData: AsRef<[u8]>,
+    V: KeyVault,
     E: From<C::Error> + From<V::Error>,
     E: From<<C::Context as ErrorType>::Error>,
 {
     use owned::MacOp; // Bring trait into scope
-    
-    // Retrieve key from vault
-    let key_data = vault.retrieve_key(key_id).map_err(E::from)?;
 
-    // Initialize MAC operation using key as byte slice
-    let context = controller.init(algorithm, key_data.as_ref()).map_err(E::from)?;
+    // Retrieve key from vault
+    let key = vault.retrieve_key(key_id).map_err(E::from)?;
+
+    // Initialize MAC operation with key handle
+    let context = controller.init(algorithm, key).map_err(E::from)?;
 
     // Update with data
     let context = context.update(data).map_err(E::from)?;
@@ -622,7 +807,7 @@ mod tests {
         let _sha256 = HmacSha2_256;
         let _sha384 = HmacSha2_384;
         let _sha512 = HmacSha2_512;
-        
+
         // Test output sizes (in bits)
         assert_eq!(<HmacSha2_256 as MacAlgorithm>::OUTPUT_BITS, 256);
         assert_eq!(<HmacSha2_384 as MacAlgorithm>::OUTPUT_BITS, 384);
@@ -641,7 +826,7 @@ mod tests {
         let key_slice = &[0u8; 32][..];
         let result = SecureKey::<32>::from_slice(key_slice);
         assert!(result.is_ok());
-        
+
         // Test wrong size
         let wrong_size = &[0u8; 16][..];
         let result = SecureKey::<32>::from_slice(wrong_size);
@@ -653,7 +838,7 @@ mod tests {
         let key1 = SecureKey::new([1u8; 32]);
         let key2 = SecureKey::new([1u8; 32]);
         let key3 = SecureKey::new([2u8; 32]);
-        
+
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
     }
@@ -664,10 +849,10 @@ mod tests {
         let mac1 = [1, 2, 3, 4];
         let mac2 = [1, 2, 3, 4];
         let mac3 = [1, 2, 3, 5];
-        
+
         assert!(key.verify_mac(&mac1, &mac2));
         assert!(!key.verify_mac(&mac1, &mac3));
-        
+
         // Different lengths should return false
         let mac_short = [1, 2, 3];
         assert!(!key.verify_mac(&mac1, &mac_short));
@@ -683,19 +868,19 @@ mod tests {
     #[test]
     fn test_flexible_key_inputs() {
         // Test that different key types can be used via AsRef<[u8]>
-        
+
         // Array reference
         let array_key = [0u8; 32];
         let _array_ref: &[u8] = array_key.as_ref();
-        
+
         // SecureKey
         let secure_key = SecureKey::new([0u8; 32]);
         let _secure_ref: &[u8] = secure_key.as_ref();
-        
+
         // Slice
         let slice_key: &[u8] = &[0u8; 32];
         let _slice_ref: &[u8] = slice_key.as_ref();
-        
+
         // All should be compatible with the new API
         assert_eq!(_array_ref.len(), 32);
         assert_eq!(_secure_ref.len(), 32);
