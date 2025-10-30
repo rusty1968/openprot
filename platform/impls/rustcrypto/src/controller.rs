@@ -360,6 +360,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_digest_operations() {
         // Test SHA-256
         let controller = RustCryptoController::new();
@@ -397,6 +398,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_mac_operations() {
         let key = ByteArrayKey::new(b"super secret key");
 
@@ -424,6 +426,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_mixed_operations_controller_recovery() {
         let controller = RustCryptoController::new();
 
