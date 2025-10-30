@@ -443,7 +443,6 @@ dependencies = [
  "aes-gcm",
  "cipher",
  "ctr",
- "generic-array",
  "hmac",
  "k256",
  "openprot-hal-blocking",
