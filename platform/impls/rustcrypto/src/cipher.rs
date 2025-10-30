@@ -7,9 +7,8 @@ use openprot_hal_blocking::cipher::{
 
 // RustCrypto imports for AES-CTR implementation
 use aes::Aes256;
-use cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher, StreamCipherSeek};
 use ctr::Ctr64BE;
-use generic_array::GenericArray;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustCryptoCipherError {
