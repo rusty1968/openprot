@@ -830,7 +830,7 @@ mod tests {
         // Test wrong size
         let wrong_size = &[0u8; 16][..];
         let result = SecureKey::<32>::from_slice(wrong_size);
-        assert_eq!(result.unwrap_err(), ErrorKind::InvalidInputLength);
+        assert!(matches!(result, Err(ErrorKind::InvalidInputLength)));
     }
 
     #[test]
@@ -879,7 +879,7 @@ mod tests {
 
         // Slice
         let slice_key: &[u8] = &[0u8; 32];
-        let _slice_ref: &[u8] = slice_key.as_ref();
+        let _slice_ref: &[u8] = slice_key;
 
         // All should be compatible with the new API
         assert_eq!(_array_ref.len(), 32);
