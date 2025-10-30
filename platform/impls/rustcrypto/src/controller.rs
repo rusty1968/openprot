@@ -165,7 +165,11 @@ impl DigestOp for DigestContext256 {
         // Safe iteration with proper bounds checking
         for (i, chunk) in result.chunks_exact(4).enumerate().take(8) {
             if let Ok(bytes) = chunk.try_into() {
-                words[i] = u32::from_le_bytes(bytes);
+                if let Some(word) = words.get_mut(i) {
+                    *word = u32::from_le_bytes(bytes);
+                } else {
+                    return Err(CryptoError::OperationFailed);
+                }
             } else {
                 return Err(CryptoError::OperationFailed);
             }
@@ -203,7 +207,11 @@ impl DigestOp for DigestContext384 {
         // Safe iteration with proper bounds checking
         for (i, chunk) in result.chunks_exact(4).enumerate().take(12) {
             if let Ok(bytes) = chunk.try_into() {
-                words[i] = u32::from_le_bytes(bytes);
+                if let Some(word) = words.get_mut(i) {
+                    *word = u32::from_le_bytes(bytes);
+                } else {
+                    return Err(CryptoError::OperationFailed);
+                }
             } else {
                 return Err(CryptoError::OperationFailed);
             }
@@ -241,7 +249,11 @@ impl DigestOp for DigestContext512 {
         // Safe iteration with proper bounds checking
         for (i, chunk) in result.chunks_exact(4).enumerate().take(16) {
             if let Ok(bytes) = chunk.try_into() {
-                words[i] = u32::from_le_bytes(bytes);
+                if let Some(word) = words.get_mut(i) {
+                    *word = u32::from_le_bytes(bytes);
+                } else {
+                    return Err(CryptoError::OperationFailed);
+                }
             } else {
                 return Err(CryptoError::OperationFailed);
             }
