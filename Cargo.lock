@@ -436,6 +436,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "platform-rustcrypto-impl"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "cipher",
+ "ctr",
+ "generic-array",
+ "hmac",
+ "k256",
+ "openprot-hal-blocking",
+ "p256",
+ "p384",
+ "rand_core 0.9.3",
+ "sha2",
+ "sha3",
+ "zerocopy",
+ "zeroize",
+]
+
+[[package]]
 name = "polyval"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -503,27 +524,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "138e3e0acb6c9fb258b19b67cb8abd63c00679d2851805ea151465464fe9030a"
 dependencies = [
  "semver",
-]
-
-[[package]]
-name = "rustcrypto"
-version = "0.1.0"
-dependencies = [
- "aes",
- "aes-gcm",
- "cipher",
- "ctr",
- "generic-array",
- "hmac",
- "k256",
- "openprot-hal-blocking",
- "p256",
- "p384",
- "rand_core 0.9.3",
- "sha2",
- "sha3",
- "zerocopy",
- "zeroize",
 ]
 
 [[package]]
