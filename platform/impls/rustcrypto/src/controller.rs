@@ -161,8 +161,14 @@ impl DigestOp for DigestContext256 {
 
         // Convert SHA-256 output (32 bytes) to Digest<8> (8 x 32-bit words)
         let mut words = [0u32; 8];
-        for (i, chunk) in result.chunks_exact(4).enumerate() {
-            words[i] = u32::from_le_bytes(chunk.try_into().expect("chunk is exactly 4 bytes"));
+
+        // Safe iteration with proper bounds checking
+        for (i, chunk) in result.chunks_exact(4).enumerate().take(8) {
+            if let Ok(bytes) = chunk.try_into() {
+                words[i] = u32::from_le_bytes(bytes);
+            } else {
+                return Err(CryptoError::OperationFailed);
+            }
         }
 
         let digest = Digest::new(words);
@@ -193,8 +199,14 @@ impl DigestOp for DigestContext384 {
 
         // Convert SHA-384 output (48 bytes) to Digest<12> (12 x 32-bit words)
         let mut words = [0u32; 12];
-        for (i, chunk) in result.chunks_exact(4).enumerate() {
-            words[i] = u32::from_le_bytes(chunk.try_into().expect("chunk is exactly 4 bytes"));
+
+        // Safe iteration with proper bounds checking
+        for (i, chunk) in result.chunks_exact(4).enumerate().take(12) {
+            if let Ok(bytes) = chunk.try_into() {
+                words[i] = u32::from_le_bytes(bytes);
+            } else {
+                return Err(CryptoError::OperationFailed);
+            }
         }
 
         let digest = Digest::new(words);
@@ -225,8 +237,14 @@ impl DigestOp for DigestContext512 {
 
         // Convert SHA-512 output (64 bytes) to Digest<16> (16 x 32-bit words)
         let mut words = [0u32; 16];
-        for (i, chunk) in result.chunks_exact(4).enumerate() {
-            words[i] = u32::from_le_bytes(chunk.try_into().expect("chunk is exactly 4 bytes"));
+
+        // Safe iteration with proper bounds checking
+        for (i, chunk) in result.chunks_exact(4).enumerate().take(16) {
+            if let Ok(bytes) = chunk.try_into() {
+                words[i] = u32::from_le_bytes(bytes);
+            } else {
+                return Err(CryptoError::OperationFailed);
+            }
         }
 
         let digest = Digest::new(words);
