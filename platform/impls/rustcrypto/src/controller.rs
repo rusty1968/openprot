@@ -17,6 +17,7 @@ use openprot_hal_blocking::mac::{
     Error as MacError, ErrorKind as MacErrorKind, ErrorType as MacErrorType, KeyHandle,
 };
 use openprot_hal_blocking::mac::{HmacSha2_256, HmacSha2_384, HmacSha2_512};
+use openprot_platform_traits_hubris::{HubrisCryptoError, HubrisDigestDevice};
 use sha2::{Digest as Sha2Digest, Sha256, Sha384, Sha512};
 
 /// A type implementing RustCrypto-based hash/digest owned traits.
@@ -114,7 +115,9 @@ impl SecureOwnedKey {
         }
 
         let mut data = [0u8; 128];
-        data[..bytes.len()].copy_from_slice(bytes);
+        data.get_mut(..bytes.len())
+            .ok_or(CryptoError::InvalidKeyLength)?
+            .copy_from_slice(bytes);
 
         Ok(Self {
             data,
@@ -129,14 +132,16 @@ impl SecureOwnedKey {
         }
 
         let mut data = [0u8; 128];
-        data[..N].copy_from_slice(&array);
+        data.get_mut(..N)
+            .ok_or(CryptoError::InvalidKeyLength)?
+            .copy_from_slice(&array);
 
         Ok(Self { data, len: N })
     }
 
     /// Get the key bytes as a slice (only the valid portion)
     pub fn as_bytes(&self) -> &[u8] {
-        &self.data[..self.len]
+        self.data.get(..self.len).unwrap_or(&[])
     }
 
     /// Get the key length
@@ -619,5 +624,57 @@ mod tests {
         let result = SecureOwnedKey::new(&oversized_data);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), CryptoError::InvalidKeyLength);
+    }
+}
+
+/// Hardware capabilities for RustCrypto software implementation
+// TODO: Uncomment when DigestHardwareCapabilities is available
+// impl DigestHardwareCapabilities for RustCryptoController {
+//     const MAX_CONCURRENT_SESSIONS: usize = 1; // Single-session software implementation
+//     const HAS_HARDWARE_ACCELERATION: bool = false; // Software-only
+//     const PLATFORM_NAME: &'static str = "RustCrypto Software";
+// }
+/// Hubris platform integration for RustCrypto controller
+impl HubrisDigestDevice for RustCryptoController {
+    type DigestContext256 = DigestContext256;
+    type DigestContext384 = DigestContext384;
+    type DigestContext512 = DigestContext512;
+
+    type HmacKey = SecureOwnedKey;
+    type HmacContext256 = MacContext256;
+    type HmacContext384 = MacContext384;
+    type HmacContext512 = MacContext512;
+
+    fn init_digest_sha256(self) -> Result<Self::DigestContext256, HubrisCryptoError> {
+        DigestInit::init(self, Sha2_256).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_digest_sha384(self) -> Result<Self::DigestContext384, HubrisCryptoError> {
+        DigestInit::init(self, Sha2_384).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_digest_sha512(self) -> Result<Self::DigestContext512, HubrisCryptoError> {
+        DigestInit::init(self, Sha2_512).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_hmac_sha256(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<Self::HmacContext256, HubrisCryptoError> {
+        MacInit::init(self, HmacSha2_256, key).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_hmac_sha384(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<Self::HmacContext384, HubrisCryptoError> {
+        MacInit::init(self, HmacSha2_384, key).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_hmac_sha512(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<Self::HmacContext512, HubrisCryptoError> {
+        MacInit::init(self, HmacSha2_512, key).map_err(|_| HubrisCryptoError::HardwareFailure)
     }
 }
