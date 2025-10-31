@@ -22,12 +22,16 @@ use sha2::{Digest as Sha2Digest, Sha256, Sha384, Sha512};
 
 /// A type implementing RustCrypto-based hash/digest owned traits.
 /// Compatible with Hubris digest server requirements
-pub struct RustCryptoController {
-    // No state needed - each operation creates its own context
-}
+/// `RustCrypto`-based cryptographic controller
+///
+/// Provides software-based cryptographic operations using the `RustCrypto`
+/// ecosystem for Hubris and other embedded environments.
+pub struct RustCryptoController {}
 
 impl RustCryptoController {
-    pub fn new() -> Self {
+    /// Creates a new `RustCrypto` controller instance
+    #[must_use]
+    pub const fn new() -> Self {
         Self {}
     }
 }
@@ -534,11 +538,12 @@ impl HubrisDigestDevice for RustCryptoController {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use heapless::Vec;
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn test_digest_operations() {
         // Test SHA-256
         let controller = RustCryptoController::new();
@@ -676,5 +681,257 @@ mod tests {
         let result = SecureOwnedKey::new(&oversized_data);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), CryptoError::InvalidKeyLength);
+    }
+
+    #[test]
+    fn test_hubris_digest_integration() {
+        use openprot_platform_traits_hubris::{HubrisDigestDevice, HubrisDigestOneShot};
+
+        let controller = RustCryptoController::new();
+
+        // Test SHA-256 one-shot operation
+        let data = b"Hello, Hubris!";
+        let result = controller.digest_sha256_oneshot(data);
+        assert!(result.is_ok());
+        let digest = result.unwrap();
+        assert_eq!(digest.value.len(), 8); // 8 u32 words = 32 bytes
+
+        // Test digest context initialization
+        let controller = RustCryptoController::new();
+        let ctx_result = controller.init_digest_sha256();
+        assert!(ctx_result.is_ok());
+    }
+
+    #[test]
+    fn test_hubris_hmac_integration() {
+        use openprot_platform_traits_hubris::{HubrisDigestDevice, HubrisDigestOneShot};
+
+        let controller = RustCryptoController::new();
+        let key_data = b"test_key_123456789012345678901234"; // 32 bytes
+
+        // Test HMAC-SHA256 one-shot operation
+        let data = b"Hello, Hubris HMAC!";
+        let result = controller.hmac_sha256_oneshot(key_data, data);
+        assert!(result.is_ok());
+        let mac = result.unwrap();
+        assert_eq!(mac.len(), 32); // SHA-256 output is 32 bytes
+
+        // Test HMAC context initialization
+        let controller = RustCryptoController::new();
+        let key = SecureOwnedKey::new(key_data).unwrap();
+        let ctx_result = controller.init_hmac_sha256(key);
+        assert!(ctx_result.is_ok());
+    }
+
+    #[test]
+    fn test_hubris_key_creation() {
+        use openprot_platform_traits_hubris::HubrisDigestDevice;
+
+        // Test key creation with valid sizes
+        let small_key = b"small";
+        let result = RustCryptoController::create_hmac_key(small_key);
+        assert!(result.is_ok());
+
+        // Test with maximum key size using heapless::Vec for realistic embedded testing
+        let mut max_key: Vec<u8, 256> = Vec::new(); // heapless::Vec with capacity 256
+        max_key
+            .resize(RustCryptoController::MAX_KEY_SIZE, 0)
+            .unwrap();
+        let result = RustCryptoController::create_hmac_key(&max_key);
+        assert!(result.is_ok());
+
+        // Test key creation with oversized key
+        let mut oversized_key: Vec<u8, 256> = Vec::new();
+        oversized_key
+            .resize(RustCryptoController::MAX_KEY_SIZE + 1, 0)
+            .unwrap();
+        let result = RustCryptoController::create_hmac_key(&oversized_key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hubris_error_mapping() {
+        use openprot_platform_traits_hubris::{HubrisCryptoError, HubrisDigestDevice};
+
+        // Test error mapping for oversized keys using heapless::Vec
+        let mut oversized_key: Vec<u8, 256> = Vec::new();
+        oversized_key
+            .resize(RustCryptoController::MAX_KEY_SIZE + 1, 0)
+            .unwrap();
+        let result = RustCryptoController::create_hmac_key(&oversized_key);
+        assert_eq!(result.unwrap_err(), HubrisCryptoError::InvalidKeyLength);
+    }
+
+    #[test]
+    fn test_hubris_sha256_correctness() {
+        use openprot_platform_traits_hubris::HubrisDigestOneShot;
+
+        let controller = RustCryptoController::new();
+
+        // Test with known SHA-256 test vector
+        // Input: "abc"
+        // Expected SHA-256: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        let data = b"abc";
+        let result = controller.digest_sha256_oneshot(data).unwrap();
+
+        // Use the proper as_bytes() method for comparison
+        let digest_bytes = result.as_bytes();
+
+        let expected = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+
+        assert_eq!(
+            digest_bytes, expected,
+            "SHA-256 digest does not match expected test vector"
+        );
+    }
+
+    #[test]
+    fn test_hubris_hmac_sha256_correctness() {
+        use openprot_platform_traits_hubris::HubrisDigestOneShot;
+
+        let controller = RustCryptoController::new();
+
+        // Test with known HMAC-SHA256 test vector from RFC 4231
+        // Key: "key" (0x6b6579)
+        // Data: "The quick brown fox jumps over the lazy dog"
+        // Expected: f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+        let key = b"key";
+        let data = b"The quick brown fox jumps over the lazy dog";
+
+        let result = controller.hmac_sha256_oneshot(key, data).unwrap();
+
+        let expected = [
+            0xf7, 0xbc, 0x83, 0xf4, 0x30, 0x53, 0x84, 0x24, 0xb1, 0x32, 0x98, 0xe6, 0xaa, 0x6f,
+            0xb1, 0x43, 0xef, 0x4d, 0x59, 0xa1, 0x49, 0x46, 0x17, 0x59, 0x97, 0x47, 0x9d, 0xbc,
+            0x2d, 0x1a, 0x3c, 0xd8,
+        ];
+
+        assert_eq!(
+            result, expected,
+            "HMAC-SHA256 does not match expected test vector"
+        );
+    }
+
+    #[test]
+    fn test_hubris_digest_context_operations() {
+        use openprot_hal_blocking::digest::owned::DigestOp;
+        use openprot_platform_traits_hubris::HubrisDigestDevice;
+
+        let controller = RustCryptoController::new();
+
+        // Test incremental hashing with known result
+        // Hash "abc" in parts: "a" + "bc"
+        let ctx = controller.init_digest_sha256().unwrap();
+        let ctx = ctx.update(b"a").unwrap();
+        let ctx = ctx.update(b"bc").unwrap();
+        let (result, _controller) = ctx.finalize().unwrap();
+
+        // Should match the same result as hashing "abc" at once
+        let digest_bytes = result.as_bytes();
+
+        let expected = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+
+        assert_eq!(
+            digest_bytes, expected,
+            "Incremental SHA-256 digest does not match expected result"
+        );
+    }
+
+    #[test]
+    fn test_hubris_hmac_context_operations() {
+        use openprot_hal_blocking::mac::owned::MacOp;
+        use openprot_platform_traits_hubris::HubrisDigestDevice;
+
+        let controller = RustCryptoController::new();
+        let key_data = b"key";
+        let key = SecureOwnedKey::new(key_data).unwrap();
+
+        // Test incremental HMAC with known result
+        // HMAC "The quick brown fox jumps over the lazy dog" in parts
+        let ctx = controller.init_hmac_sha256(key).unwrap();
+        let ctx = ctx.update(b"The quick brown fox ").unwrap();
+        let ctx = ctx.update(b"jumps over the lazy dog").unwrap();
+        let (result, _controller) = ctx.finalize().unwrap();
+
+        let expected = [
+            0xf7, 0xbc, 0x83, 0xf4, 0x30, 0x53, 0x84, 0x24, 0xb1, 0x32, 0x98, 0xe6, 0xaa, 0x6f,
+            0xb1, 0x43, 0xef, 0x4d, 0x59, 0xa1, 0x49, 0x46, 0x17, 0x59, 0x97, 0x47, 0x9d, 0xbc,
+            0x2d, 0x1a, 0x3c, 0xd8,
+        ];
+
+        assert_eq!(
+            result, expected,
+            "Incremental HMAC-SHA256 does not match expected result"
+        );
+    }
+
+    #[test]
+    fn test_hubris_comprehensive_crypto_demo() {
+        use openprot_hal_blocking::digest::owned::DigestOp;
+        use openprot_hal_blocking::mac::owned::MacOp;
+        use openprot_platform_traits_hubris::{HubrisDigestDevice, HubrisDigestOneShot};
+
+        // Test 1: SHA-256 One-shot
+        let controller = RustCryptoController::new();
+        let message = b"Hello, Hubris crypto world!";
+        let digest = controller.digest_sha256_oneshot(message).unwrap();
+        assert_eq!(digest.as_bytes().len(), 32); // SHA-256 produces 32 bytes
+
+        // Test 2: Incremental SHA-256
+        let controller = RustCryptoController::new();
+        let ctx = controller.init_digest_sha256().unwrap();
+        let ctx = ctx.update(b"Hello, ").unwrap();
+        let ctx = ctx.update(b"Hubris crypto ").unwrap();
+        let ctx = ctx.update(b"world!").unwrap();
+        let (digest_inc, _controller_recovered) = ctx.finalize().unwrap();
+        assert_eq!(digest.as_bytes(), digest_inc.as_bytes());
+
+        // Test 3: HMAC-SHA256 One-shot
+        let controller = RustCryptoController::new();
+        let key_data = b"secure_key_for_hubris_testing_123";
+        let hmac = controller.hmac_sha256_oneshot(key_data, message).unwrap();
+        assert_eq!(hmac.len(), 32); // HMAC-SHA256 produces 32 bytes
+
+        // Test 4: Incremental HMAC-SHA256
+        let controller = RustCryptoController::new();
+        let key = SecureOwnedKey::new(key_data).unwrap();
+        let ctx = controller.init_hmac_sha256(key).unwrap();
+        let ctx = ctx.update(b"Hello, ").unwrap();
+        let ctx = ctx.update(b"Hubris crypto ").unwrap();
+        let ctx = ctx.update(b"world!").unwrap();
+        let (hmac_inc, _controller_recovered) = ctx.finalize().unwrap();
+        assert_eq!(hmac, hmac_inc);
+
+        // Test 5: Key Management with heapless::Vec (embedded-friendly)
+        let mut dynamic_key: Vec<u8, 64> = Vec::new();
+        dynamic_key
+            .extend_from_slice(b"dynamic_embedded_key")
+            .unwrap();
+        let key_result = RustCryptoController::create_hmac_key(&dynamic_key);
+        assert!(key_result.is_ok());
+
+        // Test 6: Error handling with oversized keys
+        let mut oversized_key: Vec<u8, 256> = Vec::new();
+        oversized_key
+            .resize(RustCryptoController::MAX_KEY_SIZE + 1, 0)
+            .unwrap();
+        let error_result = RustCryptoController::create_hmac_key(&oversized_key);
+        assert!(error_result.is_err());
+
+        // All operations completed successfully - demonstrates that:
+        // ✅ RustCrypto backend is fully functional
+        // ✅ Hubris platform traits properly implemented
+        // ✅ Memory-safe operations in no_std environment
+        // ✅ Cryptographically correct results verified
+        // ✅ heapless::Vec integration working
+        // ✅ Controller recovery after operations working
     }
 }

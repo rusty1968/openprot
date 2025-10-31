@@ -33,3 +33,4 @@ cipher = { version = "0.4", default-features = false }
 zerocopy = { workspace = true }
 zeroize = { workspace = true }
 rand_core = { workspace = true }
+heapless = { workspace = true }
