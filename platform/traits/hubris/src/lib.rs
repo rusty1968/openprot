@@ -26,7 +26,7 @@ use openprot_hal_blocking::{
 /// Hubris IPC error codes for inter-task communication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubrisCryptoError {
-    /// Invalid key length for the requested operation333
+    /// Invalid key length for the requested operation
     InvalidKeyLength,
     /// Hardware crypto accelerator failure
     HardwareFailure,
@@ -36,6 +36,129 @@ pub enum HubrisCryptoError {
     ResourceBusy,
     /// Operation not supported by hardware
     NotSupported,
+    /// Session state error (context or device missing)
+    SessionStateError,
+}
+
+/// RAII-style crypto session management
+///
+/// This type provides RAII-style resource management for crypto devices used in
+/// session-based operations. It ensures that crypto hardware devices are properly
+/// recovered and can be reused after operations complete.
+///
+/// The CryptoSession handles the fundamental constraint that hardware controllers
+/// cannot be cloned, providing a mechanism for device recovery that works with
+/// both software implementations (which can create new instances) and hardware
+/// controllers (which require different recovery strategies).
+///
+/// ## Design Rationale
+///
+/// Session-based crypto operations consume the device when creating contexts,
+/// but we need to recover the device for reuse. This type solves that by:
+/// 1. Storing both the crypto context and a recovery device
+/// 2. Providing update/finalize methods that manage the context lifecycle  
+/// 3. Returning the recovered device when the session completes
+///
+/// ## Usage Pattern
+///
+/// ```rust,ignore
+/// let session = device.init_digest_session_sha256()?;
+/// let session = session.update(b"data")?;
+/// let (result, recovered_device) = session.finalize()?;
+/// // recovered_device can now be used for new operations
+/// ```
+pub struct CryptoSession<Context, Device> {
+    context: Option<Context>,
+    device: Option<Device>,
+}
+
+impl<Context, Device> CryptoSession<Context, Device> {
+    /// Create a new crypto session with the given context and recovery device
+    pub fn new(context: Context, device: Device) -> Self {
+        Self {
+            context: Some(context),
+            device: Some(device),
+        }
+    }
+
+    /// Take the context out of the session (for move operations)
+    fn take_context(&mut self) -> Result<Context, HubrisCryptoError> {
+        self.context
+            .take()
+            .ok_or(HubrisCryptoError::SessionStateError)
+    }
+
+    /// Put a context back into the session (after move operations)
+    fn put_context(&mut self, context: Context) {
+        self.context = Some(context);
+    }
+
+    /// Update the session with new data
+    ///
+    /// This method uses move semantics to update the context while maintaining
+    /// the device for recovery.
+    pub fn update(mut self, data: &[u8]) -> Result<Self, HubrisCryptoError>
+    where
+        Context: DigestOp<Controller = Device>,
+    {
+        let context = self.take_context()?;
+        let updated_context = context
+            .update(data)
+            .map_err(|_| HubrisCryptoError::HardwareFailure)?;
+        self.put_context(updated_context);
+        Ok(self)
+    }
+
+    /// Finalize the digest session and recover the device
+    ///
+    /// Returns the computed result and the device for reuse.
+    pub fn finalize(mut self) -> Result<(Context::Output, Device), HubrisCryptoError>
+    where
+        Context: DigestOp<Controller = Device>,
+    {
+        let context = self.take_context()?;
+        let (output, _controller) = context
+            .finalize()
+            .map_err(|_| HubrisCryptoError::HardwareFailure)?;
+
+        // Recover our device from the session
+        let device = self
+            .device
+            .take()
+            .ok_or(HubrisCryptoError::SessionStateError)?;
+        Ok((output, device))
+    }
+
+    /// Update the MAC session with new data
+    pub fn update_mac(mut self, data: &[u8]) -> Result<Self, HubrisCryptoError>
+    where
+        Context: MacOp<Controller = Device>,
+    {
+        let context = self.take_context()?;
+        let updated_context = context
+            .update(data)
+            .map_err(|_| HubrisCryptoError::HardwareFailure)?;
+        self.put_context(updated_context);
+        Ok(self)
+    }
+
+    /// Finalize the MAC session and recover the device
+    pub fn finalize_mac(mut self) -> Result<(Context::Output, Device), HubrisCryptoError>
+    where
+        Context: MacOp<Controller = Device>,
+    {
+        let context = self.take_context()?;
+        let (output, _controller) = context
+            .finalize()
+            .map_err(|_| HubrisCryptoError::HardwareFailure)?;
+
+        // Recover our device from the session
+        let device = self
+            .device
+            .take()
+            .ok_or(HubrisCryptoError::SessionStateError)?;
+        Ok((output, device))
+    }
 }
 
 /// Hubrus-specific digest device trait
@@ -108,11 +231,57 @@ pub trait HubrisDigestDevice {
     /// - Validates key size against device limits
     /// - Ensures compatibility with task memory constraints
     fn create_hmac_key(data: &[u8]) -> Result<Self::HmacKey, HubrisCryptoError> {
-        if data.len() > Self::MAX_KEY_SIZE {
-            return Err(HubrisCryptoError::InvalidKeyLength);
-        }
         Self::HmacKey::try_from(data).map_err(|_| HubrisCryptoError::InvalidKeyLength)
     }
+
+    // Session methods for digest operations
+
+    /// Initialize SHA-256 digest session with device recovery
+    fn init_digest_session_sha256(
+        self,
+    ) -> Result<CryptoSession<Self::DigestContext256, Self>, HubrisCryptoError>
+    where
+        Self: Sized;
+
+    /// Initialize SHA-384 digest session with device recovery  
+    fn init_digest_session_sha384(
+        self,
+    ) -> Result<CryptoSession<Self::DigestContext384, Self>, HubrisCryptoError>
+    where
+        Self: Sized;
+
+    /// Initialize SHA-512 digest session with device recovery
+    fn init_digest_session_sha512(
+        self,
+    ) -> Result<CryptoSession<Self::DigestContext512, Self>, HubrisCryptoError>
+    where
+        Self: Sized;
+
+    // Session methods for HMAC operations
+
+    /// Initialize HMAC-SHA256 session with device recovery
+    fn init_hmac_session_sha256(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<CryptoSession<Self::HmacContext256, Self>, HubrisCryptoError>
+    where
+        Self: Sized;
+
+    /// Initialize HMAC-SHA384 session with device recovery
+    fn init_hmac_session_sha384(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<CryptoSession<Self::HmacContext384, Self>, HubrisCryptoError>
+    where
+        Self: Sized;
+
+    /// Initialize HMAC-SHA512 session with device recovery
+    fn init_hmac_session_sha512(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<CryptoSession<Self::HmacContext512, Self>, HubrisCryptoError>
+    where
+        Self: Sized;
 }
 
 /// Extension trait for one-shot operations in Hubris
