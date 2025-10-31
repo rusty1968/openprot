@@ -8,6 +8,13 @@
 //! The traits use concrete types instead of generic associated types to ensure
 //! compatibility with Hubris IDL code generation systems.
 
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+use core::convert::TryFrom;
+use core::result::Result;
+
 use openprot_hal_blocking::{
     digest::{owned::DigestOp, Digest},
     mac::owned::MacOp,
