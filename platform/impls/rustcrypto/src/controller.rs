@@ -481,6 +481,58 @@ impl MacOp for MacContext512 {
     }
 }
 
+/// Hardware capabilities for RustCrypto software implementation
+// TODO: Uncomment when DigestHardwareCapabilities is available
+// impl DigestHardwareCapabilities for RustCryptoController {
+//     const MAX_CONCURRENT_SESSIONS: usize = 1; // Single-session software implementation
+//     const HAS_HARDWARE_ACCELERATION: bool = false; // Software-only
+//     const PLATFORM_NAME: &'static str = "RustCrypto Software";
+// }
+/// Hubris platform integration for RustCrypto controller
+impl HubrisDigestDevice for RustCryptoController {
+    type DigestContext256 = DigestContext256;
+    type DigestContext384 = DigestContext384;
+    type DigestContext512 = DigestContext512;
+
+    type HmacKey = SecureOwnedKey;
+    type HmacContext256 = MacContext256;
+    type HmacContext384 = MacContext384;
+    type HmacContext512 = MacContext512;
+
+    fn init_digest_sha256(self) -> Result<Self::DigestContext256, HubrisCryptoError> {
+        DigestInit::init(self, Sha2_256).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_digest_sha384(self) -> Result<Self::DigestContext384, HubrisCryptoError> {
+        DigestInit::init(self, Sha2_384).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_digest_sha512(self) -> Result<Self::DigestContext512, HubrisCryptoError> {
+        DigestInit::init(self, Sha2_512).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_hmac_sha256(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<Self::HmacContext256, HubrisCryptoError> {
+        MacInit::init(self, HmacSha2_256, key).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_hmac_sha384(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<Self::HmacContext384, HubrisCryptoError> {
+        MacInit::init(self, HmacSha2_384, key).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+
+    fn init_hmac_sha512(
+        self,
+        key: Self::HmacKey,
+    ) -> Result<Self::HmacContext512, HubrisCryptoError> {
+        MacInit::init(self, HmacSha2_512, key).map_err(|_| HubrisCryptoError::HardwareFailure)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,57 +676,5 @@ mod tests {
         let result = SecureOwnedKey::new(&oversized_data);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), CryptoError::InvalidKeyLength);
-    }
-}
-
-/// Hardware capabilities for RustCrypto software implementation
-// TODO: Uncomment when DigestHardwareCapabilities is available
-// impl DigestHardwareCapabilities for RustCryptoController {
-//     const MAX_CONCURRENT_SESSIONS: usize = 1; // Single-session software implementation
-//     const HAS_HARDWARE_ACCELERATION: bool = false; // Software-only
-//     const PLATFORM_NAME: &'static str = "RustCrypto Software";
-// }
-/// Hubris platform integration for RustCrypto controller
-impl HubrisDigestDevice for RustCryptoController {
-    type DigestContext256 = DigestContext256;
-    type DigestContext384 = DigestContext384;
-    type DigestContext512 = DigestContext512;
-
-    type HmacKey = SecureOwnedKey;
-    type HmacContext256 = MacContext256;
-    type HmacContext384 = MacContext384;
-    type HmacContext512 = MacContext512;
-
-    fn init_digest_sha256(self) -> Result<Self::DigestContext256, HubrisCryptoError> {
-        DigestInit::init(self, Sha2_256).map_err(|_| HubrisCryptoError::HardwareFailure)
-    }
-
-    fn init_digest_sha384(self) -> Result<Self::DigestContext384, HubrisCryptoError> {
-        DigestInit::init(self, Sha2_384).map_err(|_| HubrisCryptoError::HardwareFailure)
-    }
-
-    fn init_digest_sha512(self) -> Result<Self::DigestContext512, HubrisCryptoError> {
-        DigestInit::init(self, Sha2_512).map_err(|_| HubrisCryptoError::HardwareFailure)
-    }
-
-    fn init_hmac_sha256(
-        self,
-        key: Self::HmacKey,
-    ) -> Result<Self::HmacContext256, HubrisCryptoError> {
-        MacInit::init(self, HmacSha2_256, key).map_err(|_| HubrisCryptoError::HardwareFailure)
-    }
-
-    fn init_hmac_sha384(
-        self,
-        key: Self::HmacKey,
-    ) -> Result<Self::HmacContext384, HubrisCryptoError> {
-        MacInit::init(self, HmacSha2_384, key).map_err(|_| HubrisCryptoError::HardwareFailure)
-    }
-
-    fn init_hmac_sha512(
-        self,
-        key: Self::HmacKey,
-    ) -> Result<Self::HmacContext512, HubrisCryptoError> {
-        MacInit::init(self, HmacSha2_512, key).map_err(|_| HubrisCryptoError::HardwareFailure)
     }
 }
