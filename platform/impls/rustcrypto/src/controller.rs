@@ -77,7 +77,7 @@ impl MacError for CryptoError {
     }
 }
 
-/// Simple byte array key wrapper for software implementations
+/// Simple byte array key wrapper for software implementations (borrowed data)
 #[derive(Debug, Clone)]
 pub struct ByteArrayKey<'a>(&'a [u8]);
 
@@ -92,6 +92,97 @@ impl<'a> ByteArrayKey<'a> {
 }
 
 impl<'a> KeyHandle for ByteArrayKey<'a> {}
+
+/// Secure owned key type that owns its data on the stack (no allocation required)
+/// Maximum key size is 128 bytes to support all HMAC variants (SHA-512 block size)
+/// This solves the lifetime issue where ByteArrayKey<'static> cannot be created from local data
+#[derive(Debug, Clone)]
+pub struct SecureOwnedKey {
+    data: [u8; 128], // Fixed size buffer - no allocation needed
+    len: usize,      // Actual key length
+}
+
+impl SecureOwnedKey {
+    /// Maximum supported key length (128 bytes for SHA-512 block size)
+    pub const MAX_KEY_SIZE: usize = 128;
+
+    /// Create a new secure key by copying the provided bytes
+    /// Returns error if key is too large for our fixed buffer
+    pub fn new(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() > Self::MAX_KEY_SIZE {
+            return Err(CryptoError::InvalidKeyLength);
+        }
+
+        let mut data = [0u8; 128];
+        data[..bytes.len()].copy_from_slice(bytes);
+
+        Ok(Self {
+            data,
+            len: bytes.len(),
+        })
+    }
+
+    /// Create a secure key from a fixed-size array (zero-copy for arrays up to 128 bytes)
+    pub fn from_array<const N: usize>(array: [u8; N]) -> Result<Self, CryptoError> {
+        if N > Self::MAX_KEY_SIZE {
+            return Err(CryptoError::InvalidKeyLength);
+        }
+
+        let mut data = [0u8; 128];
+        data[..N].copy_from_slice(&array);
+
+        Ok(Self { data, len: N })
+    }
+
+    /// Get the key bytes as a slice (only the valid portion)
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
+
+    /// Get the key length
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Check if the key is empty
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl KeyHandle for SecureOwnedKey {}
+
+impl TryFrom<&[u8]> for SecureOwnedKey {
+    type Error = CryptoError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Self::new(bytes)
+    }
+}
+
+impl<const N: usize> TryFrom<[u8; N]> for SecureOwnedKey {
+    type Error = CryptoError;
+
+    fn try_from(array: [u8; N]) -> Result<Self, Self::Error> {
+        Self::from_array(array)
+    }
+}
+
+impl<const N: usize> TryFrom<&[u8; N]> for SecureOwnedKey {
+    type Error = CryptoError;
+
+    fn try_from(array: &[u8; N]) -> Result<Self, Self::Error> {
+        Self::new(array)
+    }
+}
+
+// Implement Drop to securely zero the key data when dropped
+impl Drop for SecureOwnedKey {
+    fn drop(&mut self) {
+        // Securely zero the key data
+        self.data.fill(0);
+    }
+}
 
 /// Digest contexts for different SHA algorithms
 pub struct DigestContext256(Sha256);
@@ -270,7 +361,7 @@ impl DigestOp for DigestContext512 {
 
 // MAC initialization - creates HMAC-SHA256 context
 impl MacInit<HmacSha2_256> for RustCryptoController {
-    type Key = ByteArrayKey<'static>;
+    type Key = SecureOwnedKey;
     type Context = MacContext256;
     type Output = [u8; 32]; // HMAC-SHA256 output size
 
@@ -283,7 +374,7 @@ impl MacInit<HmacSha2_256> for RustCryptoController {
 
 // MAC initialization - creates HMAC-SHA384 context
 impl MacInit<HmacSha2_384> for RustCryptoController {
-    type Key = ByteArrayKey<'static>;
+    type Key = SecureOwnedKey;
     type Context = MacContext384;
     type Output = [u8; 48]; // HMAC-SHA384 output size
 
@@ -296,7 +387,7 @@ impl MacInit<HmacSha2_384> for RustCryptoController {
 
 // MAC initialization - creates HMAC-SHA512 context
 impl MacInit<HmacSha2_512> for RustCryptoController {
-    type Key = ByteArrayKey<'static>;
+    type Key = SecureOwnedKey;
     type Context = MacContext512;
     type Output = [u8; 64]; // HMAC-SHA512 output size
 
@@ -430,7 +521,7 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn test_mac_operations() {
-        let key = ByteArrayKey::new(b"super secret key");
+        let key = SecureOwnedKey::new(b"super secret key").unwrap();
 
         // Test HMAC-SHA256
         let controller = RustCryptoController::new();
@@ -466,7 +557,7 @@ mod tests {
         let (hash256, controller) = digest_ctx.finalize().unwrap();
 
         // Use recovered controller for HMAC-SHA384
-        let key = ByteArrayKey::new(b"key");
+        let key = SecureOwnedKey::new(b"key").unwrap();
         let mac_ctx = MacInit::<HmacSha2_384>::init(controller, HmacSha2_384, key).unwrap();
         let mac_ctx = mac_ctx.update(b"test data").unwrap();
         let (mac384, controller) = mac_ctx.finalize().unwrap();
@@ -483,5 +574,50 @@ mod tests {
         assert_eq!(mac384.len(), 48); // HMAC-SHA384 output
         let hash512_bytes = hash512.as_bytes();
         assert_eq!(hash512_bytes.len(), 64); // SHA-512 output
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_secure_owned_key() {
+        // Test creation from slice
+        let key1 = SecureOwnedKey::new(b"test key").unwrap();
+        assert_eq!(key1.as_bytes(), b"test key");
+        assert_eq!(key1.len(), 8);
+        assert!(!key1.is_empty());
+
+        // Test creation from fixed array
+        let key2 = SecureOwnedKey::from_array(*b"another key").unwrap();
+        assert_eq!(key2.as_bytes(), b"another key");
+        assert_eq!(key2.len(), 11);
+
+        // Test TryFrom trait implementations
+        let key3: SecureOwnedKey = b"from slice".as_slice().try_into().unwrap();
+        assert_eq!(key3.as_bytes(), b"from slice");
+
+        let key4: SecureOwnedKey = (*b"from fixed array").try_into().unwrap();
+        assert_eq!(key4.as_bytes(), b"from fixed array");
+
+        let key5: SecureOwnedKey = b"from array ref".try_into().unwrap();
+        assert_eq!(key5.as_bytes(), b"from array ref");
+
+        // Test cloning
+        let key6 = key1.clone();
+        assert_eq!(key6.as_bytes(), key1.as_bytes());
+
+        // Test empty key
+        let empty_key = SecureOwnedKey::new(&[]).unwrap();
+        assert!(empty_key.is_empty());
+        assert_eq!(empty_key.len(), 0);
+
+        // Test maximum key size (should succeed)
+        let max_key_data = [0u8; SecureOwnedKey::MAX_KEY_SIZE];
+        let max_key = SecureOwnedKey::new(&max_key_data).unwrap();
+        assert_eq!(max_key.len(), SecureOwnedKey::MAX_KEY_SIZE);
+
+        // Test oversized key (should fail)
+        let oversized_data = [0u8; SecureOwnedKey::MAX_KEY_SIZE + 1];
+        let result = SecureOwnedKey::new(&oversized_data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), CryptoError::InvalidKeyLength);
     }
 }
