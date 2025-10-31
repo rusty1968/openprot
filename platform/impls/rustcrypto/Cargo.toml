@@ -9,6 +9,7 @@ edition.workspace = true
 
 [dependencies]
 openprot-hal-blocking = { path = "../../../hal/blocking" }
+openprot-platform-traits-hubris = { path = "../../traits/hubris" }
 
 # RustCrypto ECDSA crates
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }

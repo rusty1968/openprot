@@ -69,9 +69,9 @@ dependencies = [
 
 [[package]]
 name = "cfg-if"
-version = "1.0.3"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fd1289c04a9ea8cb22300a459a72a385d7c73d3259e2ed7dcb2af674838cfa9"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cipher"
@@ -241,9 +241,9 @@ dependencies = [
 
 [[package]]
 name = "generic-array"
-version = "0.14.7"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+checksum = "4bb6743198531e02858aeaea5398fcc883e71851fcbcb5a2f773e2fb6cb1edf2"
 dependencies = [
  "typenum",
  "version_check",
@@ -370,18 +370,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "openprot-platform-hubris"
+name = "openprot-platform-impl-hubris"
 version = "0.1.0"
 dependencies = [
- "openprot-platform-traits",
+ "openprot-platform-traits-hubris",
 ]
 
 [[package]]
 name = "openprot-platform-linux"
 version = "0.1.0"
-dependencies = [
- "openprot-platform-traits",
-]
 
 [[package]]
 name = "openprot-platform-mock"
@@ -395,13 +392,15 @@ dependencies = [
 [[package]]
 name = "openprot-platform-tock"
 version = "0.1.0"
-dependencies = [
- "openprot-platform-traits",
-]
 
 [[package]]
-name = "openprot-platform-traits"
+name = "openprot-platform-traits-hubris"
 version = "0.1.0"
+dependencies = [
+ "openprot-hal-async",
+ "openprot-hal-blocking",
+ "openprot-hal-nb",
+]
 
 [[package]]
 name = "openprot-services-storage"
@@ -446,6 +445,7 @@ dependencies = [
  "hmac",
  "k256",
  "openprot-hal-blocking",
+ "openprot-platform-traits-hubris",
  "p256",
  "p384",
  "rand_core 0.9.3",

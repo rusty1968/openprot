@@ -7,7 +7,7 @@ members = [
     "hal/blocking",
     "hal/async", 
     "hal/nb",
-    "platform/traits",
+    "platform/traits/hubris",
     "platform/impls/baremetal/mock",
     "platform/impls/linux",
     "platform/impls/tock",

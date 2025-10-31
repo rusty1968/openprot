@@ -1,5 +1,7 @@
 // Licensed under the Apache-2.0 license
 
+#![allow(deprecated)] // Allow deprecated GenericArray from cipher crate for compatibility
+
 use openprot_hal_blocking::cipher::{
     AeadCipherMode, BlockCipherMode, CipherInit, CipherMode, CipherOp, CipherStatus, Error,
     ErrorKind, ErrorType, SymmetricCipher,

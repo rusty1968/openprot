@@ -4,7 +4,10 @@
 name = "openprot-platform-traits"
 version = "0.1.0"
 edition = "2021"
-description = "OS abstraction traits for OpenPRoT"
+description = "Platform integration traits for OpenPRoT"
 license = "Apache-2.0"
 
 [dependencies]
+openprot-platform-traits-hubris = { path = "../traits-hubris" }
+openprot-platform-traits-tock = { path = "../traits-tock" }
+openprot-platform-traits-linux = { path = "../traits-linux" }
