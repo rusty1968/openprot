@@ -170,22 +170,22 @@ impl<Context, Device> CryptoSession<Context, Device> {
 /// - Resource management aligns with Hubris task model
 pub trait HubrisDigestDevice {
     /// Digest context for SHA-256 operations
-    type DigestContext256: DigestOp<Output = Digest<8>>;
+    type DigestContext256: DigestOp<Controller = Self, Output = Digest<8>>;
     /// Digest context for SHA-384 operations  
-    type DigestContext384: DigestOp<Output = Digest<12>>;
+    type DigestContext384: DigestOp<Controller = Self, Output = Digest<12>>;
     /// Digest context for SHA-512 operations
-    type DigestContext512: DigestOp<Output = Digest<16>>;
+    type DigestContext512: DigestOp<Controller = Self, Output = Digest<16>>;
 
     /// HMAC key type that can be created from byte slices
     /// Must be compatible with Hubris task memory constraints
     type HmacKey: for<'a> TryFrom<&'a [u8]>;
 
     /// HMAC context for SHA-256 operations
-    type HmacContext256: MacOp<Output = [u8; 32]>;
+    type HmacContext256: MacOp<Controller = Self, Output = [u8; 32]>;
     /// HMAC context for SHA-384 operations
-    type HmacContext384: MacOp<Output = [u8; 48]>;
+    type HmacContext384: MacOp<Controller = Self, Output = [u8; 48]>;
     /// HMAC context for SHA-512 operations
-    type HmacContext512: MacOp<Output = [u8; 64]>;
+    type HmacContext512: MacOp<Controller = Self, Output = [u8; 64]>;
 
     /// Maximum supported key size in bytes
     /// This aligns with Hubris task memory constraints
