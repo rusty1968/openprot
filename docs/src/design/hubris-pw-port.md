@@ -86,7 +86,7 @@ No code generation          → Hand-written client/server code
 | **Shared Memory** | Leases (temporary IPC memory grants) | Static memory regions in system.json5 |
 | **Task Communication** | Task-slots (compile-time IPC handles) | Channel IDs (runtime configuration) |
 | **Notifications** | Async notification bits (timers, IRQs) | No built-in async notification system |
-| **Peripheral Access** | Exclusive ownership via kernel | MPU-enforced memory regions |
+| **Peripheral Access** | `uses = ["periph"]` in app.toml (MPU-enforced) | `device_memory[]` in system.json5 (MPU-enforced) |
 | **Supervisor/Recovery** | task-jefe supervisor (standard, priority 0) | No built-in supervisor (DIY) |
 | **Build System** | Cargo with xtask | Bazel |
 | **Configuration Format** | app.toml | system.json5 |
@@ -497,6 +497,7 @@ struct ReadResponse {
 // client.rs - Manual implementation (replaces Idol-generated client)
 
 use pw_kernel_api as kernel;
+use userspace::time::Instant;
 
 pub struct UartClient {
     channel_id: u32,  // Channel to UART server
@@ -530,7 +531,7 @@ impl UartClient {
             )
         };
 
-        kernel::channel_transact(self.channel_id, request_bytes, &mut response_buf)
+        kernel::channel_transact(self.channel_id, request_bytes, &mut response_buf, Instant::MAX)
             .map_err(|_| UartError::HardwareError)?;
 
         // Parse response
@@ -570,7 +571,7 @@ impl UartClient {
             )
         };
 
-        kernel::channel_transact(self.channel_id, request_bytes, &mut response_buf)
+        kernel::channel_transact(self.channel_id, request_bytes, &mut response_buf, Instant::MAX)
             .map_err(|_| UartError::HardwareError)?;
 
         // Parse response
@@ -620,7 +621,7 @@ impl UartServer {
         
         loop {
             // Block waiting for IPC request
-            let msg_len = match kernel::channel_read(UART_CHANNEL_ID, &mut request_buf) {
+            let msg_len = match kernel::channel_read(UART_CHANNEL_ID, 0, &mut request_buf) {
                 Ok(len) => len,
                 Err(_) => continue,  // Ignore errors, keep serving
             };
@@ -795,6 +796,9 @@ fn fill_buffer(buffer: BorrowMut<[u8]>) -> Result<usize, Error> {
 **Manual Implementation:**
 
 ```rust
+use pw_kernel_api as kernel;
+use userspace::time::Instant;
+
 // Define shared memory address (generated from system.json5)
 const DMA_BUFFER_ADDR: usize = 0x20010000;
 const DMA_BUFFER_SIZE: usize = 0x1000;
@@ -828,7 +832,7 @@ impl DmaClient {
         };
 
         let mut response_buf = [0u8; 4];
-        kernel::channel_transact(self.channel_id, request.as_bytes(), &mut response_buf)?;
+        kernel::channel_transact(self.channel_id, request.as_bytes(), &mut response_buf, Instant::MAX)?;
 
         Ok(())
     }
@@ -1382,7 +1386,7 @@ impl SensorServer {
 
         loop {
             // Wait for request
-            if kernel::channel_read(SENSOR_CHANNEL, &mut request_buf).is_err() {
+            if kernel::channel_read(SENSOR_CHANNEL, 0, &mut request_buf).is_err() {
                 continue;
             }
 
@@ -1470,6 +1474,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #![no_std]
 
 use pw_kernel_api as kernel;
+use userspace::time::Instant;
 use crate::protocol::*;
 
 pub struct SensorClient {
@@ -1494,7 +1499,7 @@ impl SensorClient {
             )
         };
 
-        kernel::channel_transact(self.channel, request_bytes, &mut response_buf)
+        kernel::channel_transact(self.channel, request_bytes, &mut response_buf, Instant::MAX)
             .map_err(|_| SensorError::I2cError)?;
 
         let response = unsafe {
@@ -1517,7 +1522,7 @@ impl SensorClient {
             )
         };
 
-        kernel::channel_transact(self.channel, request_bytes, &mut response_buf)
+        kernel::channel_transact(self.channel, request_bytes, &mut response_buf, Instant::MAX)
             .map_err(|_| SensorError::I2cError)?;
 
         let response = unsafe {
