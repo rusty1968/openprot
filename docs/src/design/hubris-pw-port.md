@@ -77,7 +77,7 @@ No code generation          → Hand-written client/server code
 
 | Aspect | Hubris | Pigweed Kernel |
 |--------|--------|----------------|
-| **Task/Process Isolation** | MPU regions (ARMv8-M) | MPU regions (ARMv8-M or v7) |
+| **Task/Process Isolation** | MPU regions (ARMv7-M) | MPU regions (ARMv8-M only) |
 | **IPC Mechanism** | Idol-generated stubs over kernel IPC via task-slots | Manual channel syscalls |
 | **Service Definitions** | .idol files → generated Rust code | No IDL, hand-written protocols |
 | **Error Handling** | Idol error types (auto-generated) | Manual Result<> types |
