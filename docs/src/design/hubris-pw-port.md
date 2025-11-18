@@ -21,17 +21,15 @@ This guide provides a practical roadmap for porting existing Oxide Hubris applic
 
 1. [Understanding the Gap](#understanding-the-gap)
    - [Terminology Mapping](#terminology-mapping)
-2. [Translation Strategy Overview](#translation-strategy-overview)
-3. [Component-by-Component Mapping](#component-by-component-mapping)
-4. [Idol to Manual IPC Translation](#idol-to-manual-ipc-translation)
-5. [Configuration Translation](#configuration-translation)
-6. [Build System Integration](#build-system-integration)
-7. [Complete Porting Example](#complete-porting-example)
-8. [Testing and Validation](#testing-and-validation)
-9. [Known Limitations](#known-limitations)
-10. [Decision Matrix](#decision-matrix)
-11. [Migration Strategies](#migration-strategies)
-10. [Decision Matrix](#decision-matrix)
+2. [Component-by-Component Mapping](#component-by-component-mapping)
+3. [Idol to Manual IPC Translation](#idol-to-manual-ipc-translation)
+4. [Configuration Translation](#configuration-translation)
+5. [Build System Integration](#build-system-integration)
+6. [Complete Porting Example](#complete-porting-example)
+7. [Testing and Validation](#testing-and-validation)
+8. [Known Limitations](#known-limitations)
+9. [Decision Matrix](#decision-matrix)
+10. [Migration Strategies](#migration-strategies)
 
 ---
 
@@ -92,36 +90,6 @@ No code generation          → Hand-written client/server code
 | **Configuration Format** | app.toml | system.json5 |
 
 ---
-
-## Translation Strategy Overview
-
-### Phase 1: Analysis
-1. Inventory all Idol interfaces in your Hubris application (check `idl/` directory)
-2. Document IPC call patterns and message flows
-3. Map task-slots dependencies (which tasks talk to which)
-4. Identify lease usage (temporary IPC memory grants)
-5. Document peripheral access patterns (which tasks own which peripherals)
-6. Map notification usage (async signaling, interrupts, timers)
-7. Verify uphill rule compliance (lower priority → higher priority IPC)
-
-### Phase 2: Manual Protocol Design
-1. Translate Idol interface definitions into binary message formats
-2. Create protocol documentation (message layouts, error codes)
-3. Implement request/response structures in Rust
-4. Plan shared memory regions (if using leases)
-
-### Phase 3: Core Translation
-1. Translate app.toml → system.json5
-2. Port task main loops → process main loops
-3. Replace Idol client calls → manual channel_transact
-4. Replace Idol server handlers → manual channel_read/respond
-5. Implement peripheral drivers
-
-### Phase 4: Testing and Refinement
-1. Unit test individual processes
-2. Integration test IPC flows
-3. Performance testing
-4. Debugging and optimization
 
 ---
 
