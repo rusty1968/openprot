@@ -1886,21 +1886,6 @@ Porting Hubris applications to Pigweed kernel is **feasible but labor-intensive*
 4. **Test Extensively:** Without compile-time guarantees, runtime validation is essential
 5. **Weigh Costs vs. Benefits:** Ensure Pigweed-specific features justify porting effort
 
-### When to Port
-
-✅ **Good Fit:**
-- Small to medium applications (<20 tasks)
-- Simple Idol interfaces (<10 operations each)
-- Team comfortable with manual protocol implementation
-- Long development timeline (flexibility to absorb porting effort)
-- Need Pigweed ecosystem features (Bazel integration, specific MCU support)
-
-❌ **Poor Fit:**
-- Large applications (50+ tasks)
-- Complex Idol interfaces with many operations
-- Short timeline or limited resources
-- Hubris already working well with no compelling reason to change
-- Heavy reliance on Hubris-specific features (leases, supervisor, notifications)
 
 ### Future Outlook
 
