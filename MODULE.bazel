@@ -22,16 +22,23 @@ bazel_dep(name = "pigweed")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_go", version = "0.52.0")
 bazel_dep(name = "rules_rust", version = "0.66.0")
+
+# Apply patch that adds missing ARM triples to rules_rust
+single_version_override(
+    module_name = "rules_rust",
+    patch_strip = 1,
+    patches = [
+        "//patches:0003-Add-thumbv6m-and-more-thumbv7m-and-thumbv8m-triples.patch",
+    ],
+)
 bazel_dep(name = "rules_platform", version = "0.1.0")
 bazel_dep(name = "rules_python", version = "1.6.3")
 bazel_dep(name = "ureg")
 
 git_override(
     module_name = "pigweed",
-    # ROLL: Warning: this entry is automatically updated by
-    # ROLL: https://cr-buildbucket.appspot.com/builder/pigweed-internal/opentitan.roll/pigweed-opentitan-roller
-    commit = "f52059663fee1e2ab2f2ab752301b159da3ca806",
-    remote = "https://pigweed.googlesource.com/pigweed/pigweed",
+    commit = "f4d0fdfb3a657f20e0a059010fd2d10853432e6f",
+    remote = "https://github.com/rusty1968/pigweed",
 )
 
 git_override(
@@ -48,6 +55,8 @@ register_toolchains(
     "@pigweed//pw_toolchain/host_clang:host_cc_toolchain_linux",
     "@pigweed//pw_toolchain/host_clang:host_cc_toolchain_macos",
     "@pigweed//pw_toolchain/riscv_clang:riscv_clang_cc_toolchain_rv32imc",
+    # ARM Cortex-M C++ toolchain (AST1030)
+    "@pigweed//pw_toolchain:cc_toolchain_cortex-m3",
     "@pw_rust_toolchains//:all",
 )
 
@@ -67,6 +76,7 @@ crate.from_cargo(
 
         # Target platforms
         "riscv32imc-unknown-none-elf",
+        "thumbv7m-none-eabi",
     ],
 )
 use_repo(crate, "rust_crates")
@@ -84,6 +94,13 @@ archive_override(
     integrity = "sha256-n/0uF/b0uXkEfTzP7QJx/cK1KWExES/Zn/C/EqyXzGo=",
     url = "https://storage.googleapis.com/artifacts.opentitan.org/dev_bundle/devbundle-test-20251105.tar.xz",
 )
+
+# ── AST1060 Peripheral Access Crate (svd2rust-generated) ──
+ast1060_pac_ext = use_extension(
+    "//third_party:ast1060_pac.bzl",
+    "ast1060_pac_ext",
+)
+use_repo(ast1060_pac_ext, "ast1060_pac", "vcell")
 
 nonhermetic_repo = use_repo_rule("//target/earlgrey/tooling/signing:nonhermetic.bzl", "nonhermetic_repo")
 
