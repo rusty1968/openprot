@@ -271,9 +271,12 @@ pub fn output_size_for_op(op: CryptoOp, input_len: usize) -> usize {
         CryptoOp::Sha384Hash | CryptoOp::Sha384Finish => SHA384_OUTPUT_SIZE,
         CryptoOp::Sha512Hash | CryptoOp::Sha512Finish => SHA512_OUTPUT_SIZE,
         // Streaming begin/update return empty success
-        CryptoOp::Sha256Begin | CryptoOp::Sha256Update |
-        CryptoOp::Sha384Begin | CryptoOp::Sha384Update |
-        CryptoOp::Sha512Begin | CryptoOp::Sha512Update => 0,
+        CryptoOp::Sha256Begin
+        | CryptoOp::Sha256Update
+        | CryptoOp::Sha384Begin
+        | CryptoOp::Sha384Update
+        | CryptoOp::Sha512Begin
+        | CryptoOp::Sha512Update => 0,
         CryptoOp::HmacSha256 => SHA256_OUTPUT_SIZE,
         CryptoOp::HmacSha384 => SHA384_OUTPUT_SIZE,
         CryptoOp::HmacSha512 => SHA512_OUTPUT_SIZE,

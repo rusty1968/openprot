@@ -226,12 +226,18 @@ impl<'a> CryptoInput<'a> {
     /// sees raw wire bytes.
     pub fn from_wire(op: CryptoOp, key: &'a [u8], nonce: &'a [u8], data: &'a [u8]) -> Self {
         match op {
-            CryptoOp::Sha256Hash | CryptoOp::Sha384Hash | CryptoOp::Sha512Hash |
-            CryptoOp::Sha256Begin | CryptoOp::Sha256Update | CryptoOp::Sha256Finish |
-            CryptoOp::Sha384Begin | CryptoOp::Sha384Update | CryptoOp::Sha384Finish |
-            CryptoOp::Sha512Begin | CryptoOp::Sha512Update | CryptoOp::Sha512Finish => {
-                CryptoInput::Digest { data }
-            }
+            CryptoOp::Sha256Hash
+            | CryptoOp::Sha384Hash
+            | CryptoOp::Sha512Hash
+            | CryptoOp::Sha256Begin
+            | CryptoOp::Sha256Update
+            | CryptoOp::Sha256Finish
+            | CryptoOp::Sha384Begin
+            | CryptoOp::Sha384Update
+            | CryptoOp::Sha384Finish
+            | CryptoOp::Sha512Begin
+            | CryptoOp::Sha512Update
+            | CryptoOp::Sha512Finish => CryptoInput::Digest { data },
             CryptoOp::HmacSha256 | CryptoOp::HmacSha384 | CryptoOp::HmacSha512 => {
                 CryptoInput::Mac { key, data }
             }
@@ -253,8 +259,10 @@ impl<'a> CryptoInput<'a> {
             // (wire protocol is stable) but should never reach from_wire —
             // the server dispatch rejects them first.
             #[cfg(not(feature = "ecdsa"))]
-            CryptoOp::EcdsaP256Sign | CryptoOp::EcdsaP256Verify |
-            CryptoOp::EcdsaP384Sign | CryptoOp::EcdsaP384Verify => {
+            CryptoOp::EcdsaP256Sign
+            | CryptoOp::EcdsaP256Verify
+            | CryptoOp::EcdsaP384Sign
+            | CryptoOp::EcdsaP384Verify => {
                 panic!("ECDSA operations require the 'ecdsa' feature")
             }
         }
@@ -528,8 +536,7 @@ pub trait Streaming<A: Algorithm> {
     /// Finalize the session and write the result to `output`.
     ///
     /// Returns the number of bytes written. Consumes the session.
-    fn finish(&mut self, session: Self::Session, output: &mut [u8])
-        -> Result<usize, BackendError>;
+    fn finish(&mut self, session: Self::Session, output: &mut [u8]) -> Result<usize, BackendError>;
 
     /// Cancel an active session without producing output.
     fn cancel(&mut self, session: Self::Session);

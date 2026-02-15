@@ -1027,7 +1027,10 @@ pub mod streaming {
     impl<T, C> Owned<T, C> {
         /// Create a new owned context wrapping a digest context and its controller.
         pub fn new(context: T, controller: C) -> Self {
-            Self { context, controller }
+            Self {
+                context,
+                controller,
+            }
         }
 
         /// Get a reference to the underlying context.
@@ -1202,7 +1205,9 @@ mod tests {
                     return Err(MockError("buffer too small"));
                 }
                 // Simple "hash": sum of bytes mod 256 repeated
-                let sum: u8 = self.data[..self.len].iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+                let sum: u8 = self.data[..self.len]
+                    .iter()
+                    .fold(0u8, |acc, &b| acc.wrapping_add(b));
                 output[..4].fill(sum);
                 self.finalized = true;
                 Ok(4)
