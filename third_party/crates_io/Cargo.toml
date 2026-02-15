@@ -18,20 +18,19 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[workspace]
+
 [lib]
 path = "fake.rs"
 
 [dependencies]
 anyhow = "1.0.98"
+# Note: aspeed-ddk, embedded-hal, embedded-io, and cortex-m crates are in
+# crates_no_std to avoid duplicate symbol issues with embedded builds
 bitfield-struct = "0.11.0"
 bitflags = "2.9.1"
-byteorder = "1.5.0"
 clap = { version = "4.5.40", features = ["derive"] }
 compiler_builtins = { version = "0.1.160", features = ["no-f16-f128"] }
-cortex-m = "0.7.7"
-cortex-m-rt = "0.7.5"
-cortex-m-semihosting = "0.5.0"
-embedded-io = "0.6.1"
 hashlink = { version = "0.10.0", features = ["serde", "serde_impl"] }
 minijinja = { version = "2.12.0", features = ["loader"] }
 nom = "7.1.3"
@@ -48,3 +47,6 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json5 = "0.2.1"
 syn = { version = "2.0.104", features = ["full", "extra-traits"] }
 toml = "0.8.23"
+
+[patch."https://github.com/AspeedTech-BMC/ast1060-pac.git"]
+ast1060-pac = { git = "https://github.com/stevenlee7189/ast1060-pac", branch = "main" }

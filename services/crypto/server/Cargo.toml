@@ -1,0 +1,28 @@
+# Licensed under the Apache-2.0 license
+
+[package]
+name = "crypto-server"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "crypto_server"
+path = "src/main.rs"
+
+[features]
+default = []
+ecdsa = ["crypto-api/ecdsa"]
+
+[dependencies]
+crypto-api = { path = "../api" }
+zerocopy = { version = "0.8", features = ["derive"] }
+
+# RustCrypto
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
+
+# These will be provided by the Bazel build
+# pw_log = ...
+# userspace = ...

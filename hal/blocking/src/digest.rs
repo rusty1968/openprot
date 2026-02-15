@@ -30,12 +30,20 @@
 //!
 //! ### Scoped API
 //! - `scoped::DigestInit` - Trait for initializing digest operations (borrowed contexts)
-//! - `scoped::DigestOp` - Trait for performing digest computations (borrowed contexts)
+//! - `scoped::DigestContext` - Trait for performing digest computations (borrowed contexts)
 //! - `scoped::DigestCtrlReset` - Trait for resetting digest contexts
 //!
-//! ### Owned API (Typestate)
-//! - `owned::DigestInit` - Trait for initializing digest operations (owned contexts)
-//! - `owned::DigestOp` - Trait for performing digest computations (owned contexts)
+//! ### Owned API (built on streaming)
+//! - `owned::DigestInit` - Factory trait returning `Owned<Context, Controller>`
+//! - `owned::Owned` - Re-export of `streaming::Owned<T, C>` for move semantics
+//!
+//! ### Streaming API
+//! - `streaming::DigestContext` - Core operation trait with `&mut self` methods
+//! - `streaming::DigestContextFactory` - Factory for creating contexts
+//! - `streaming::Owned<T, C>` - Typestate wrapper for resource recovery
+//!
+//! The `streaming` module provides the core abstraction. The `owned` module
+//! builds on it to provide a factory pattern with move-based resource management.
 //!
 //! ## Supported Algorithms
 //!
@@ -58,7 +66,7 @@
 //! # }
 //! # struct MyContext<'a>(&'a mut MyDigestImpl);
 //! # impl ErrorType for MyContext<'_> { type Error = core::convert::Infallible; }
-//! # impl DigestOp for MyContext<'_> {
+//! # impl DigestContext for MyContext<'_> {
 //! #     type Output = Digest<8>;
 //! #     fn update(&mut self, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
 //! #     fn finalize(self) -> Result<Self::Output, Self::Error> {
@@ -73,31 +81,33 @@
 //! ```
 //!
 //! ### Owned API (Move-based - for servers/sessions)
-//! ```rust,no_run
-//! # use openprot_hal_blocking::digest::*;
-//! # use openprot_hal_blocking::digest::owned::{DigestInit, DigestOp};
-//! # struct MyDigestController;
-//! # impl ErrorType for MyDigestController { type Error = core::convert::Infallible; }
-//! # impl DigestInit<Sha2_256> for MyDigestController {
-//! #     type Context = MyOwnedContext;
-//! #     type Output = Digest<8>;
-//! #     fn init(self, _: Sha2_256) -> Result<Self::Context, Self::Error> { todo!() }
-//! # }
-//! # struct MyOwnedContext;
-//! # impl ErrorType for MyOwnedContext { type Error = core::convert::Infallible; }
-//! # impl DigestOp for MyOwnedContext {
-//! #     type Output = Digest<8>;
-//! #     type Controller = MyDigestController;
-//! #     fn update(self, _: &[u8]) -> Result<Self, Self::Error> { todo!() }
-//! #     fn finalize(self) -> Result<(Self::Output, Self::Controller), Self::Error> { todo!() }
-//! #     fn cancel(self) -> Self::Controller { todo!() }
-//! # }
-//! let controller = MyDigestController;
-//! let context = controller.init(Sha2_256)?;
-//! let context = context.update(b"hello world")?;
-//! let (digest, recovered_controller) = context.finalize()?;
-//! // Controller can be reused for new operations
-//! # Ok::<(), core::convert::Infallible>(())
+//! ```rust,ignore
+//! use openprot_hal_blocking::digest::*;
+//! use openprot_hal_blocking::digest::streaming::DigestContext;
+//! use openprot_hal_blocking::digest::owned::{DigestInit, Owned};
+//!
+//! // Implement streaming::DigestContext for your backend
+//! impl DigestContext for MyStreamingContext {
+//!     const OUTPUT_SIZE: usize = 32;
+//!     fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> { /* ... */ }
+//!     fn finalize(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> { /* ... */ }
+//!     fn reset(&mut self) { /* ... */ }
+//! }
+//!
+//! // Implement owned::DigestInit to create Owned wrappers
+//! impl DigestInit<Sha2_256> for MyController {
+//!     type Context = MyStreamingContext;
+//!     fn init(self, algo: Sha2_256) -> Result<Owned<Self::Context, Self>, Self::Error> {
+//!         Ok(Owned::new(MyStreamingContext::new(), self))
+//!     }
+//! }
+//!
+//! // Usage
+//! let controller = MyController::new();
+//! let owned_ctx = controller.init(Sha2_256)?;
+//! let owned_ctx = owned_ctx.update(b"hello world")?;
+//! let mut output = [0u8; 32];
+//! let (len, recovered_controller) = owned_ctx.finalize(&mut output)?;
 //! ```
 
 use core::fmt::Debug;
@@ -553,7 +563,7 @@ pub trait ErrorType {
 /// # }
 /// # struct MyContext<'a>(&'a mut MyDigestImpl);
 /// # impl ErrorType for MyContext<'_> { type Error = core::convert::Infallible; }
-/// # impl DigestOp for MyContext<'_> {
+/// # impl DigestContext for MyContext<'_> {
 /// #     type Output = Digest<8>;
 /// #     fn update(&mut self, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
 /// #     fn finalize(self) -> Result<Self::Output, Self::Error> {
@@ -568,9 +578,9 @@ pub trait DigestInit<T: DigestAlgorithm>: ErrorType {
     /// The operation context type that will handle the digest computation.
     ///
     /// This associated type represents the stateful context returned by [`init`](Self::init)
-    /// that can be used to perform the actual digest operations via [`DigestOp`].
+    /// that can be used to perform the actual digest operations via [`DigestContext`].
     /// The lifetime parameter ensures the context cannot outlive the device that created it.
-    type OpContext<'a>: DigestOp<Output = Self::Output>
+    type OpContext<'a>: DigestContext<Output = Self::Output>
     where
         Self: 'a;
 
@@ -643,7 +653,7 @@ pub trait DigestCtrlReset: ErrorType {
 /// # use openprot_hal_blocking::digest::*;
 /// # struct MyContext;
 /// # impl ErrorType for MyContext { type Error = core::convert::Infallible; }
-/// # impl DigestOp for MyContext {
+/// # impl DigestContext for MyContext {
 /// #     type Output = Digest<8>;
 /// #     fn update(&mut self, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
 /// #     fn finalize(self) -> Result<Self::Output, Self::Error> {
@@ -656,7 +666,7 @@ pub trait DigestCtrlReset: ErrorType {
 /// let digest = context.finalize()?;
 /// # Ok::<(), core::convert::Infallible>(())
 /// ```
-pub trait DigestOp: ErrorType {
+pub trait DigestContext: ErrorType {
     /// The digest output type.
     ///
     /// This type represents the final digest value produced by [`finalize`](Self::finalize).
@@ -699,172 +709,375 @@ pub mod scoped {
     //! **Limitation**: Contexts cannot be stored or persist across function boundaries
     //! due to lifetime constraints.
 
-    pub use super::{DigestAlgorithm, DigestCtrlReset, DigestInit, DigestOp, ErrorType};
+    pub use super::{
+        DigestAlgorithm, DigestContext, DigestCtrlReset, DigestInit, Error, ErrorKind, ErrorType,
+    };
 }
 
 pub mod owned {
     //! Owned digest API with move-based resource management
     //!
-    //! This module provides a move-based digest API where contexts are owned
-    //! rather than borrowed. This enables:
+    //! This module provides a move-based digest API built on top of
+    //! [`streaming::Owned`](super::streaming::Owned). It enables:
     //! - Persistent session storage
     //! - Multiple concurrent contexts
     //! - IPC boundary crossing
     //! - Resource recovery patterns
     //! - Compile-time prevention of use-after-finalize
     //!
-    //! This API is specifically designed for server applications like Hubris
-    //! digest servers that need to maintain long-lived sessions.
+    //! # Relationship to streaming module
+    //!
+    //! The `owned` API is a thin layer over `streaming::Owned<T, C>`:
+    //! - `streaming::DigestContext` provides the core `&mut self` operations
+    //! - `streaming::Owned<T, C>` wraps context + controller with move semantics
+    //! - `owned::DigestInit` provides the factory pattern for creating owned contexts
+    //!
+    //! This layered design means implementations only need to implement
+    //! `streaming::DigestContext` and get owned semantics for free.
+    //!
+    //! ```text
+    //! ┌────────────────────────────────────────────────────────────┐
+    //! │  owned::DigestInit<A>                                      │
+    //! │  - Factory trait returning Owned<Context, Controller>      │
+    //! │  - Re-exports streaming::Owned                             │
+    //! └────────────────────────────┬───────────────────────────────┘
+    //!                              │ builds on
+    //! ┌────────────────────────────▼───────────────────────────────┐
+    //! │  streaming::Owned<T, C>                                    │
+    //! │  - Move-based wrapper: update(self), finalize(self), etc.  │
+    //! │  - Controller recovery on finalize/cancel                  │
+    //! └────────────────────────────┬───────────────────────────────┘
+    //!                              │ wraps
+    //! ┌────────────────────────────▼───────────────────────────────┐
+    //! │  streaming::DigestContext                                  │
+    //! │  - Core trait: &mut self methods                           │
+    //! │  - Implement once, get owned semantics free                │
+    //! └────────────────────────────────────────────────────────────┘
+    //! ```
+    //!
+    //! # Examples
+    //!
+    //! ```rust,ignore
+    //! use openprot_hal_blocking::digest::owned::DigestInit;
+    //! use openprot_hal_blocking::digest::Sha2_256;
+    //!
+    //! let controller = MyController::new();
+    //! let owned_ctx = controller.init(Sha2_256)?;
+    //!
+    //! // Move-based API
+    //! let owned_ctx = owned_ctx.update(b"hello")?;
+    //! let owned_ctx = owned_ctx.update(b" world")?;
+    //!
+    //! // Finalize and recover controller
+    //! let mut output = [0u8; 32];
+    //! let (len, controller) = owned_ctx.finalize(&mut output)?;
+    //! ```
 
-    use super::{DigestAlgorithm, ErrorType, IntoBytes};
+    use super::streaming;
+    use super::DigestAlgorithm;
     use core::result::Result;
+
+    // Re-export error traits for convenience
+    pub use super::{Error, ErrorKind, ErrorType};
+
+    // Re-export Owned wrapper from streaming module
+    pub use super::streaming::Owned;
 
     /// Trait for initializing digest operations with owned contexts.
     ///
-    /// This trait takes ownership of the controller and returns an owned context
-    /// that can be stored, moved, and persisted across function boundaries.
-    /// Unlike the scoped API, there are no lifetime constraints.
+    /// This trait consumes the controller and returns an [`Owned`] wrapper
+    /// that provides move-based resource management. The controller is
+    /// recovered when the context is finalized or cancelled.
     ///
     /// # Type Parameters
     ///
-    /// * `T` - The digest algorithm type that implements [`DigestAlgorithm`]
+    /// * `A` - The digest algorithm type that implements [`DigestAlgorithm`]
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
-    /// # use openprot_hal_blocking::digest::*;
-    /// # use openprot_hal_blocking::digest::owned::{DigestInit, DigestOp};
-    /// # struct MyController;
-    /// # impl ErrorType for MyController { type Error = core::convert::Infallible; }
-    /// # struct MyContext;
-    /// # impl ErrorType for MyContext { type Error = core::convert::Infallible; }
-    /// # impl DigestOp for MyContext {
-    /// #     type Output = Digest<8>;
-    /// #     type Controller = MyController;
-    /// #     fn update(self, _: &[u8]) -> Result<Self, Self::Error> { Ok(self) }
-    /// #     fn finalize(self) -> Result<(Self::Output, Self::Controller), Self::Error> { todo!() }
-    /// #     fn cancel(self) -> Self::Controller { todo!() }
-    /// # }
-    /// # impl DigestInit<Sha2_256> for MyController {
-    /// #     type Context = MyContext;
-    /// #     type Output = Digest<8>;
-    /// #     fn init(self, _: Sha2_256) -> Result<Self::Context, Self::Error> { todo!() }
-    /// # }
-    /// let controller = MyController;
-    /// let context = controller.init(Sha2_256)?;
-    /// // Context can be stored in structs, moved across functions, etc.
-    /// # Ok::<(), core::convert::Infallible>(())
+    /// ```rust,ignore
+    /// use openprot_hal_blocking::digest::owned::DigestInit;
+    /// use openprot_hal_blocking::digest::Sha2_256;
+    ///
+    /// let controller = MyController::new();
+    /// let owned_ctx = controller.init(Sha2_256)?;
+    ///
+    /// let owned_ctx = owned_ctx.update(b"hello")?;
+    /// let mut output = [0u8; 32];
+    /// let (len, controller) = owned_ctx.finalize(&mut output)?;
     /// ```
-    pub trait DigestInit<T: DigestAlgorithm>: ErrorType + Sized {
-        /// The owned context type that will handle the digest computation.
+    pub trait DigestInit<A: DigestAlgorithm>: ErrorType + Sized {
+        /// The underlying streaming context type.
         ///
-        /// This context has no lifetime constraints and can be stored in structs,
-        /// moved between functions, and persisted across IPC boundaries.
-        type Context: DigestOp<Output = Self::Output, Controller = Self>;
+        /// Must implement [`streaming::DigestContext`] to provide the
+        /// core digest operations.
+        type Context: streaming::DigestContext<Error = Self::Error>;
 
-        /// The output type produced by this digest implementation.
+        /// Initialize a new owned digest context.
         ///
-        /// This type must implement [`IntoBytes`] to allow conversion to byte arrays
-        /// for interoperability with other systems and zero-copy operations.
-        type Output: IntoBytes;
-
-        /// Initialize a new digest computation context.
-        ///
-        /// Takes ownership of the controller and returns an owned context.
-        /// The controller will be returned when the context is finalized or cancelled.
+        /// Consumes the controller and returns an `Owned<Context, Self>`
+        /// wrapper that provides move-based operations with automatic
+        /// controller recovery.
         ///
         /// # Parameters
         ///
-        /// - `init_params`: Algorithm-specific initialization parameters
+        /// - `algo`: Algorithm-specific initialization parameters
         ///
         /// # Returns
         ///
-        /// An owned context that can be used for digest operations.
-        fn init(self, init_params: T) -> Result<Self::Context, Self::Error>;
+        /// An `Owned` wrapper combining the context and controller.
+        fn init(self, algo: A) -> Result<Owned<Self::Context, Self>, Self::Error>;
     }
+}
 
-    /// Trait for performing digest operations with owned contexts.
+/// Core digest traits for streaming operations.
+///
+/// This module provides the **streaming** digest API where the core operation
+/// semantics (`update`, `finalize`) are separated from resource lifecycle management.
+///
+/// # Design Philosophy
+///
+/// The traditional `owned::DigestContext` bundles two concerns:
+/// 1. **Operation semantics** — what the API does (update/finalize)
+/// 2. **Resource lifecycle** — typestate enforcement for controller recovery
+///
+/// This coupling creates friction:
+/// - Software backends have no resources to recover — the pattern is overhead
+/// - Servers manage sessions via handles — typestate is redundant
+/// - Wrapping HAL controllers requires adapter layers
+///
+/// The streaming design separates these:
+///
+/// ```text
+/// ┌─────────────────────────────────────────────────────────────────┐
+/// │  streaming::DigestContext (&mut self)                           │
+/// │  - Pure operation semantics                                     │
+/// │  - Implements: update, finalize, reset                          │
+/// │  - Used by: servers, software backends                          │
+/// └────────────────────────┬────────────────────────────────────────┘
+///                          │
+///              ┌───────────▼───────────┐
+///              │  Owned<T> wrapper     │
+///              │  - Typestate pattern  │
+///              │  - Resource recovery  │
+///              │  - Used by: baremetal │
+///              └───────────────────────┘
+/// ```
+///
+/// # Usage
+///
+/// ## Direct use (servers, software backends)
+///
+/// ```rust,ignore
+/// let mut ctx = controller.begin::<Sha256>()?;
+/// ctx.update(b"hello")?;
+/// ctx.update(b" world")?;
+/// let len = ctx.finalize(&mut output)?;
+/// ctx.reset();  // Reuse without recovering controller
+/// ```
+///
+/// ## With typestate wrapper (baremetal safety)
+///
+/// ```rust,ignore
+/// let owned_ctx = Owned::new(controller.begin::<Sha256>()?, controller);
+/// let owned_ctx = owned_ctx.update(b"hello")?;
+/// let (output, controller) = owned_ctx.finalize()?;  // Controller recovered
+/// ```
+pub mod streaming {
+    use super::DigestAlgorithm;
+
+    // Re-export error traits for convenience
+    pub use super::{Error, ErrorKind, ErrorType};
+
+    /// Core digest context trait with `&mut self` methods.
     ///
-    /// This trait uses move semantics where each operation consumes the
-    /// context and returns a new context (for `update`) or the final result
-    /// with a recovered controller (for `finalize`/`cancel`).
+    /// This trait defines the minimal operation semantics for streaming digest
+    /// computations without bundling resource lifecycle concerns.
     ///
-    /// # Move-based Safety
+    /// # Design
     ///
-    /// The move-based pattern provides compile-time guarantees:
-    /// - Cannot use a context after finalization
-    /// - Cannot finalize the same context twice
-    /// - Controller is always recovered for reuse
+    /// - Uses `ErrorType` supertrait for consistent error handling
+    /// - `&mut self` allows reuse without ownership transfer
+    /// - `reset()` enables context reuse without controller recovery
+    /// - No associated `Controller` type — separated from ownership pattern
     ///
-    /// # Examples
+    /// # Error Handling
     ///
-    /// ```rust,no_run
-    /// # use openprot_hal_blocking::digest::*;
-    /// # use openprot_hal_blocking::digest::owned::{DigestInit, DigestOp};
-    /// # struct MyContext;
-    /// # impl ErrorType for MyContext { type Error = core::convert::Infallible; }
-    /// # struct MyController;
-    /// # impl DigestOp for MyContext {
-    /// #     type Output = Digest<8>;
-    /// #     type Controller = MyController;
-    /// #     fn update(self, _: &[u8]) -> Result<Self, Self::Error> { Ok(self) }
-    /// #     fn finalize(self) -> Result<(Self::Output, Self::Controller), Self::Error> { todo!() }
-    /// #     fn cancel(self) -> Self::Controller { todo!() }
-    /// # }
-    /// # fn get_context() -> MyContext { todo!() }
-    /// let context = get_context(); // MyContext
-    /// let context = context.update(b"hello")?;
-    /// let context = context.update(b" world")?;
-    /// let (digest, controller) = context.finalize()?;
-    /// // Controller recovered for reuse
-    /// # Ok::<(), core::convert::Infallible>(())
+    /// Following the HAL error pattern, `DigestContext` extends `ErrorType`
+    /// which provides `Self::Error`. The error type must implement `Error`
+    /// trait with `fn kind(&self) -> ErrorKind` for generic error handling.
+    ///
+    /// # Implementors
+    ///
+    /// - Hardware digest controllers (HACE, etc.)
+    /// - Software backends (RustCrypto wrappers)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use openprot_hal_blocking::digest::{Error, ErrorKind, ErrorType};
+    /// use openprot_hal_blocking::digest::streaming::DigestContext;
+    ///
+    /// #[derive(Debug)]
+    /// struct MyError(ErrorKind);
+    ///
+    /// impl Error for MyError {
+    ///     fn kind(&self) -> ErrorKind { self.0 }
+    /// }
+    ///
+    /// struct MyDigestContext { /* internal state */ }
+    ///
+    /// impl ErrorType for MyDigestContext {
+    ///     type Error = MyError;
+    /// }
+    ///
+    /// impl DigestContext for MyDigestContext {
+    ///     const OUTPUT_SIZE: usize = 32;
+    ///
+    ///     fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+    ///         // Process data into internal state
+    ///         Ok(())
+    ///     }
+    ///
+    ///     fn finalize(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+    ///         // Write final digest, return bytes written
+    ///         Ok(32)
+    ///     }
+    ///
+    ///     fn reset(&mut self) {
+    ///         // Reset internal state for reuse
+    ///     }
+    /// }
     /// ```
-    pub trait DigestOp: ErrorType + Sized {
-        /// The digest output type.
-        ///
-        /// This type represents the final digest value produced by [`finalize`](Self::finalize).
-        /// It must implement [`IntoBytes`] to enable zero-copy conversion to byte arrays.
-        type Output: IntoBytes;
-
-        /// The controller type that will be recovered after finalization or cancellation.
-        ///
-        /// This enables resource recovery and reuse patterns essential for server applications.
-        type Controller;
+    pub trait DigestContext: ErrorType {
+        /// Size of the digest output in bytes.
+        const OUTPUT_SIZE: usize;
 
         /// Update the digest state with input data.
         ///
-        /// This method consumes the current context and returns a new context with
-        /// the updated state. This prevents use-after-update bugs at compile time
-        /// through move semantics.
+        /// Can be called multiple times to process data incrementally.
+        fn update(&mut self, data: &[u8]) -> Result<(), Self::Error>;
+
+        /// Finalize the digest and write the result to `output`.
         ///
         /// # Parameters
         ///
-        /// - `data`: Input data to be processed by the digest algorithm
+        /// - `output`: Buffer to receive the digest. Must be at least `OUTPUT_SIZE` bytes.
         ///
         /// # Returns
         ///
-        /// A new context with updated state, or an error
-        fn update(self, data: &[u8]) -> Result<Self, Self::Error>;
+        /// Number of bytes written to `output`.
+        ///
+        /// # Note
+        ///
+        /// After finalization, the context is in an undefined state.
+        /// Call `reset()` before reusing.
+        fn finalize(&mut self, output: &mut [u8]) -> Result<usize, Self::Error>;
 
-        /// Finalize the digest computation and recover the controller.
+        /// Reset the context to its initial state for reuse.
         ///
-        /// This method consumes the context and returns both the final digest output
-        /// and the original controller, enabling resource reuse.
-        ///
-        /// # Returns
-        ///
-        /// A tuple containing the digest output and the recovered controller
-        fn finalize(self) -> Result<(Self::Output, Self::Controller), Self::Error>;
+        /// This allows the same context to perform multiple digest operations
+        /// without needing to recover and re-initialize a controller.
+        fn reset(&mut self);
+    }
 
-        /// Cancel the digest computation and recover the controller.
+    /// Factory trait for creating digest contexts.
+    ///
+    /// Separates context creation from context operations, enabling
+    /// flexible initialization patterns without typestate.
+    pub trait DigestContextFactory<A: DigestAlgorithm>: ErrorType {
+        /// The context type produced by this factory.
+        type Context: DigestContext<Error = Self::Error>;
+
+        /// Create a new digest context for the specified algorithm.
+        fn create_context(&mut self, algo: A) -> Result<Self::Context, Self::Error>;
+    }
+
+    /// Optional wrapper providing typestate-based resource recovery.
+    ///
+    /// Wraps a [`DigestContext`] with move semantics that return the
+    /// underlying controller on finalization or cancellation.
+    ///
+    /// # Use Case
+    ///
+    /// Baremetal applications where compile-time enforcement of
+    /// controller recovery is essential for correctness.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Create owned context with controller
+    /// let owned = Owned::new(ctx, controller);
+    ///
+    /// // Move-based API — each call consumes and returns
+    /// let owned = owned.update(b"hello")?;
+    /// let owned = owned.update(b" world")?;
+    ///
+    /// // Finalize recovers the controller
+    /// let (digest, controller) = owned.finalize()?;
+    ///
+    /// // Controller can be reused
+    /// let new_ctx = controller.create_context(Sha256)?;
+    /// ```
+    pub struct Owned<T, C> {
+        context: T,
+        controller: C,
+    }
+
+    impl<T, C> Owned<T, C> {
+        /// Create a new owned context wrapping a digest context and its controller.
+        pub fn new(context: T, controller: C) -> Self {
+            Self { context, controller }
+        }
+
+        /// Get a reference to the underlying context.
+        pub fn context(&self) -> &T {
+            &self.context
+        }
+
+        /// Get a mutable reference to the underlying context.
+        pub fn context_mut(&mut self) -> &mut T {
+            &mut self.context
+        }
+    }
+
+    impl<T: DigestContext, C> Owned<T, C> {
+        /// Update the digest state with input data.
         ///
-        /// This method cancels the current computation and returns the controller
-        /// in a clean state, ready for reuse. Unlike `finalize`, this cannot fail.
+        /// Consumes self and returns a new `Owned` with updated state.
+        pub fn update(mut self, data: &[u8]) -> Result<Self, (C, T::Error)> {
+            match self.context.update(data) {
+                Ok(()) => Ok(self),
+                Err(e) => Err((self.controller, e)),
+            }
+        }
+
+        /// Finalize the digest and recover the controller.
+        ///
+        /// Returns the digest output and the recovered controller.
+        ///
+        /// # Parameters
+        ///
+        /// - `output`: Buffer to receive the digest.
         ///
         /// # Returns
         ///
-        /// The recovered controller in a clean state
-        fn cancel(self) -> Self::Controller;
+        /// On success: `(bytes_written, controller)`
+        /// On error: `(controller, error)` — controller is still recovered
+        pub fn finalize(mut self, output: &mut [u8]) -> Result<(usize, C), (C, T::Error)> {
+            match self.context.finalize(output) {
+                Ok(len) => Ok((len, self.controller)),
+                Err(e) => Err((self.controller, e)),
+            }
+        }
+
+        /// Cancel the operation and recover the controller.
+        ///
+        /// Resets the context and returns the controller.
+        pub fn cancel(mut self) -> C {
+            self.context.reset();
+            self.controller
+        }
     }
 }
 
@@ -930,5 +1143,147 @@ mod tests {
         let digest = Digest::new(array);
         assert_eq!(digest.value, array);
         assert_eq!(digest.into_array(), array);
+    }
+
+    // Tests for the streaming module
+    mod streaming_tests {
+        use super::super::streaming::{DigestContext, Owned};
+        use super::super::{Error, ErrorKind, ErrorType};
+
+        /// Mock error type implementing the Error trait
+        #[derive(Debug)]
+        struct MockError(#[allow(dead_code)] &'static str);
+
+        impl Error for MockError {
+            fn kind(&self) -> ErrorKind {
+                ErrorKind::UpdateError
+            }
+        }
+
+        /// Mock digest context for testing (using fixed buffer for no_std)
+        struct MockDigestContext {
+            data: [u8; 64],
+            len: usize,
+            finalized: bool,
+        }
+
+        impl MockDigestContext {
+            fn new() -> Self {
+                Self {
+                    data: [0u8; 64],
+                    len: 0,
+                    finalized: false,
+                }
+            }
+        }
+
+        impl ErrorType for MockDigestContext {
+            type Error = MockError;
+        }
+
+        impl DigestContext for MockDigestContext {
+            const OUTPUT_SIZE: usize = 4;
+
+            fn update(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+                if self.finalized {
+                    return Err(MockError("already finalized"));
+                }
+                for &b in data {
+                    if self.len < 64 {
+                        self.data[self.len] = b;
+                        self.len += 1;
+                    }
+                }
+                Ok(())
+            }
+
+            fn finalize(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+                if output.len() < Self::OUTPUT_SIZE {
+                    return Err(MockError("buffer too small"));
+                }
+                // Simple "hash": sum of bytes mod 256 repeated
+                let sum: u8 = self.data[..self.len].iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+                output[..4].fill(sum);
+                self.finalized = true;
+                Ok(4)
+            }
+
+            fn reset(&mut self) {
+                self.data = [0u8; 64];
+                self.len = 0;
+                self.finalized = false;
+            }
+        }
+
+        /// Mock controller for testing resource recovery
+        #[derive(Debug, PartialEq)]
+        struct MockController {
+            id: u32,
+        }
+
+        #[test]
+        fn test_core_digest_context_direct_use() {
+            let mut ctx = MockDigestContext::new();
+            ctx.update(b"hello").unwrap();
+            ctx.update(b" world").unwrap();
+
+            let mut output = [0u8; 4];
+            let len = ctx.finalize(&mut output).unwrap();
+            assert_eq!(len, 4);
+
+            // Reuse via reset
+            ctx.reset();
+            ctx.update(b"test").unwrap();
+            let len = ctx.finalize(&mut output).unwrap();
+            assert_eq!(len, 4);
+        }
+
+        #[test]
+        fn test_owned_wrapper_update_finalize() {
+            let ctx = MockDigestContext::new();
+            let controller = MockController { id: 42 };
+
+            let owned = Owned::new(ctx, controller);
+            let owned = owned.update(b"hello").unwrap();
+            let owned = owned.update(b" world").unwrap();
+
+            let mut output = [0u8; 4];
+            let (len, recovered) = owned.finalize(&mut output).unwrap();
+
+            assert_eq!(len, 4);
+            assert_eq!(recovered.id, 42); // Controller recovered
+        }
+
+        #[test]
+        fn test_owned_wrapper_cancel() {
+            let ctx = MockDigestContext::new();
+            let controller = MockController { id: 99 };
+
+            let owned = Owned::new(ctx, controller);
+            let owned = owned.update(b"partial data").unwrap();
+            let recovered = owned.cancel();
+
+            assert_eq!(recovered.id, 99); // Controller recovered
+        }
+
+        #[test]
+        fn test_owned_wrapper_error_recovers_controller() {
+            let ctx = MockDigestContext::new();
+            let controller = MockController { id: 123 };
+
+            let owned = Owned::new(ctx, controller);
+            let owned = owned.update(b"data").unwrap();
+
+            // Finalize with buffer too small — should still recover controller
+            let mut output = [0u8; 2]; // Too small!
+            let result = owned.finalize(&mut output);
+
+            match result {
+                Err((recovered, _err)) => {
+                    assert_eq!(recovered.id, 123); // Controller recovered despite error
+                }
+                Ok(_) => panic!("expected error"),
+            }
+        }
     }
 }
