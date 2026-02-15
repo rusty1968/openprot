@@ -395,6 +395,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "openprot-i2c-api"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
 name = "openprot-platform-impl-hubris"
 version = "0.1.0"
 dependencies = [
