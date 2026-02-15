@@ -1,0 +1,19 @@
+# Licensed under the Apache-2.0 license
+
+[package]
+name = "crypto-tests"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "crypto_client_test"
+path = "src/main.rs"
+
+[dependencies]
+crypto-api = { path = "../api" }
+crypto-client = { path = "../client" }
+
+[features]
+default = []
+ecdsa = ["crypto-api/ecdsa", "crypto-client/ecdsa"]

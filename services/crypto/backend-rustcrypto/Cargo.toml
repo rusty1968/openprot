@@ -1,0 +1,28 @@
+# Licensed under the Apache-2.0 license
+
+[package]
+name = "crypto-backend-rustcrypto"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "RustCrypto backend implementing crypto-api traits"
+
+[features]
+default = []
+ecdsa = ["crypto-api/ecdsa", "p256", "p384"]
+
+[dependencies]
+crypto-api = { path = "../api" }
+
+# RustCrypto digest
+sha2 = { version = "0.10", default-features = false }
+
+# RustCrypto MAC
+hmac = { version = "0.12", default-features = false }
+
+# RustCrypto AEAD
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
+
+# ECDSA (optional)
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }

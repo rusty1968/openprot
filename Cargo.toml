@@ -7,12 +7,9 @@ members = [
     "hal/blocking",
     "hal/async", 
     "hal/nb",
-    "platform/traits/hubris",
-    "platform/impls/baremetal/mock",
     "platform/impls/linux",
     "platform/impls/tock",
-    "platform/impls/hubris",
-    "platform/impls/rustcrypto",
+    "services/crypto/api",
     "services/telemetry",
     "services/storage",
 ]
@@ -27,7 +24,6 @@ edition = "2021"
 zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = { version = "1.8", default-features = false, features = ["derive"] }
 subtle = { version = "2", default-features = false }
-# Pin to match Hubris ecosystem
 rand_core = { version = "0.9", default-features = false }
 embedded-hal = "1.0"
 heapless = { version = "0.9", default-features = false }

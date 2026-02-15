@@ -1,0 +1,17 @@
+# Licensed under the Apache-2.0 license
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "crypto-backend-rustcrypto",
+    srcs = ["src/lib.rs"],
+    edition = "2021",
+    deps = [
+        "//services/crypto/api:crypto_api",
+        "@oot_crates_no_std//:sha2",
+        "@oot_crates_no_std//:hmac",
+        "@oot_crates_no_std//:aes-gcm",
+    ],
+    visibility = ["//visibility:public"],
+)
+
