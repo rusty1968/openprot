@@ -1,0 +1,33 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@pigweed//pw_kernel/tooling:app_package.bzl", "app_package")
+
+rust_binary(
+    name = "async_e2e_test",
+    srcs = [
+        "async_e2e_test.rs",
+    ],
+    edition = "2024",
+    tags = ["kernel"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":app_async_e2e_test",
+        "//executor",
+        "//reactor",
+        "//kernel_bridge",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+        "@pigweed//pw_status/rust:pw_status",
+        "@rust_crates//:embassy-executor",
+    ],
+)
+
+app_package(
+    name = "app_async_e2e_test",
+    app_name = "async_e2e_test",
+    edition = "2024",
+    system_config = "@pigweed//pw_kernel/target:system_config_file",
+    tags = ["kernel"],
+)
