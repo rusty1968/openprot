@@ -1,0 +1,25 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "reactor",
+    srcs = ["src/lib.rs"],
+    crate_name = "openprot_reactor",
+    edition = "2024",
+    deps = [],
+)
+
+rust_test(
+    name = "reactor_test",
+    crate = ":reactor",
+    edition = "2024",
+)
+
+rust_doc(
+    name = "reactor_doc",
+    crate = ":reactor",
+)

@@ -71,13 +71,19 @@ impl Executor {
     /// After `init` returns, the executor polls tasks in a loop. Tasks can
     /// spawn additional tasks by holding a copy of the `Spawner`.
     ///
-    /// # Phase 1 idle behavior
+    /// The `idle` closure is called when no tasks are ready. Use it to block
+    /// efficiently (e.g., via the reactor's `wait_for_events()`) or spin.
     ///
-    /// When no tasks are ready, the executor spins. Phase 2 replaces this
-    /// with `object_wait` to block efficiently.
+    /// # Idle strategies
+    ///
+    /// | Strategy | Code | When to use |
+    /// |----------|------|-------------|
+    /// | Spin | `\|\| core::hint::spin_loop()` | Testing, tasks that self-wake |
+    /// | Reactor | `\|\| reactor.wait_for_events()` | Production — blocks until I/O |
+    /// | Kernel | `\|\| object_wait(h, Signals::USER, MAX)` | Single-object blocking |
     ///
     /// This function never returns.
-    pub fn run(&'static self, init: impl FnOnce(Spawner)) -> ! {
+    pub fn run(&'static self, init: impl FnOnce(Spawner), idle: impl Fn()) -> ! {
         init(self.inner.spawner());
 
         loop {
@@ -93,16 +99,15 @@ impl Executor {
                 if SIGNAL_WORK.load(Ordering::SeqCst) {
                     SIGNAL_WORK.store(false, Ordering::SeqCst);
                 } else {
-                    // No tasks were woken — spin until the pender fires.
-                    // Phase 2 replaces this with object_wait blocking.
-                    core::hint::spin_loop();
+                    idle();
                 }
             });
         }
     }
 }
 
-/// Convenience: create an executor on the stack, leak it to `&'static`, and run.
+/// Convenience: create an executor on the stack, leak it to `&'static`, and
+/// run with a spin-loop idle strategy.
 ///
 /// This is the simplest way to use the executor from an entry point:
 /// ```ignore
@@ -114,6 +119,9 @@ impl Executor {
 /// }
 /// ```
 ///
+/// For production use with a reactor, prefer constructing `Executor::new()`
+/// and calling `run()` with a custom idle closure.
+///
 /// # Safety
 ///
 /// Uses `core::mem::transmute` to extend the executor's lifetime to `'static`.
@@ -124,7 +132,7 @@ pub fn start_async(init: impl FnOnce(Spawner)) -> ! {
     // SAFETY: run() diverges (-> !), so the stack-allocated executor lives
     // forever. The transmute converts &Executor to &'static Executor.
     let executor: &'static Executor = unsafe { core::mem::transmute(&executor) };
-    executor.run(init);
+    executor.run(init, || core::hint::spin_loop());
 }
 
 // --- Utility futures --------------------------------------------------------
