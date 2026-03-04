@@ -1,0 +1,67 @@
+# Licensed under the Apache-2.0 license
+
+load("@pigweed//pw_kernel/tooling:system_image.bzl", "system_image", "system_image_test")
+load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")
+load("@pigweed//pw_kernel/tooling:target_linker_script.bzl", "target_linker_script")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//target/qemu_virt_riscv32:defs.bzl", "TARGET_COMPATIBLE_WITH")
+
+system_image(
+    name = "async_e2e",
+    apps = [
+        "//target/qemu_virt_riscv32/async_e2e/user:async_e2e_test",
+    ],
+    kernel = ":target",
+    platform = "//target/qemu_virt_riscv32",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+)
+
+system_image_test(
+    name = "async_e2e_test",
+    image = ":async_e2e",
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+)
+
+filegroup(
+    name = "system_config",
+    srcs = ["system.json5"],
+    visibility = ["//visibility:public"],
+)
+
+target_codegen(
+    name = "codegen",
+    arch = "@pigweed//pw_kernel/arch/riscv:arch_riscv",
+    system_config = ":system_config",
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+)
+
+target_linker_script(
+    name = "linker_script",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    template = "//target/qemu_virt_riscv32:linker_script_template",
+)
+
+rust_binary(
+    name = "target",
+    srcs = ["target.rs"],
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        ":codegen",
+        ":linker_script",
+        "//target/qemu_virt_riscv32:entry",
+        "@pigweed//pw_kernel/arch/riscv:arch_riscv",
+        "@pigweed//pw_kernel/kernel",
+        "@pigweed//pw_kernel/subsys/console:console_backend",
+        "@pigweed//pw_kernel/target:target_common",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+        "@rust_crates//:riscv-semihosting",
+    ],
+)

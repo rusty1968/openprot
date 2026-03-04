@@ -1,0 +1,31 @@
+// Licensed under the Apache-2.0 license
+{
+    arch: {
+        type: "riscv",
+    },
+    kernel: {
+        flash_start_address: 0x80000000,
+        flash_size_bytes: 0x200000,  // 2MB
+        ram_start_address: 0x81000000,
+        ram_size_bytes: 0x200000,    // 2MB
+        interrupt_table: {
+            table: {}
+        },
+    },
+    apps: [
+        {
+            name: "async_e2e_test",
+            flash_size_bytes: 0x40000,  // 256KB
+            ram_size_bytes: 0x20000,    // 128KB
+            process: {
+                name: "async_e2e_test_process",
+                threads: [
+                    {
+                        name: "main",
+                        stack_size_bytes: 0x4000,  // 16KB
+                    },
+                ],
+            },
+        },
+    ],
+}
