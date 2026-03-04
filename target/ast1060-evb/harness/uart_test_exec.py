@@ -73,13 +73,30 @@ class UartTestExecutor:
         if not self.args.quiet:
             print(message, flush=True)
 
+    def _write_log(self, text: str):
+        """Write text to the log file if open."""
+        if self.log_file_handle:
+            self.log_file_handle.write(text)
+            self.log_file_handle.flush()
+
     def print_uart_data(self, data: str):
-        """Print UART data, with detokenized output on the following line in green."""
-        print(data, end="", flush=True)
+        """Print UART data, with detokenized output on the following line in green.
+
+        If --notok is set, the raw tokenized data is suppressed and only the
+        detokenized output is printed. When --elf is supplied, the detokenized
+        string (not the raw token) is written to the log.
+        """
         if self.detokenizer:
             detokenized = self.detokenizer.detokenize_text(data)
             if detokenized != data:
+                if not getattr(self.args, "notok", False):
+                    print(data, end="", flush=True)
+                    self._write_log(data)
                 print(f"\033[32m{detokenized}\033[0m", end="", flush=True)
+                self._write_log(detokenized)
+                return
+        print(data, end="", flush=True)
+        self._write_log(data)
 
     def run_command(self, cmd: list, check: bool = True) -> Tuple[int, str, str]:
         """Run command and return (returncode, stdout, stderr)."""
@@ -208,12 +225,6 @@ class UartTestExecutor:
 
             if data:
                 decoded = data.decode("utf-8", errors="ignore")
-
-                # Log to file
-                if self.log_file_handle:
-                    self.log_file_handle.write(decoded)
-                    self.log_file_handle.flush()
-
                 return decoded
 
             return ""
@@ -376,6 +387,28 @@ class UartTestExecutor:
         """Clean up resources."""
         self.close_serial()
 
+    def run_parse_only(self) -> int:
+        """Read and print UART output indefinitely. Returns 0 on KeyboardInterrupt."""
+        try:
+            if not self.open_serial():
+                return 1
+
+            self.log(
+                f"Listening on {self.args.uart_device} @ {self.args.baudrate} baud"
+                " (Ctrl+C to stop)..."
+            )
+
+            while True:
+                data = self.read_serial_data(timeout_seconds=0.1)
+                if data:
+                    self.print_uart_data(data)
+
+        except KeyboardInterrupt:
+            self.log("\nStopped.")
+            return 0
+        finally:
+            self.cleanup()
+
     def run_full_test_sequence(self) -> bool:
         """Execute the complete test sequence."""
         try:
@@ -427,6 +460,11 @@ Examples:
     )
     parser.add_argument("firmware", nargs="?", help="Firmware binary file path")
     parser.add_argument("--elf", help="ELF file for pw_tokenizer detokenization")
+    parser.add_argument(
+        "--notok",
+        action="store_true",
+        help="Suppress raw base64 tokens; only show detokenized output. Requires --elf.",
+    )
 
     # GPIO control
     parser.add_argument(
@@ -497,22 +535,55 @@ Examples:
         action="store_true",
         help="Skip GPIO operations but still monitor tests",
     )
+    parser.add_argument(
+        "--parse-only",
+        action="store_true",
+        help=(
+            "Read and print UART output indefinitely. "
+            "Requires UART device. Accepts only --baudrate, --log-file, and --elf. "
+            "No timeout; stop with Ctrl+C."
+        ),
+    )
 
     args = parser.parse_args()
 
     # Validate pw_tokenizer / --elf argument consistency
-    if os.environ.get("PW_TOK_ROOT") and not args.elf:
-        print(
-            "Error: PW_TOK_ROOT is set but --elf was not provided. "
-            "Detokenization requires an ELF file."
-        )
-        sys.exit(1)
     if args.elf and not _PW_TOKENIZER_AVAILABLE:
         print(
             "Error: --elf was provided but pw_tokenizer could not be located. "
             "Set PW_TOK_ROOT to the Pigweed root or ensure Bazel has fetched it."
         )
         sys.exit(1)
+    if args.elf and not Path(args.elf).exists():
+        print(f"Error: ELF file not found: {args.elf}")
+        sys.exit(1)
+    if args.notok and not args.elf:
+        parser.error("--notok requires --elf")
+
+    # Validate --parse-only exclusivity
+    if args.parse_only:
+        incompatible = [
+            name
+            for flag, name in [
+                (args.firmware,       "firmware"),
+                (args.manual_srst,    "--manual-srst"),
+                (args.manual_fwspick, "--manual-fwspick"),
+                (args.sequence,       "--sequence"),
+                (args.skip_uart,      "--skip-uart"),
+                (args.dry_run,        "--dry-run"),
+                (args.upload_only,    "--upload-only"),
+                (args.bazel_test,     "--bazel-test"),
+                (args.skip_gpio,      "--skip-gpio"),
+                (args.quiet,          "--quiet"),
+            ]
+            if flag
+        ]
+        if incompatible:
+            parser.error(
+                f"--parse-only is incompatible with: {', '.join(incompatible)}"
+            )
+        if not args.uart_device:
+            parser.error("--parse-only requires a UART device path")
 
     # Validate arguments
     if args.upload_only:
@@ -534,6 +605,10 @@ Examples:
     executor = UartTestExecutor(args)
 
     try:
+        # Parse-only mode: read UART indefinitely
+        if args.parse_only:
+            return executor.run_parse_only()
+
         # Handle manual GPIO operations
         if args.manual_srst:
             state = "dl" if args.manual_srst in ["low", "dl"] else "dh"
