@@ -53,6 +53,12 @@ pub struct Executor {
     not_send: PhantomData<*mut ()>,
 }
 
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Executor {
     /// Create a new executor.
     ///
@@ -132,7 +138,7 @@ pub fn start_async(init: impl FnOnce(Spawner)) -> ! {
     // SAFETY: run() diverges (-> !), so the stack-allocated executor lives
     // forever. The transmute converts &Executor to &'static Executor.
     let executor: &'static Executor = unsafe { core::mem::transmute(&executor) };
-    executor.run(init, || core::hint::spin_loop());
+    executor.run(init, core::hint::spin_loop);
 }
 
 // --- Utility futures --------------------------------------------------------
