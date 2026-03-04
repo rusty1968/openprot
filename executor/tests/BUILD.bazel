@@ -1,0 +1,35 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_binary(
+    name = "qemu_riscv32_test",
+    srcs = ["qemu_riscv32_test.rs"],
+    compile_data = ["qemu-riscv32-virt.ld"],
+    edition = "2024",
+    rustc_flags = [
+        "-C",
+        "link-arg=-T$(execpath qemu-riscv32-virt.ld)",
+        "-C",
+        "link-arg=-Tlink.x",
+    ],
+    tags = [
+        "manual",
+        "qemu",
+        "riscv32",
+    ],
+    target_compatible_with = [
+        "@platforms//cpu:riscv32",
+        "@platforms//os:none",
+    ],
+    deps = [
+        "//executor",
+        "@rust_crates//:embassy-executor",
+        "@rust_crates//:portable-atomic",
+        "@rust_crates//:riscv-rt",
+        "@rust_crates//:riscv-semihosting",
+    ],
+)

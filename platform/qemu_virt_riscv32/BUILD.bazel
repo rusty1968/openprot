@@ -1,0 +1,29 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+# Platform definition for QEMU RISC-V 32 virt machine.
+#
+# Usage:
+#   bazel build --config=qemu_riscv32 //executor/tests:qemu_riscv32_test
+#
+# The constraint values must match what the riscv_clang_cc_toolchain_rv32imc
+# toolchain requires: I, M, C extensions set, A unset (default A.not).
+
+package(default_visibility = ["//visibility:public"])
+
+platform(
+    name = "qemu_virt_riscv32",
+    constraint_values = [
+        # CPU architecture
+        "@platforms//cpu:riscv32",
+        "@platforms//os:none",
+
+        # RISC-V ISA extensions (must match rv32imc toolchain)
+        "@pigweed//pw_build/constraints/riscv/extensions:I",
+        "@pigweed//pw_build/constraints/riscv/extensions:M",
+        "@pigweed//pw_build/constraints/riscv/extensions:C",
+
+        # Rust no_std
+        "@pigweed//pw_build/constraints/rust:no_std",
+    ],
+)

@@ -20,3 +20,7 @@ common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 
 test --@pigweed//pw_kernel:enable_tests=true
 test --platform_suffix=test
+
+# --- QEMU RISC-V 32 target ---------------------------------------------------
+# Usage: bazel build --config=qemu_riscv32 //executor/tests:qemu_riscv32_test
+build:qemu_riscv32 --platforms=//platform/qemu_virt_riscv32:qemu_virt_riscv32

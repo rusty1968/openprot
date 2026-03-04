@@ -1,0 +1,28 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "executor",
+    srcs = ["src/lib.rs"],
+    crate_name = "openprot_executor",
+    edition = "2024",
+    deps = [
+        "@rust_crates//:critical-section",
+        "@rust_crates//:embassy-executor",
+        "@rust_crates//:portable-atomic",
+    ],
+)
+
+rust_test(
+    name = "executor_test",
+    crate = ":executor",
+)
+
+rust_doc(
+    name = "executor_doc",
+    crate = ":executor",
+)
