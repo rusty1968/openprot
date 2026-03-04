@@ -191,9 +191,16 @@ pub struct Reactor<K: Kernel> {
 // The global static requires Sync, but all access is non-concurrent.
 unsafe impl<K: Kernel> Sync for Reactor<K> {}
 
+impl<K: Kernel> Default for Reactor<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Kernel> Reactor<K> {
     /// Create an uninitialized reactor. Call [`init`] before use.
     pub const fn new() -> Self {
+        #[allow(clippy::declare_interior_mutable_const)]
         const EMPTY_WAKER: UnsafeCell<Option<Waker>> = UnsafeCell::new(None);
         Self {
             wg_handle: Cell::new(0),
