@@ -1,0 +1,23 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "kernel_bridge",
+    srcs = ["src/lib.rs"],
+    crate_name = "openprot_kernel_bridge",
+    edition = "2024",
+    # Only buildable in pw-kernel userspace configurations.
+    target_compatible_with = select({
+        "@pigweed//pw_kernel/userspace:userspace_build_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//reactor",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_status/rust:pw_status",
+    ],
+)
