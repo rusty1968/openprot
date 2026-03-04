@@ -18,8 +18,8 @@ git_override(
     module_name = "pigweed",
     # ROLL: Warning: this entry is automatically updated by
     # ROLL: https://cr-buildbucket.appspot.com/builder/pigweed-internal/opentitan.roll/pigweed-opentitan-roller
-    commit = "f52059663fee1e2ab2f2ab752301b159da3ca806",
-    remote = "https://pigweed.googlesource.com/pigweed/pigweed",
+    commit = "45dfce49734fcf472a9b9de61332efff31f0219d",
+    remote = "https://github.com/pigweed-project/pigweed",
 )
 
 pw_rust = use_extension("@pigweed//pw_toolchain/rust:extensions.bzl", "pw_rust")

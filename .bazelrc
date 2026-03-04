@@ -21,6 +21,42 @@ common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 test --@pigweed//pw_kernel:enable_tests=true
 test --platform_suffix=test
 
-# --- QEMU RISC-V 32 target ---------------------------------------------------
+# --- QEMU RISC-V 32 (bare-metal, no kernel) ----------------------------------
 # Usage: bazel build --config=qemu_riscv32 //executor/tests:qemu_riscv32_test
 build:qemu_riscv32 --platforms=//platform/qemu_virt_riscv32:qemu_virt_riscv32
+
+# --- pw-kernel on QEMU -------------------------------------------------------
+# Common flags shared by all pw-kernel QEMU configs.
+build:k_common --build_tag_filters=-do_not_build,-kernel_doc_test
+test:k_common --test_tag_filters=-integration,-do_not_build,-do_not_run_test,-kernel_doc_test
+test:k_common --@pigweed//pw_kernel:enable_tests=true
+test:k_common --platform_suffix=test
+
+# pw-kernel on QEMU RISC-V 32 virt
+# Usage: bazel test --config=k_qemu_virt_riscv32 //tests/...
+common:k_qemu_virt_riscv32 --config=k_common
+common:k_qemu_virt_riscv32 --platforms=@pigweed//pw_kernel/target/qemu_virt_riscv32:qemu_virt_riscv32
+run:k_qemu_virt_riscv32 --run_under="@pigweed//pw_kernel/tooling:qemu \
+  --cpu rv32 \
+  --machine virt \
+  --semihosting \
+  --image "
+test:k_qemu_virt_riscv32 --run_under="@pigweed//pw_kernel/tooling:qemu \
+  --cpu rv32 \
+  --machine virt \
+  --semihosting \
+  --image "
+
+# pw-kernel on QEMU MPS2-AN505 (Cortex-M33)
+common:k_qemu_mps2_an505 --config=k_common
+common:k_qemu_mps2_an505 --platforms=@pigweed//pw_kernel/target/mps2_an505:mps2_an505
+run:k_qemu_mps2_an505 --run_under="@pigweed//pw_kernel/tooling:qemu \
+  --cpu cortex-m33 \
+  --machine mps2-an505 \
+  --semihosting \
+  --image "
+test:k_qemu_mps2_an505 --run_under="@pigweed//pw_kernel/tooling:qemu \
+  --cpu cortex-m33 \
+  --machine mps2-an505 \
+  --semihosting \
+  --image "
