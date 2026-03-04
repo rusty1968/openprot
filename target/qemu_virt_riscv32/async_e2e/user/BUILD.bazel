@@ -1,0 +1,36 @@
+# Licensed under the Apache-2.0 license
+
+load("@pigweed//pw_kernel/tooling:app_package.bzl", "app_package")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//target/qemu_virt_riscv32:defs.bzl", "TARGET_COMPATIBLE_WITH")
+
+rust_binary(
+    name = "async_e2e_test",
+    srcs = ["async_e2e_test.rs"],
+    edition = "2024",
+    proc_macro_deps = [
+        "@rust_crates//:embassy-executor-macros",
+    ],
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":app_async_e2e_test",
+        "//executor",
+        "@pigweed//pw_kernel/syscall:syscall_user",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+        "@pigweed//pw_status/rust:pw_status",
+        "@rust_crates//:critical-section",
+        "@rust_crates//:embassy-executor",
+        "@rust_crates//:portable-atomic",
+    ],
+)
+
+app_package(
+    name = "app_async_e2e_test",
+    app_name = "async_e2e_test",
+    edition = "2024",
+    system_config = "//target/qemu_virt_riscv32/async_e2e/kernel:system_config",
+    tags = ["kernel"],
+)
