@@ -30,6 +30,21 @@
       ]
     },
     {
+      "name": "qemu_virt_riscv32_e2e_tests",
+      "build_config": {
+        "name": "qemu_virt_riscv32_config",
+        "description": "Run e2e tests on QEMU virt riscv32",
+        "build_type": "bazel",
+        "args": [
+          "--config=openprot_qemu_virt_riscv32",
+          "--test_output=all"
+        ]
+      },
+      "targets": [
+        "//target/qemu_virt_riscv32/async_e2e/kernel:async_e2e_test"
+      ]
+    },
+    {
       "name": "clippy",
       "build_config": {
         "name": "clippy_config",
@@ -77,6 +92,18 @@
       ],
       "builds": [
         "clippy"
+      ]
+    },
+    {
+      "name": "ci",
+      "description": "Full CI including integration tests",
+      "analyzers": [
+        "format",
+        "presubmit_checks"
+      ],
+      "builds": [
+        "clippy",
+        "qemu_virt_riscv32_e2e_tests"
       ]
     },
     {
