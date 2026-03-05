@@ -1,0 +1,67 @@
+Category,Component,Section,Start Address,Size (bytes),Size (KB),% of SRAM,Mode,Notes
+,,,,,,,,
+SRAM Total,,,0x40000000,524288,512.0,100.0%,,Full SRAM region
+,,,,,,,,
+# Kernel-Mode Memory (rom + prog + ram regions),,,,,,,,
+Kernel Code,Kernel .text + .rodata,.text,0x40000000,116128,113.4,22.1%,Kernel,Tock kernel + drivers + capsules
+Padding,rom -> prog alignment,gap,0x4001C9A0,1632,1.6,0.3%,Kernel,Alignment to prog region
+App Code,TBF header,.start,0x4001D000,216,0.2,0.0%,Kernel,TBF header (96B) + runtime header (120B)
+App Code,App .text,.text,0x4001D0FC,131306,128.2,25.0%,Kernel,User-app executable code
+App Code,App .rodata,.rodata,0x4003D1E8,23880,23.3,4.6%,Kernel,User-app constants
+Padding,prog -> ram alignment,gap,0x40042E8A,1398,1.4,0.3%,Kernel,Alignment to ram region
+Kernel Data,Kernel .stack,.stack,0x40043000,8192,8.0,1.6%,Kernel,STACK_MEMORY buffer
+Kernel Data,Kernel .data,.relocate,0x40045000,36,0.0,0.0%,Kernel,Initialized data
+Kernel Data,Kernel .bss,.sram,0x40045028,28632,28.0,5.5%,Kernel,Zero-initialized data
+Padding,ram -> app_ram alignment,gap,,7168,7.0,1.4%,Kernel,4 KB PMP alignment
+,,,,,,,,
+Kernel-Mode Subtotal,,,0x40000000,318588,311.1,60.8%,Kernel,rom + prog + ram (excl app_ram)
+,,,,,,,,
+# User-Mode Memory (app_ram region),,,,,,,,
+App Data,App .stack,.stack,0x4004C000,44544,43.5,8.5%,User,Process execution stack
+App Data,App .data,.data,0x40056E00,60,0.1,0.0%,User,Initialized data
+App Data,App .bss,.bss,0x40056E3C,40640,39.7,7.8%,User,Zero-initialized data (includes heap)
+App Data,Grant space,runtime,,16384,16.0,3.1%,User,Tock per-capsule grants
+App Data,Alignment / rounding,gap,,756,0.7,0.1%,User,4 KB boundary rounding
+,,,,,,,,
+User-Mode Allocated Subtotal,,,,102384,100.0,19.5%,User,Stack + data + grants
+User-Mode Free,,,,110608,108.0,21.1%,User,Unallocated app_ram
+User-Mode Subtotal (app_ram),,,0x4004C000,212992,208.0,40.6%,User,Full app_ram region
+,,,,,,,,
+# Kernel .bss Breakdown (28632 bytes),,,,,,,,
+Kernel Buffer,MCTP SPDM rx_msg_buf,.sram,,2048,2.0,,Kernel,MCTP driver instance 1
+Kernel Buffer,MCTP SPDM tx_msg_buf,.sram,,2048,2.0,,Kernel,MCTP driver instance 1
+Kernel Buffer,MCTP SPDM buffered_rx_msg,.sram,,2048,2.0,,Kernel,MCTP driver instance 1
+Kernel Buffer,MCTP PLDM rx_msg_buf,.sram,,2048,2.0,,Kernel,MCTP driver instance 2
+Kernel Buffer,MCTP PLDM tx_msg_buf,.sram,,2048,2.0,,Kernel,MCTP driver instance 2
+Kernel Buffer,MCTP PLDM buffered_rx_msg,.sram,,2048,2.0,,Kernel,MCTP driver instance 2
+Kernel Buffer,MCTP Caliptra rx_msg_buf,.sram,,2048,2.0,,Kernel,MCTP driver instance 3
+Kernel Buffer,MCTP Caliptra tx_msg_buf,.sram,,2048,2.0,,Kernel,MCTP driver instance 3
+Kernel Buffer,MCTP Caliptra buffered_rx_msg,.sram,,2048,2.0,,Kernel,MCTP driver instance 3
+Kernel Buffer,MCTP mux tx_buffer,.sram,,250,0.2,,Kernel,I3C packet buffer
+Kernel Buffer,MCTP mux rx_buffer,.sram,,250,0.2,,Kernel,I3C packet buffer
+Kernel Buffer,Flash partition buffer,.sram,,512,0.5,,Kernel,Flash read/write staging
+Kernel Buffer,DOE mailbox buffers,.sram,,2048,2.0,,Kernel,DOE message buffers (est.)
+Kernel Buffer,MCU MBOX0 buffers,.sram,,4096,4.0,,Kernel,MCU mailbox data staging (est.)
+Kernel Buffer,DEFCALLS bitmap,.sram,,256,0.3,,Kernel,Deferred call bitmap
+Kernel Buffer,Other kernel state,.sram,,2784,2.7,,Kernel,Alarm state; driver structs; misc
+,,,,,,,,
+Kernel .bss Total,,,,28632,28.0,5.5%,Kernel,Sum of kernel buffers
+,,,,,,,,
+# User App .bss Breakdown (40640 bytes),,,,,,,,
+App Buffer,spdm_doe_responder::POOL,.bss,,20288,19.8,,User,Embassy task pool - DOE SPDM state machine
+App Buffer,HEAP_MEM,.bss,,16384,16.0,,User,embedded-alloc heap (Box; Vec; futures)
+App Buffer,SHARED_DPE_LEAF_CERT,.bss,,2072,2.0,,User,DPE leaf certificate cache + Mutex
+App Buffer,spdm_task::POOL,.bss,,1704,1.7,,User,Embassy task pool - SPDM orchestrator
+App Buffer,Other app state,.bss,,192,0.2,,User,Remaining app statics
+,,,,,,,,
+App .bss Total,,,,40640,39.7,7.8%,User,Sum of app buffers
+,,,,,,,,
+# NOT in SRAM (for reference),,,,,,,,
+Not SRAM,LOG buffer,.storage,0x3BFE0000,65536,64.0,,Flash,storage_volume! macro -> flash
+Not SRAM,CIRCULAR_TEST_LOG,.storage,0x3BFF0000,1024,1.0,,Flash,storage_volume! macro -> flash
+Not SRAM,LINEAR_TEST_LOG,.storage,0x3BFF0400,1024,1.0,,Flash,storage_volume! macro -> flash
+Not SRAM,MCU MBOX1 staging,MMIO,MCI peripheral,1048576,1024.0,,MMIO,from_raw_parts_mut at MCI offset
+Not SRAM,ROM main stack,.stack,0x50000000,11520,11.3,,DCCM,ROM-only; not used at runtime
+Not SRAM,ROM exception stack,.estack,0x50002D00,512,0.5,,DCCM,ROM-only; not used at runtime
+Not SRAM,ROM .bss,.bss,0x50002F00,12,0.0,,DCCM,ROM-only; not used at runtime
+Not SRAM,PIC vector table,runtime,0x50003C00,1024,1.0,,DCCM,Top of DCCM; set by kernel init
