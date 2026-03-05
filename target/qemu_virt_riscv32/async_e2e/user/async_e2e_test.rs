@@ -39,7 +39,124 @@ static TASK1_DONE: AtomicBool = AtomicBool::new(false);
 static TASK2_DONE: AtomicBool = AtomicBool::new(false);
 static TASK3_DONE: AtomicBool = AtomicBool::new(false);
 static TASK4_DONE: AtomicBool = AtomicBool::new(false);
+static TASK5_DONE: AtomicBool = AtomicBool::new(false);
 static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+// --- StaticCell: safe &'static mut without heap ----------------------------
+
+/// Minimal `StaticCell` — promotes a value to `&'static mut` exactly once.
+///
+/// This is the sound alternative to `transmute`-ing a struct field to `'static`
+/// (as seen in `McuMboxService::start`). Embassy's `static-cell` crate provides
+/// a full-featured version; this inline copy avoids adding a dependency.
+///
+/// # Panics
+///
+/// `init` panics if called more than once (enforced by the `taken` flag).
+struct StaticCell<T> {
+    taken: AtomicBool,
+    // UnsafeCell because we hand out &'static mut — interior mutability required.
+    val: core::cell::UnsafeCell<core::mem::MaybeUninit<T>>,
+}
+
+// SAFETY: StaticCell is only initialized once (enforced by `taken`) and the
+// resulting &'static mut is never aliased.
+unsafe impl<T: Send> Sync for StaticCell<T> {}
+
+impl<T> StaticCell<T> {
+    const fn new() -> Self {
+        Self {
+            taken: AtomicBool::new(false),
+            val: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+        }
+    }
+
+    /// Initialize the cell and return a `&'static mut T`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called more than once.
+    fn init(&'static self, value: T) -> &'static mut T {
+        // SeqCst swap: panics if already taken.
+        assert!(
+            !self.taken.swap(true, Ordering::SeqCst),
+            "StaticCell already initialized"
+        );
+        // SAFETY: we just won the swap — exclusive access is guaranteed.
+        unsafe {
+            let slot = &mut *self.val.get();
+            slot.write(value);
+            slot.assume_init_mut()
+        }
+    }
+}
+
+// --- Service / responder task model ----------------------------------------
+
+/// Simulated command buffer — stands in for `CmdInterface` / mailbox state.
+struct CmdBuffer {
+    /// How many commands have been processed.
+    processed: u32,
+}
+
+/// Simulated mailbox service.
+///
+/// Mirrors `McuMboxService`: owns the command state, holds a `Spawner`, and
+/// spawns a long-lived responder task via `StaticCell` so the `&'static mut`
+/// is sound — no `transmute` needed.
+struct MailboxService {
+    spawner: embassy_executor::Spawner,
+    cmd_buf: CmdBuffer,
+    running: &'static AtomicBool,
+}
+
+impl MailboxService {
+    fn new(spawner: embassy_executor::Spawner) -> Self {
+        static RUNNING: AtomicBool = AtomicBool::new(false);
+        Self {
+            spawner,
+            cmd_buf: CmdBuffer { processed: 0 },
+            running: &RUNNING,
+        }
+    }
+
+    /// Promote `cmd_buf` to `'static` via `StaticCell` and spawn the responder.
+    ///
+    /// This is the sound equivalent of the `transmute` pattern in
+    /// `McuMboxService::start` — the value truly lives for `'static` because
+    /// `StaticCell` is itself `static`.
+    fn start(self) {
+        static CMD_BUF_CELL: StaticCell<CmdBuffer> = StaticCell::new();
+        // Move cmd_buf into the static cell — sound &'static mut reference.
+        let cmd_buf: &'static mut CmdBuffer = CMD_BUF_CELL.init(self.cmd_buf);
+        self.spawner
+            .spawn(mailbox_responder_task(cmd_buf, self.running))
+            .unwrap();
+    }
+}
+
+/// Long-lived responder task — processes commands until `running` is cleared.
+///
+/// Each iteration yields once (simulating waiting for an I/O event) then
+/// increments the processed counter. Stops after 3 rounds.
+#[embassy_executor::task]
+async fn mailbox_responder_task(
+    cmd_buf: &'static mut CmdBuffer,
+    running: &'static AtomicBool,
+) {
+    running.store(true, Ordering::SeqCst);
+    while running.load(Ordering::SeqCst) {
+        executor::yield_once().await;
+        cmd_buf.processed = cmd_buf.processed.saturating_add(1);
+        if cmd_buf.processed >= 3 {
+            running.store(false, Ordering::SeqCst);
+        }
+    }
+    // Contribute processed count (3) to shared COUNTER.
+    COUNTER.fetch_add(cmd_buf.processed, Ordering::SeqCst);
+    TASK5_DONE.store(true, Ordering::SeqCst);
+    pw_log::info!("mailbox_responder: done, processed={}", cmd_buf.processed as u32);
+}
 
 // --- Async trait demonstration ----------------------------------------------
 
@@ -136,6 +253,10 @@ fn entry_point() -> ! {
             spawner.spawn(task2()).unwrap();
             spawner.spawn(task3()).unwrap();
             spawner.spawn(task4()).unwrap();
+            // Demonstrate the StaticCell / service spawn pattern:
+            // MailboxService takes ownership of CmdBuffer, promotes it to
+            // &'static mut via StaticCell, and spawns the responder task.
+            MailboxService::new(spawner).start();
         },
         || {
             // Check if all tasks done
@@ -143,14 +264,15 @@ fn entry_point() -> ! {
                 && TASK2_DONE.load(Ordering::SeqCst)
                 && TASK3_DONE.load(Ordering::SeqCst)
                 && TASK4_DONE.load(Ordering::SeqCst)
+                && TASK5_DONE.load(Ordering::SeqCst)
             {
                 let counter = COUNTER.load(Ordering::SeqCst);
-                // task1: 5×1=5, task2: 3×10=30, task3: 100, task4: 0+2+4+6=12 → 147
-                if counter == 147 {
+                // task1: 5, task2: 30, task3: 100, task4: 12, mailbox: 3 → 150
+                if counter == 150 {
                     pw_log::info!("PASSED counter={}", counter as u32);
                     let _ = syscall::debug_shutdown(Ok(()));
                 } else {
-                    pw_log::error!("FAILED counter={} expected 147", counter as u32);
+                    pw_log::error!("FAILED counter={} expected 150", counter as u32);
                     let _ = syscall::debug_shutdown(Err(pw_status::Error::Unknown));
                 }
             }

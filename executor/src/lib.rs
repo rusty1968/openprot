@@ -115,18 +115,37 @@ impl Executor {
 /// Convenience: create an executor on the stack, leak it to `&'static`, and
 /// run with a spin-loop idle strategy.
 ///
-/// This is the simplest way to use the executor from an entry point:
+/// # Init closure vs. Tock's `SpawnToken` pattern
+///
+/// Tock's libtock-rs async entry point accepts a single pre-built task handle
+/// (`SpawnToken<S>`) — the initial task is constructed *before* the executor
+/// starts and passed in directly:
+///
 /// ```ignore
-/// #[entry]
-/// fn main() -> ! {
-///     start_async(|spawner| {
-///         spawner.spawn(my_task()).unwrap();
-///     });
-/// }
+/// // Tock / libtock-rs style — one task, constructed before the executor:
+/// start_async(my_main_task(arg1, arg2));
 /// ```
 ///
-/// For production use with a reactor, prefer constructing `Executor::new()`
-/// and calling `run()` with a custom idle closure.
+/// This codebase uses an `FnOnce(Spawner)` closure instead. The closure
+/// receives the live `Spawner` once the executor is ready, and can spawn
+/// multiple tasks or hand the `Spawner` to services in one shot:
+///
+/// ```ignore
+/// // This codebase — multiple tasks, services capture Spawner directly:
+/// start_async(|spawner| {
+///     spawner.spawn(spdm_task()).unwrap();
+///     spawner.spawn(mctp_task()).unwrap();
+///     MailboxService::new(spawner).start(); // service stores Spawner: Copy
+/// });
+/// ```
+///
+/// The closure approach is more ergonomic for multi-task initialization.
+/// The `SpawnToken` approach is simpler for single-task entry points but
+/// requires chaining subsequent spawns from inside the initial task.
+/// Both use the same `transmute`-to-`'static` trick for the executor; see
+/// `# Safety` below.
+///
+/// For production use with a reactor idle strategy, prefer [`start_async_with_idle`].
 ///
 /// # Safety
 ///
