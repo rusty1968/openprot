@@ -6,22 +6,22 @@ Requirements for the async/await runtime supporting caliptra-mcu-sw userspace ap
 
 ## 1. Scope
 
-This document defines OS-agnostic requirements for the async runtime that enables Rust `async`/`await` in caliptra-mcu-sw userspace processes. The runtime bridges an underlying OS's event-delivery mechanism with Rust's cooperative `Future`-based concurrency model.
+This document defines kernel-agnostic requirements for the async runtime that enables Rust `async`/`await` in caliptra-mcu-sw userspace processes. The runtime bridges an underlying kernel's event-delivery mechanism with Rust's cooperative `Future`-based concurrency model.
 
-The current implementation targets Tock OS, but these requirements are written to be portable to other embedded operating systems or bare-metal environments.
+The current implementation targets Tock kernel, but these requirements are written to be portable to other embedded operating systems or bare-metal environments.
 
 ### 1.1 In Scope
 
 - Task executor lifecycle and scheduling
 - Future primitives for asynchronous I/O completion
-- OS abstraction layer for event delivery and process suspension
+- kernel abstraction layer for event delivery and process suspension
 - Memory allocation strategy for async state
 - Synchronization primitives for concurrent tasks
 - Safety invariants for kernel/userspace and hardware boundaries
 
 ### 1.2 Out of Scope
 
-- OS kernel internals and kernel-side scheduling
+- kernel internals and kernel-side scheduling
 - Application-layer protocol logic (PLDM, SPDM, MCTP message semantics)
 - Hardware-specific driver behavior beyond the async I/O interface
 
@@ -35,7 +35,7 @@ The runtime SHALL operate in a `no_std` environment on embedded targets. A `std`
 
 ### PLAT-2: Single-Threaded Execution
 
-The runtime SHALL assume single-threaded, single-core execution. The OS SHALL NOT re-enter the process except at explicit yield points controlled by the runtime.
+The runtime SHALL assume single-threaded, single-core execution. The kernel SHALL NOT re-enter the process except at explicit yield points controlled by the runtime.
 
 ### PLAT-3: Primary Target Architecture
 
@@ -43,7 +43,7 @@ The runtime SHALL target RISC-V 32-bit (riscv32imc and variants) as the primary 
 
 ### PLAT-4: Cooperative Scheduling
 
-The runtime SHALL use cooperative (non-preemptive) task scheduling. Tasks yield control voluntarily at `.await` points. The OS MAY preempt the entire process at yield boundaries but SHALL NOT preempt individual async tasks.
+The runtime SHALL use cooperative (non-preemptive) task scheduling. Tasks yield control voluntarily at `.await` points. The kernel MAY preempt the entire process at yield boundaries but SHALL NOT preempt individual async tasks.
 
 ### PLAT-5: Constrained Resources
 
@@ -75,17 +75,17 @@ The executor SHALL implement a poll loop with the following behavior:
 
 1. Poll all ready tasks
 2. If new work was signaled during polling, loop back immediately
-3. If no work is pending, suspend the process until the OS delivers an event
+3. If no work is pending, suspend the process until the kernel delivers an event
 
 The executor SHALL NOT busy-wait or spin when no tasks are ready.
 
 ### EXEC-4: Waker Integration
 
-The executor SHALL integrate with Rust's standard `core::task::Waker` mechanism. When a waker is invoked (e.g., from an OS event callback or interrupt context), the executor SHALL be signaled to re-poll. The signaling mechanism SHALL be safe to invoke from callback/interrupt context.
+The executor SHALL integrate with Rust's standard `core::task::Waker` mechanism. When a waker is invoked (e.g., from a kernel event callback or interrupt context), the executor SHALL be signaled to re-poll. The signaling mechanism SHALL be safe to invoke from callback/interrupt context.
 
 ### EXEC-5: Task Spawning
 
-The executor SHALL support spawning multiple concurrent tasks. The spawning handle SHALL be copyable and safe to pass between tasks for dynamic task creation at runtime.
+The spawning handle SHALL be `Copy` so tasks can freely distribute it to sub-tasks without consuming or cloning it.
 
 ### EXEC-6: Bounded Task Count
 
@@ -97,41 +97,41 @@ The maximum number of concurrently spawned tasks SHALL be bounded at compile tim
 
 ### IO-1: Event Completion Future
 
-The runtime SHALL provide a future type that completes when an OS or hardware event is delivered. This future SHALL implement `Future<Output = Result<T, E>>` where:
+The runtime SHALL provide a future type that completes when a kernel or hardware event is delivered. This future SHALL implement `Future<Output = Result<T, E>>` where:
 - `T` carries the event payload (e.g., status codes, byte counts)
-- `E` represents OS or driver error codes
+- `E` represents kernel or driver error codes
 
 ### IO-2: Buffer Sharing
 
-The I/O future layer SHALL support sharing memory buffers with the OS or hardware for zero-copy I/O:
-- Mutable buffers for read operations (OS writes into application memory)
-- Immutable buffers for write operations (OS reads from application memory)
+The I/O future layer SHALL support sharing memory buffers with the kernel or hardware for zero-copy I/O:
+- Mutable buffers for read operations (kernel writes into application memory)
+- Immutable buffers for write operations (kernel reads from application memory)
 - Combined read + write buffer operations
 
 Buffer lifetime SHALL be tied to the future's lifetime to prevent use-after-free.
 
 ### IO-3: Pinning and Stability
 
-If the OS or hardware requires a stable pointer to future state (e.g., for callback data), the future SHALL be pinned in memory. The runtime SHALL enforce pinning at the API level.
+If the kernel or hardware requires a stable pointer to future state (e.g., for callback data), the future SHALL be pinned in memory. The runtime SHALL enforce pinning at the API level.
 
 ### IO-4: Drop Safety
 
-If an I/O future has registered a callback or shared a pointer with the OS, it SHALL NOT be silently dropped while the OS still holds a reference. The runtime SHALL enforce this via one or more of:
+If an I/O future has registered a callback or shared a pointer with the kernel, it SHALL NOT be silently dropped while the kernel still holds a reference. The runtime SHALL enforce this via one or more of:
 - Panicking on premature drop
 - Requiring explicit cancellation before drop
-- Automatically deregistering callbacks on drop (if the OS supports it)
+- Automatically deregistering callbacks on drop (if the kernel supports it)
 
 ### IO-5: Cancellation
 
-The runtime SHALL provide a mechanism to cancel an in-progress I/O future, allowing it to be safely dropped without panic. Cancellation SHALL deregister or invalidate any outstanding OS callbacks.
+The runtime SHALL provide a mechanism to cancel an in-progress I/O future, allowing it to be safely dropped without panic. Cancellation SHALL deregister or invalidate any outstanding kernel callbacks.
 
 ### IO-6: Error Propagation
 
-If the OS rejects an I/O request at submission time, the future SHALL resolve to an error immediately on the next poll, without waiting for an event that will never arrive.
+If the kernel rejects an I/O request at submission time, the future SHALL resolve to an error immediately on the next poll, without waiting for an event that will never arrive.
 
 ### IO-7: Callback-to-Waker Bridge
 
-The runtime SHALL bridge the OS's event notification mechanism (callbacks, interrupts, completion queues, etc.) to Rust's `Waker` system. When an event fires:
+The runtime SHALL bridge the kernel's event notification mechanism (callbacks, interrupts, completion queues, etc.) to Rust's `Waker` system. When an event fires:
 1. The event payload SHALL be stored in the future's state
 2. The associated `Waker` SHALL be invoked to signal the executor
 
@@ -139,33 +139,33 @@ This bridge code SHALL be safe to execute in callback or interrupt context.
 
 ---
 
-## 5. OS Abstraction Layer
+## 5. Kernel Abstraction Layer
 
-### OS-1: Pluggable OS Backend
+### KERN-1: Pluggable kernel Backend
 
-The runtime SHALL isolate all OS-specific code behind an abstraction boundary. Porting to a new OS SHALL require implementing this boundary without modifying the executor or consumer code.
+The runtime SHALL isolate all kernel-specific code behind an abstraction boundary. Porting to a new kernel SHALL require implementing this boundary without modifying the executor or consumer code.
 
-### OS-2: Required OS Capabilities
+### KERN-2: Required kernel Capabilities
 
-The OS backend SHALL provide:
+The kernel backend SHALL provide:
 
 | Capability | Description |
 |---|---|
 | Event registration | Register interest in a driver/hardware event with a callback |
-| Buffer sharing | Share application memory with OS drivers for I/O |
+| Buffer sharing | Share application memory with kernel drivers for I/O |
 | Process suspension | Suspend the process until an event is delivered |
 | Event delivery | Invoke a callback or signal when an event completes |
 
-### OS-3: Yield / Suspend
+### KERN-3: Yield / Suspend
 
-The OS backend SHALL provide a mechanism to suspend the process when no async work is pending. This SHALL:
-- Release the CPU to the OS scheduler or idle loop
+The kernel backend SHALL provide a mechanism to suspend the process when no async work is pending. This SHALL:
+- Release the CPU to the kernel scheduler or idle loop
 - Resume the process when an event is ready for delivery
 - Be implementable via architecture-specific instructions (e.g., `ecall` on RISC-V, `svc` on ARM)
 
-### OS-4: Host-Side Testing Backend
+### KERN-4: Host-Side Testing Backend
 
-A test backend SHALL be provided that simulates OS event delivery on host platforms (x86_64, aarch64), enabling unit testing of async code without real hardware or OS.
+A test backend SHALL be provided that simulates kernel event delivery on host platforms (x86_64, aarch64), enabling unit testing of async code without real hardware or kernel.
 
 ---
 
@@ -193,7 +193,7 @@ The runtime SHALL use portable atomic operations that work on targets without na
 
 ### MEM-1: Heap Allocation for I/O Futures
 
-I/O future instances that must be pinned for OS callback stability SHALL be heap-allocated. A global allocator suitable for embedded targets (e.g., `embedded-alloc`) SHALL be available.
+I/O future instances that must be pinned for kernel callback stability SHALL be heap-allocated. A global allocator suitable for embedded targets (e.g., `embedded-alloc`) SHALL be available.
 
 ### MEM-2: Minimal Executor Allocation
 
@@ -214,9 +214,9 @@ The runtime's memory footprint SHALL be bounded and predictable:
 
 ## 8. Safety Requirements
 
-### SAFE-1: No Use-After-Free for OS Callbacks
+### SAFE-1: No Use-After-Free for kernel Callbacks
 
-The runtime SHALL prevent the OS from invoking a callback into freed memory. This SHALL be enforced by pinning, drop guards, and/or explicit cancellation (see IO-3, IO-4, IO-5).
+The runtime SHALL prevent the kernel from invoking a callback into freed memory. This SHALL be enforced by pinning, drop guards, and/or explicit cancellation (see IO-3, IO-4, IO-5).
 
 ### SAFE-2: Sound Lifetime Extension
 
@@ -228,7 +228,7 @@ The combination of single-threaded execution (PLAT-2), cooperative scheduling (P
 
 ### SAFE-4: Panic Safety in Callbacks
 
-OS event callbacks SHALL use RAII guards to ensure consistent state if a panic occurs during callback execution. The guard SHALL prevent the process from continuing with corrupted state.
+kernel event callbacks SHALL use RAII guards to ensure consistent state if a panic occurs during callback execution. The guard SHALL prevent the process from continuing with corrupted state.
 
 ---
 
@@ -238,16 +238,16 @@ OS event callbacks SHALL use RAII guards to ensure consistent state if a panic o
 
 The runtime SHALL compile and run on host platforms (x86_64, aarch64) for unit testing. All target-specific code SHALL be gated behind platform conditionals.
 
-### TEST-2: Simulated OS Backend
+### TEST-2: Simulated kernel Backend
 
-A simulated OS backend (OS-4) SHALL allow tests to:
+A simulated kernel backend (KERN-4) SHALL allow tests to:
 - Trigger event delivery programmatically
 - Verify future polling and waker behavior
 - Test error paths and cancellation
 
-### TEST-3: Mockable OS Interface
+### TEST-3: Mockable kernel Interface
 
-The OS abstraction (OS-1) SHALL be parameterized or trait-based so that test doubles can be injected for all OS interactions.
+The kernel abstraction (KERN-1) SHALL be parameterized or trait-based so that test doubles can be injected for all kernel interactions.
 
 ---
 
@@ -260,7 +260,7 @@ Assumption for this section: hardware drivers are implemented in pw-kernel (kern
 The runtime SHALL support a standard async kernel-service integration pattern:
 
 1. Initiate an I/O operation (register event interest, optionally share buffers)
-2. Trigger the operation via the OS/hardware
+2. Trigger the operation via the kernel/hardware
 3. `.await` the I/O future to receive the completion result
 4. Process the result or propagate the error
 
@@ -303,11 +303,11 @@ The executor poll loop SHALL add negligible overhead. The runtime SHALL NOT intr
 
 ### NFR-2: Deterministic Wake Behavior
 
-When an OS event fires, the corresponding task SHALL be woken and polled in the immediately following executor poll cycle. There SHALL be no spurious wakes that cause unnecessary polling.
+When a kernel event fires, the corresponding task SHALL be woken and polled in the immediately following executor poll cycle. There SHALL be no spurious wakes that cause unnecessary polling.
 
 ### NFR-3: Power Efficiency
 
-When no tasks are ready, the runtime SHALL suspend the process via the OS (OS-3), allowing the system to idle the processor or schedule other work. The runtime SHALL NOT busy-wait.
+When no tasks are ready, the runtime SHALL suspend the process via the kernel (KERN-3), allowing the system to idle the processor or schedule other work. The runtime SHALL NOT busy-wait.
 
 ### NFR-4: Code Size
 
@@ -324,7 +324,7 @@ All runtime code SHALL be licensed under Apache-2.0, consistent with the caliptr
 This section assigns each requirement to the primary implementation owner.
 
 - `Executor`: task scheduling, polling, spawning, and top-level runtime lifecycle
-- `Reactor`: OS event integration, wait-group multiplexing, and I/O futures
+- `Reactor`: kernel event integration, wait-group multiplexing, and I/O futures
 - `Shared`: cross-cutting contract that both layers must satisfy
 
 | Requirement | Primary Owner | Notes |
@@ -345,12 +345,12 @@ This section assigns each requirement to the primary implementation owner.
 | IO-3 | Reactor | Pinning/stable pointer guarantees for callback state. |
 | IO-4 | Reactor | Drop safety of in-flight I/O registrations. |
 | IO-5 | Reactor | Explicit cancellation semantics for in-progress I/O. |
-| IO-6 | Reactor | Submission-time error propagation from OS/backend. |
+| IO-6 | Reactor | Submission-time error propagation from kernel/backend. |
 | IO-7 | Reactor | Callback/interrupt event bridge to waker signaling. |
-| OS-1 | Reactor | OS abstraction boundary is owned by reactor/kernel bridge layer. |
-| OS-2 | Reactor | Event registration, buffer sharing, suspension, delivery APIs. |
-| OS-3 | Reactor | Suspend/wait capability exposed for executor idle strategy. |
-| OS-4 | Reactor | Simulated backend for host tests of I/O/event behavior. |
+| KERN-1 | Reactor | kernel abstraction boundary is owned by reactor/kernel bridge layer. |
+| KERN-2 | Reactor | Event registration, buffer sharing, suspension, delivery APIs. |
+| KERN-3 | Reactor | Suspend/wait capability exposed for executor idle strategy. |
+| KERN-4 | Reactor | Simulated backend for host tests of I/O/event behavior. |
 | SYNC-1 | Shared | Critical-section contract spans executor signal path + reactor state. |
 | SYNC-2 | Shared | Async mutexes are ecosystem-level primitives used by tasks. |
 | SYNC-3 | Shared | Async signaling primitives are cross-cutting. |
@@ -365,28 +365,28 @@ This section assigns each requirement to the primary implementation owner.
 | SAFE-4 | Reactor | Callback guard behavior belongs to event/callback bridge. |
 | TEST-1 | Shared | Host compile/test support spans both crates. |
 | TEST-2 | Reactor | Simulated event backend is reactor/backend concern. |
-| TEST-3 | Reactor | Mockable OS interface belongs to OS abstraction layer. |
+| TEST-3 | Reactor | Mockable kernel interface belongs to kernel abstraction layer. |
 | DOWN-1 | Reactor + Executor | Userspace tasks await kernel-service futures; executor schedules those tasks. |
 
 ---
 
 ## Appendix A: Current Implementation Mapping
 
-The current implementation targets Tock OS. This appendix maps abstract requirements to Tock-specific mechanisms for reference.
+The current implementation targets Tock kernel. This appendix maps abstract requirements to Tock-specific mechanisms for reference.
 
 | Requirement | Tock Implementation |
 |---|---|
-| OS-2: Event registration | `SUBSCRIBE` syscall with upcall function pointer |
-| OS-2: Buffer sharing | `ALLOW_RW` / `ALLOW_RO` syscalls |
-| OS-3: Process suspension | `yield-wait` syscall (class 0, id 1) |
-| OS-2: Event delivery | Kernel invokes registered upcall with 3 × u32 args |
+| KERN-2: Event registration | `SUBSCRIBE` syscall with upcall function pointer |
+| KERN-2: Buffer sharing | `ALLOW_RW` / `ALLOW_RO` syscalls |
+| KERN-3: Process suspension | `yield-wait` syscall (class 0, id 1) |
+| KERN-2: Event delivery | Kernel invokes registered upcall with 3 × u32 args |
 | IO-1: Event completion future | `TockSubscribe` type |
 | IO-7: Callback-to-waker bridge | `extern "C" fn kernel_upcall` stores result, wakes `Waker` |
 | SAFE-4: Panic safety | `ExitOnDrop<S>` RAII guard in upcall |
-| OS-4: Test backend | `libtock_unittest::fake::Syscalls` |
+| KERN-4: Test backend | `libtock_unittest::fake::Syscalls` |
 | EXEC-2: Executor | `TockExecutor` wrapping Embassy `raw::Executor` |
 | SYNC-1: Critical section | `NullCriticalSection` (no-op, sound for single-threaded Tock) |
-| OS-3: Yield (RISC-V) | Inline `asm!("ecall")` with full register clobber |
+| KERN-3: Yield (RISC-V) | Inline `asm!("ecall")` with full register clobber |
 | MEM-1: Allocator | `embedded-alloc` global allocator |
 
 
