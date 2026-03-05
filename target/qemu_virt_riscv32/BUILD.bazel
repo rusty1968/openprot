@@ -1,4 +1,7 @@
 # Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache-2.0 license
 
 load("@pigweed//pw_build:merge_flags.bzl", "flags_from_dict")
 load("@pigweed//pw_kernel:flags.bzl", "KERNEL_DEVICE_COMMON_FLAGS")

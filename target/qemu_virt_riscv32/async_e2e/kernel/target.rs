@@ -1,4 +1,6 @@
 // Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+// Licensed under the Apache-2.0 license
 
 //! Kernel target for async e2e test on qemu_virt_riscv32.
 //!

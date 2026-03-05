@@ -1,4 +1,6 @@
 # Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache-2.0 license
 
 load("@pigweed//pw_kernel/tooling:system_image.bzl", "system_image", "system_image_test")
 load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")

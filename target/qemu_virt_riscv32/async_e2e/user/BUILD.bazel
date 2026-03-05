@@ -1,5 +1,8 @@
 # Licensed under the Apache-2.0 license
 
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+#
 load("@pigweed//pw_kernel/tooling:app_package.bzl", "app_package")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
 load("//target/qemu_virt_riscv32:defs.bzl", "TARGET_COMPATIBLE_WITH")
