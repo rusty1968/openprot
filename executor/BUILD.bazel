@@ -8,7 +8,7 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "executor",
     srcs = ["src/lib.rs"],
-    crate_name = "openprot_executor",
+    crate_name = "executor",
     edition = "2024",
     deps = [
         "@rust_crates//:critical-section",

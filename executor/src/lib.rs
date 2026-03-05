@@ -141,6 +141,24 @@ pub fn start_async(init: impl FnOnce(Spawner)) -> ! {
     executor.run(init, core::hint::spin_loop);
 }
 
+/// Convenience: create an executor on the stack, leak it to `&'static`, and
+/// run with a caller-supplied idle closure.
+///
+/// Use this when you need a custom idle strategy (e.g., blocking via the
+/// reactor) but still want the simple stack-based entry point.
+///
+/// # Safety
+///
+/// Uses `core::mem::transmute` to extend the executor's lifetime to `'static`.
+/// This is safe because `run()` never returns, so the stack frame is never
+/// deallocated.
+pub fn start_async_with_idle(init: impl FnOnce(Spawner), idle: impl Fn()) -> ! {
+    let executor = Executor::new();
+    // SAFETY: same justification as start_async.
+    let executor: &'static Executor = unsafe { core::mem::transmute(&executor) };
+    executor.run(init, idle);
+}
+
 // --- Utility futures --------------------------------------------------------
 
 /// A future that yields once (returning [`Poll::Pending`]), then completes.

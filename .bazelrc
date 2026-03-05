@@ -32,7 +32,22 @@ test:k_common --test_tag_filters=-integration,-do_not_build,-do_not_run_test,-ke
 test:k_common --@pigweed//pw_kernel:enable_tests=true
 test:k_common --platform_suffix=test
 
-# pw-kernel on QEMU RISC-V 32 virt
+# pw-kernel on QEMU RISC-V 32 virt (OpenPRoT local platform)
+# Usage: bazel test --config=openprot_qemu_virt_riscv32 //target/qemu_virt_riscv32/...
+common:openprot_qemu_virt_riscv32 --config=k_common
+common:openprot_qemu_virt_riscv32 --platforms=//target/qemu_virt_riscv32:qemu_virt_riscv32
+run:openprot_qemu_virt_riscv32 --run_under="@pigweed//pw_kernel/tooling:qemu \
+  --cpu rv32 \
+  --machine virt \
+  --semihosting \
+  --image "
+test:openprot_qemu_virt_riscv32 --run_under="@pigweed//pw_kernel/tooling:qemu \
+  --cpu rv32 \
+  --machine virt \
+  --semihosting \
+  --image "
+
+# pw-kernel on QEMU RISC-V 32 virt (upstream Pigweed platform)
 # Usage: bazel test --config=k_qemu_virt_riscv32 //tests/...
 common:k_qemu_virt_riscv32 --config=k_common
 common:k_qemu_virt_riscv32 --platforms=@pigweed//pw_kernel/target/qemu_virt_riscv32:qemu_virt_riscv32
