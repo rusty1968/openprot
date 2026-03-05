@@ -1,6 +1,4 @@
 # Licensed under the Apache-2.0 license
-
-# Licensed under the Apache-2.0 license
 # SPDX-License-Identifier: Apache-2.0
 #
 load("@pigweed//pw_kernel/tooling:app_package.bzl", "app_package")

@@ -1,5 +1,7 @@
-/* Licensed under the Apache-2.0 license */
-/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * Licensed under the Apache-2.0 license
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
  * Memory layout for QEMU RISC-V 32 virt machine.

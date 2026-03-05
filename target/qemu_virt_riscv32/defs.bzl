@@ -1,4 +1,5 @@
 # Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
 
 """Common definitions used by all qemu_virt_riscv32 targets."""
 
