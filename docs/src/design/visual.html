@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>SRAM Migration: Tock → pw-kernel</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#09090c;color:#cbd5e1;font-family:'Courier New',monospace;font-size:13px;min-height:100vh}
+button{font-family:'Courier New',monospace;cursor:pointer}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:#0e1015}
+::-webkit-scrollbar-thumb{background:#1c2028;border-radius:3px}
+.header{border-bottom:1px solid #1c2028;padding:14px 28px;display:flex;align-items:center;justify-content:space-between;background:#0b0d12;flex-wrap:wrap;gap:10px}
+.header small{color:#475569;font-size:9px;letter-spacing:.22em;display:block;margin-bottom:3px}
+.header h1{color:#38bdf8;font-size:15px;font-weight:800;letter-spacing:.04em}
+.hbadges{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.go{background:#4ade8018;border:2px solid #4ade80;color:#4ade80;padding:5px 18px;border-radius:4px;font-size:13px;font-weight:800;letter-spacing:.1em}
+.tabs{border-bottom:1px solid #1c2028;padding:0 28px;display:flex;overflow-x:auto}
+.tabs button{background:none;border:none;border-bottom:2px solid transparent;color:#475569;padding:11px 16px;font-size:10px;letter-spacing:.13em;text-transform:uppercase;font-weight:400;white-space:nowrap}
+.tabs button.on{border-bottom-color:#38bdf8;color:#38bdf8;font-weight:700}
+.content{padding:24px 28px;max-width:1200px}
+.panel{display:none}.panel.on{display:block}
+.sh{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.sh .sn{color:#475569;font-size:10px}.sh .sl{color:#38bdf8;font-size:11px;letter-spacing:.18em;text-transform:uppercase}
+.sh .sl2{flex:1;height:1px;background:#1c2028}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.g5{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px}
+.g53{display:grid;grid-template-columns:5fr 3fr;gap:12px}
+.g32{display:grid;grid-template-columns:3fr 2fr;gap:12px;margin-bottom:12px}
+@media(max-width:860px){.g2,.g3,.g4,.g5,.g53,.g32{grid-template-columns:1fr}}
+.box{background:#0e1015;border:1px solid #1c2028;border-radius:5px;padding:18px}
+.mb{margin-bottom:12px}
+.fc{display:flex;flex-direction:column;gap:10px}
+.tag{display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.07em;border:1px solid}
+.pt{height:4px;background:#1c2028;border-radius:2px;margin-top:3px}
+.pf{height:4px;border-radius:2px}
+.tip{border-radius:4px;padding:8px 12px;margin-top:10px;font-size:11px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:9px;letter-spacing:.1em;padding:6px 10px;color:#475569;font-weight:400}
+td{padding:9px 10px;font-size:11px;line-height:1.5;border-bottom:1px solid #1c2028}
+tr:nth-child(even) td{background:#0c0e14}
+.pmp-grid{display:flex;gap:2px;flex-wrap:wrap}
+.pmp-c{width:14px;height:14px;border-radius:2px}
+.footer{border-top:1px solid #1c2028;padding:10px 28px;display:flex;justify-content:space-between;color:#475569;font-size:9px;letter-spacing:.08em;flex-wrap:wrap;gap:4px;margin-top:16px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div><small>CALIPTRA MCU-SW · SRAM MIGRATION ANALYSIS v2</small><h1>TOCK OS → PW-KERNEL MULTI-PROCESS</h1></div>
+  <div class="hbadges">
+    <span class="tag" style="color:#38bdf8;border-color:#38bdf850;background:#38bdf818">5 PROCESSES</span>
+    <span class="tag" style="color:#4ade80;border-color:#4ade8050;background:#4ade8018">512 KB SRAM</span>
+    <span class="tag" style="color:#c084fc;border-color:#c084fc50;background:#c084fc18">EMBASSY ELIMINATED</span>
+    <div class="go">✓ GO</div>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="on" onclick="sw(0)">Overview</button>
+  <button onclick="sw(1)">⚡ Embassy Removal</button>
+  <button onclick="sw(2)">Processes</button>
+  <button onclick="sw(3)">Duplication</button>
+  <button onclick="sw(4)">Architecture</button>
+  <button onclick="sw(5)">Sizing</button>
+</div>
+
+<div class="content">
+
+<!-- TAB 0 -->
+<div class="panel on" id="p0">
+  <div class="sh"><span class="sn">§0</span><span class="sl">Executive Summary</span><div class="sl2"></div></div>
+  <div class="g4" id="kpis0"></div>
+  <div class="box mb" style="margin-bottom:12px">
+    <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:14px">SRAM BREAKDOWN BY CATEGORY (KB) — TOCK vs PW-KERNEL</div>
+    <svg id="chart0" style="width:100%;height:210px" viewBox="0 0 760 210"></svg>
+    <div style="display:flex;gap:20px;justify-content:center;margin-top:8px">
+      <div style="display:flex;align-items:center;gap:6px"><div style="width:12px;height:12px;background:#38bdf8;opacity:.6;border-radius:2px"></div><span style="color:#475569;font-size:11px">Tock OS</span></div>
+      <div style="display:flex;align-items:center;gap:6px"><div style="width:12px;height:12px;background:#4ade80;opacity:.8;border-radius:2px"></div><span style="color:#475569;font-size:11px">pw-kernel (est.)</span></div>
+    </div>
+  </div>
+  <div class="g2">
+    <div class="box" style="border-color:#4ade8050;box-shadow:0 0 20px #4ade8010">
+      <div style="color:#4ade80;font-size:9px;letter-spacing:.14em;margin-bottom:12px">▼ KEY SAVINGS</div>
+      <div id="savings"></div>
+    </div>
+    <div class="box">
+      <div style="color:#fbbf24;font-size:9px;letter-spacing:.14em;margin-bottom:12px">▲ COSTS</div>
+      <div id="costs"></div>
+      <div class="tip" style="background:#4ade8010;border:1px solid #4ade8035;color:#4ade80">Net result: costs (+94.9 KB) far exceeded by savings (−202 KB)</div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB 1 -->
+<div class="panel" id="p1">
+  <div class="sh"><span class="sn">§1</span><span class="sl">Embassy Async Runtime Elimination</span><div class="sl2"></div></div>
+  <div class="g3" id="kpis1"></div>
+  <div class="g32">
+    <div class="box">
+      <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:14px">ELIMINATED COMPONENTS</div>
+      <div id="embassy-list"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+        <span style="color:#94a3b8;font-size:12px">Total eliminated</span>
+        <span style="color:#c084fc;font-size:16px;font-weight:800">~61 KB</span>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="box" style="border-color:#c084fc50;box-shadow:0 0 20px #c084fc10">
+        <div style="color:#c084fc;font-size:9px;letter-spacing:.14em;margin-bottom:10px">ARCHITECTURAL CHANGE</div>
+        <div style="color:#94a3b8;font-size:12px;line-height:1.7">
+          <div style="margin-bottom:8px"><span style="color:#38bdf8">Tock/Embassy:</span> Cooperative async executor. Each task is a state machine. Locals across <code style="color:#fbbf24">.await</code> captured in a static <code style="color:#fbbf24">POOL</code>.</div>
+          <div><span style="color:#4ade80">pw-kernel:</span> Synchronous event loop. Each process calls <code style="color:#4ade80">object_wait</code>, processes one message, replies. No executor, no task pools.</div>
+        </div>
+      </div>
+      <div class="box">
+        <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:10px">HEAP: 16 KB → 4 KB</div>
+        <div id="heap-bars"></div>
+      </div>
+      <div class="box">
+        <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:10px">STACK IMPACT</div>
+        <div style="color:#94a3b8;font-size:11px;line-height:1.6">Embassy: stack holds only one sync segment — async state is in POOL.<br><br>pw-kernel: full call chain runs on stack, but only one message in flight.<br><br>Net: <span style="color:#4ade80;font-weight:700">−23.5 KB total</span> (43.5 KB → 20 KB).</div>
+      </div>
+    </div>
+  </div>
+  <div class="tip" style="background:#c084fc10;border:1px solid #c084fc35;color:#c084fc">✦ Embassy removal frees ~47 KB BSS/heap and ~27 KB code that would be duplicated 4× (~108 KB total). Budget goes from "Conditional GO" to clear GO with 200+ KB headroom.</div>
+</div>
+
+<!-- TAB 2 -->
+<div class="panel" id="p2">
+  <div class="sh"><span class="sn">§2</span><span class="sl">Process Decomposition</span><div class="sl2"></div></div>
+  <div class="g5" id="proc-cards"></div>
+  <div class="box mb" style="margin-bottom:12px">
+    <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:14px">STACK BUDGET: TOCK vs PW-KERNEL</div>
+    <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <div style="color:#38bdf8;font-size:11px;margin-bottom:8px">Tock: 1 shared async stack</div>
+        <div style="display:flex;gap:2px">
+          <div style="flex:44;height:48px;background:#38bdf899;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px">App stack 44.5 KB</div>
+          <div style="flex:8;height:48px;background:#47556999;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px">K 8 KB</div>
+        </div>
+        <div style="color:#475569;font-size:10px;margin-top:4px">Total: 52.5 KB</div>
+      </div>
+      <div style="color:#94a3b8;font-size:20px;padding-bottom:20px">→</div>
+      <div style="flex:1;min-width:180px">
+        <div style="color:#4ade80;font-size:11px;margin-bottom:8px">pw-kernel: 4 synchronous stacks</div>
+        <div style="display:flex;gap:2px;align-items:flex-end">
+          <div style="flex:8;height:40px;background:#c084fc99;border-radius:3px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;font-size:9px">P1<br>8KB</div>
+          <div style="flex:5;height:25px;background:#2dd4bf99;border-radius:3px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;font-size:9px">P2<br>5KB</div>
+          <div style="flex:4;height:20px;background:#4ade8099;border-radius:3px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:2px;font-size:9px">P3 4KB</div>
+          <div style="flex:3;height:15px;background:#fbbf2499;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:8px">P4 3</div>
+          <div style="flex:8;height:40px;background:#47556940;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#475569">kthreads 8 KB</div>
+        </div>
+        <div style="color:#4ade80;font-size:10px;margin-top:4px">Total: 30 KB (−22.5 KB)</div>
+      </div>
+    </div>
+  </div>
+  <div class="box">
+    <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:12px">GROUPING RATIONALE</div>
+    <table><thead><tr><th>Process</th><th>Shared State / Reason</th><th>Splitting Cost</th></tr></thead><tbody>
+      <tr><td style="color:#c084fc;font-weight:700;white-space:nowrap">P1: spdm_service</td><td style="color:#94a3b8">Shares SpdmContext, SHARED_DPE_LEAF_CERT (2,072 B), spdm-lib (~45 KB)</td><td>Duplicates ~65 KB spdm-lib + state</td></tr>
+      <tr><td style="color:#2dd4bf;font-weight:700;white-space:nowrap">P2: pldm_service</td><td style="color:#94a3b8">responder + initiator share pldm-lib + MCTP transport; coordinated via Signal</td><td>Breaks shared mutable state</td></tr>
+      <tr><td style="color:#4ade80;font-weight:700;white-space:nowrap">P3: mcu_mbox</td><td style="color:#94a3b8">Uses only mcu-mbox-lib + caliptra-api — no shared state with SPDM/PLDM</td><td>Clean boundary: low cost to split</td></tr>
+      <tr><td style="color:#fbbf24;font-weight:700;white-space:nowrap">P4: caliptra_proxy</td><td style="color:#94a3b8">Owns all MCTP buffers (~21 KB BSS). Hubris-style hardware driver process.</td><td>Merging into kernel adds fault risk</td></tr>
+    </tbody></table>
+  </div>
+</div>
+
+<!-- TAB 3 -->
+<div class="panel" id="p3">
+  <div class="sh"><span class="sn">§3</span><span class="sl">Code Duplication</span><div class="sl2"></div></div>
+  <div class="g53">
+    <div class="box">
+      <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:16px">DUPLICATED CRATES (EMBASSY REMOVED — ~80 KB → ~59 KB)</div>
+      <div id="dup-list"></div>
+      <div style="display:flex;justify-content:space-between;margin-top:10px">
+        <span style="color:#94a3b8">Total duplication overhead</span>
+        <span style="color:#fbbf24;font-size:18px;font-weight:800">~59 KB</span>
+      </div>
+      <div class="tip" style="background:#fbbf2410;border:1px solid #fbbf2435;color:#fbbf24">⬇ −21 KB vs v1. Embassy (8 KB × 4 = 32 KB) gone; only structural crates remain.</div>
+    </div>
+    <div class="fc">
+      <div class="box">
+        <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:10px">WHAT CHANGED IN V2</div>
+        <div id="v2-diff"></div>
+      </div>
+      <div class="box" style="border-color:#4ade8050;box-shadow:0 0 20px #4ade8010">
+        <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:10px">IPC vs TOCK CAPSULE BUFFERS</div>
+        <div id="ipc-bars"></div>
+        <div style="color:#4ade80;font-size:12px;margin-top:8px;font-weight:700">Net: −4 KB (IPC more efficient)</div>
+      </div>
+      <div class="box">
+        <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:10px">SAVE MORE: SHARED .TEXT</div>
+        <div style="color:#94a3b8;font-size:11px;line-height:1.6">Shared read-only mappings for <span style="color:#38bdf8">caliptra-api</span> (P1/P3/P4) could save an additional <span style="color:#4ade80;font-weight:700">~30 KB</span>.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB 4 -->
+<div class="panel" id="p4">
+  <div class="sh"><span class="sn">§4</span><span class="sl">Architecture Comparison</span><div class="sl2"></div></div>
+  <div class="g3" id="arch-cards"></div>
+  <div class="box mb" style="margin-bottom:12px">
+    <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:12px">RISC-V VeeR EL2: 64 PMP ENTRY ALLOCATION</div>
+    <div class="pmp-grid" id="pmp-grid"></div>
+    <div style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap" id="pmp-legend"></div>
+    <div class="tip" style="background:#4ade8010;border:1px solid #4ade8035;color:#4ade80">~34 of 64 entries used. Standard 16-entry RISC-V PMP would FAIL (34 &gt; 16). VeeR EL2's 64-entry PMP is essential.</div>
+  </div>
+  <div class="box" style="border-color:#fbbf2440">
+    <div style="color:#fbbf24;font-size:9px;letter-spacing:.14em;margin-bottom:10px">† ARMv7-M: POWER-OF-2 ALIGNMENT WASTE (~141 KB) — MARGINAL AFTER EMBASSY REMOVAL</div>
+    <div class="g4" style="margin-bottom:10px" id="armv7-waste"></div>
+    <div style="color:#94a3b8;font-size:11px">With Embassy removed: ~310 KB + 141 KB waste = ~451 KB. At 512 KB → <span style="color:#fbbf24">~61 KB free (marginal)</span>. Not recommended.</div>
+  </div>
+</div>
+
+<!-- TAB 5 -->
+<div class="panel" id="p5">
+  <div class="sh"><span class="sn">§5</span><span class="sl">SRAM Sensitivity &amp; Optimizations</span><div class="sl2"></div></div>
+  <div class="g3" id="sizing-cards"></div>
+  <div class="box mb" style="margin-bottom:12px">
+    <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:14px">REMAINING OPTIMIZATIONS (v2 — EMBASSY ALREADY REMOVED)</div>
+    <div id="opt-list"></div>
+    <div class="tip" style="background:#94a3b810;border:1px solid #94a3b835;color:#94a3b8">With ~200 KB free at 512 KB, optimizations #1–4 are optional enhancements.</div>
+  </div>
+  <div class="box">
+    <div style="color:#475569;font-size:9px;letter-spacing:.14em;margin-bottom:12px">REVISED RISKS (v2)</div>
+    <div id="risk-list"></div>
+  </div>
+</div>
+
+</div><!-- .content -->
+
+<div class="footer">
+  <span>CALIPTRA MCU-SW · SRAM MIGRATION ANALYSIS v2 · EMBASSY ELIMINATED · SYNCHRONOUS PW-KERNEL MODEL</span>
+  <span>ALL ESTIMATES ±25% · [measured] AND [estimated] TAGGED IN SOURCE DOCUMENT</span>
+</div>
+
+<script>
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function sw(n){
+  document.querySelectorAll('.panel').forEach((el,i)=>el.classList.toggle('on',i===n));
+  document.querySelectorAll('.tabs button').forEach((el,i)=>el.classList.toggle('on',i===n));
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const C={accent:'#38bdf8',green:'#4ade80',amber:'#fbbf24',red:'#f87171',purple:'#c084fc',teal:'#2dd4bf',text:'#cbd5e1',dim:'#475569',mid:'#94a3b8',border:'#1c2028'};
+const tg=(l,c)=>`<span class="tag" style="color:${c};border-color:${c}50;background:${c}18">${l}</span>`;
+const bar=(pct,c,h=4)=>`<div class="pt" style="height:${h}px"><div class="pf" style="height:${h}px;background:${c};width:${Math.max(0,Math.min(100,pct))}%;opacity:.75"></div></div>`;
+const row=(l,v,s,vc)=>`<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #1c2028">
+  <div><div style="color:#cbd5e1;font-size:11px">${l}</div>${s?`<div style="color:#475569;font-size:10px">${s}</div>`:''}</div>
+  <span style="color:${vc};font-size:12px;font-weight:700;white-space:nowrap;margin-left:8px;font-family:monospace">${v}</span></div>`;
+
+// ── Tab 0 data ────────────────────────────────────────────────────────────────
+const wfd=[
+  {n:'Kernel code', t:113.4,p:10.0},{n:'Process code',t:151.7,p:181.6},
+  {n:'Alignment',t:10.2,p:36.0},{n:'Stacks',t:51.5,p:30.0},
+  {n:'BSS/Data',t:67.9,p:33.1},{n:'Grants/IPC',t:16.0,p:8.0},{n:'PCBs/Misc',t:0,p:9.3}
+];
+
+document.getElementById('kpis0').innerHTML=[
+  ['Tock SRAM Used','404.0 KB','of 512 KB · 78.9%',C.accent],
+  ['pw-kernel Estimated','~302 KB','of 512 KB · 59.0%',C.green],
+  ['Net Savings','−102 KB','kernel −103 KB + Embassy −47 KB',C.green],
+  ['Free (512 KB)','~210 KB','~41% headroom · 124 KB worst-case',C.green],
+].map(([l,v,s,c])=>`<div class="box"><div style="color:#475569;font-size:9px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">${l}</div><div style="color:${c};font-size:26px;font-weight:800;line-height:1;margin-bottom:4px">${v}</div><div style="color:#94a3b8;font-size:11px;line-height:1.4">${s}</div></div>`).join('');
+
+(function drawChart(){
+  const W=760,H=195,pL=38,pB=28,pT=8,pR=8,cW=W-pL-pR,cH=H-pB-pT,max=200;
+  let h='';
+  [0,50,100,150,200].forEach(v=>{
+    const y=pT+cH-(v/max)*cH;
+    h+=`<line x1="${pL}" y1="${y}" x2="${W-pR}" y2="${y}" stroke="#1c2028" stroke-width="1"/>`;
+    h+=`<text x="${pL-3}" y="${y+4}" text-anchor="end" font-size="9" fill="#475569" font-family="monospace">${v}</text>`;
+  });
+  wfd.forEach((d,i)=>{
+    const gW=cW/wfd.length,x=pL+i*gW,bW=gW*.35;
+    const tH=(d.t/max)*cH,pH=(d.p/max)*cH;
+    if(d.t>0)h+=`<rect x="${x+gW*.08}" y="${pT+cH-tH}" width="${bW}" height="${tH}" fill="#38bdf8" fill-opacity=".6" rx="2"/>`;
+    h+=`<rect x="${x+gW*.08+bW+2}" y="${pT+cH-pH}" width="${bW}" height="${pH}" fill="#4ade80" fill-opacity=".8" rx="2"/>`;
+    const lx=x+gW/2,ly=pT+cH+11;
+    const words=d.n.split(' ');
+    if(words.length>1){
+      h+=`<text x="${lx}" y="${ly}" text-anchor="middle" font-size="9" fill="#475569" font-family="monospace">${words[0]}</text>`;
+      h+=`<text x="${lx}" y="${ly+11}" text-anchor="middle" font-size="9" fill="#475569" font-family="monospace">${words[1]}</text>`;
+    } else {
+      h+=`<text x="${lx}" y="${ly+4}" text-anchor="middle" font-size="9" fill="#475569" font-family="monospace">${d.n}</text>`;
+    }
+  });
+  document.getElementById('chart0').innerHTML=h;
+})();
+
+document.getElementById('savings').innerHTML=[
+  ['pw-kernel vs Tock kernel','−103.4 KB','Capsules moved to userspace; no grant system'],
+  ['Embassy async runtime','−47 KB','Pools (27 KB) + executor code (8 KB) + heap (12 KB)'],
+  ['libtock shims replaced','−13 KB','2 KB pw-kernel stubs replace 15 KB libtock layer'],
+  ['Smaller sync stacks','−23.5 KB','20 KB total vs 43.5 KB single async stack'],
+  ['Grants eliminated → IPC','−16 KB','pw-kernel uses zero-copy rendezvous IPC'],
+].map(([l,v,s])=>row(l,v,s,C.green)).join('');
+
+document.getElementById('costs').innerHTML=[
+  ['Process code duplication','+59 KB','caliptra-api, core runtime in each process'],
+  ['PMP/page alignment padding','+16 KB','Per-process region alignment'],
+  ['Per-thread kernel stacks','+8 KB','4 threads × 2 KB'],
+  ['Process ctrl blocks + IPC','+9.3 KB','PCBs + rendezvous IPC buffers'],
+  ['BSS increase (per-process)','+2.6 KB','Small static overhead per process'],
+].map(([l,v,s])=>row(l,v,s,C.amber)).join('');
+
+// ── Tab 1 data ────────────────────────────────────────────────────────────────
+document.getElementById('kpis1').innerHTML=[
+  ['Embassy Code Removed','~27 KB','executor + sync + libtockasync + async-trait',C.purple],
+  ['Async Pools Removed','~22 KB','spdm_doe::POOL (20.3 KB) + spdm_task::POOL',C.purple],
+  ['Heap Reduction','−12 KB','16 KB → 4 KB: pinned futures eliminated',C.purple],
+].map(([l,v,s,c])=>`<div class="box"><div style="color:#475569;font-size:9px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">${l}</div><div style="color:${c};font-size:26px;font-weight:800;line-height:1;margin-bottom:4px">${v}</div><div style="color:#94a3b8;font-size:11px;line-height:1.4">${s}</div></div>`).join('');
+
+document.getElementById('embassy-list').innerHTML=[
+  {i:'spdm_doe_responder::POOL',sz:20.3,t:'BSS',n:'Async task pool — eliminated'},
+  {i:'spdm_task::POOL',sz:1.7,t:'BSS',n:'Async task pool — eliminated'},
+  {i:'HEAP_MEM (futures)',sz:12.0,t:'Heap',n:'Pinned futures heap — reduced by 12 KB'},
+  {i:'embassy-executor + sync',sz:8.0,t:'Code',n:'Async executor code — eliminated'},
+  {i:'libtock shims',sz:15.0,t:'Code',n:'Replaced by 2 KB pw-kernel stubs (−13 KB net)'},
+  {i:'libtockasync + async-trait',sz:4.0,t:'Code',n:'No async runtime needed'},
+].map(e=>{
+  const tc=e.t==='BSS'?C.teal:e.t==='Heap'?C.amber:C.purple;
+  return `<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #1c2028">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <span style="color:#475569;font-size:12px;text-decoration:line-through">${e.i}</span>
+      <div style="display:flex;gap:8px;align-items:center">${tg(e.t,tc)}<span style="color:${C.red};font-size:12px;font-weight:700">−${e.sz} KB</span></div>
+    </div>
+    <div style="color:#475569;font-size:10px">${e.n}</div>
+    ${bar((e.sz/20.3)*100,C.purple)}
+  </div>`;
+}).join('');
+
+document.getElementById('heap-bars').innerHTML=[
+  {l:'Tock: Box&lt;dyn Future&gt; pinned',kb:16,c:C.red},
+  {l:'pw-kernel: cert chain only',kb:4,c:C.green},
+].map(h=>`<div style="margin-bottom:8px">
+  <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
+    <span style="color:#94a3b8">${h.l}</span><span style="color:${h.c};font-weight:700">${h.kb} KB</span>
+  </div>${bar((h.kb/16)*100,h.c,6)}</div>`).join('');
+
+// ── Tab 2 data ────────────────────────────────────────────────────────────────
+const procs=[
+  {id:'P0',name:'pw-kernel',tasks:'Kernel scheduler, IPC, PMP',code:10,bss:3,stack:2,color:C.accent},
+  {id:'P1',name:'spdm_service',tasks:'spdm_mctp_responder · spdm_doe_responder · spdm_task',code:65,bss:4.2,stack:8,color:C.purple},
+  {id:'P2',name:'pldm_service',tasks:'pldm_responder · pldm_initiator · pldm_service',code:33,bss:2.1,stack:5,color:C.teal},
+  {id:'P3',name:'mcu_mbox',tasks:'mcu_mbox_responder_task',code:25,bss:4.2,stack:4,color:C.green},
+  {id:'P4',name:'caliptra_proxy',tasks:'Caliptra mailbox · MCTP driver',code:30,bss:22,stack:3,color:C.amber},
+];
+document.getElementById('proc-cards').innerHTML=procs.map((p,i)=>{
+  const tot=p.code+p.bss+p.stack;
+  return `<div class="box" style="border-color:${p.color}45">
+    <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+      <span style="color:${p.color};font-size:9px;letter-spacing:.12em">${i===0?'KERNEL':p.id}</span>
+      <div style="width:8px;height:8px;border-radius:50%;background:${p.color}"></div>
+    </div>
+    <div style="color:#cbd5e1;font-size:12px;font-weight:700;margin-bottom:6px;line-height:1.3">${p.name}</div>
+    <div style="color:${p.color};font-size:22px;font-weight:800;margin-bottom:8px">${tot.toFixed(0)}<span style="font-size:11px;opacity:.6"> KB</span></div>
+    ${[['Code',p.code,C.purple],['BSS',p.bss,C.teal],['Stack',p.stack,C.amber]].map(([l,v,c])=>`
+      <div style="margin-bottom:5px"><div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px">
+        <span style="color:#475569">${l}</span><span style="color:${c}">${v.toFixed(1)} KB</span>
+      </div>${bar((v/tot)*100,c)}</div>`).join('')}
+    <div style="color:#475569;font-size:9px;margin-top:10px;line-height:1.5">${p.tasks}</div>
+  </div>`;
+}).join('');
+
+// ── Tab 3 data ────────────────────────────────────────────────────────────────
+document.getElementById('dup-list').innerHTML=[
+  {c:'caliptra-api + libapi',sz:15,cp:3,cost:30,ps:['P1','P3','P4']},
+  {c:'Core runtime (panic/startup)',sz:5,cp:4,cost:15,ps:['P1','P2','P3','P4']},
+  {c:'external-cmds-common',sz:5,cp:2,cost:5,ps:['P1','P3']},
+  {c:'zerocopy',sz:3,cp:2,cost:3,ps:['P1','P3']},
+  {c:'pw-kernel userspace stubs',sz:2,cp:4,cost:6,ps:['P1','P2','P3','P4']},
+].map(d=>`<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #1c2028">
+  <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+    <div><span style="color:#cbd5e1;font-size:12px">${d.c}</span><span style="color:#475569;font-size:10px;margin-left:8px">${d.sz} KB × ${d.cp}×</span></div>
+    <div style="display:flex;align-items:center;gap:8px">
+      ${d.ps.map(p=>`<span style="background:#0c4a6e50;border:1px solid #0c4a6e;color:#38bdf8;padding:1px 5px;border-radius:2px;font-size:9px">${p}</span>`).join('')}
+      <span style="color:#fbbf24;font-size:12px;font-weight:700">+${d.cost} KB</span>
+    </div>
+  </div>${bar((d.cost/30)*100,C.amber)}
+</div>`).join('');
+
+document.getElementById('v2-diff').innerHTML=[
+  {l:'embassy-executor + sync',v1:24,v2:0,gone:true},
+  {l:'portable-atomic + crit-sect.',v1:3,v2:0,gone:true},
+  {l:'libtock → pw-kernel stubs',v1:15,v2:6,gone:false},
+  {l:'caliptra-api + libapi',v1:30,v2:30,gone:false},
+].map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:11px">
+  <span style="color:${x.gone?C.dim:C.text};text-decoration:${x.gone?'line-through':'none'}">${x.l}</span>
+  <div style="display:flex;gap:8px"><span style="color:#475569">${x.v1} KB</span><span style="color:#475569">→</span>
+    <span style="color:${x.gone?C.green:C.amber};font-weight:700">${x.v2===0?'0 KB ✓':x.v2+' KB'}</span></div>
+</div>`).join('');
+
+document.getElementById('ipc-bars').innerHTML=[
+  {l:'Tock: 3 MCTP × 3 bufs × 2 KB',kb:18.4,c:C.red},
+  {l:'pw-kernel: 4 IPC × 2 bufs',kb:14.3,c:C.green},
+].map(x=>`<div style="margin-bottom:8px">
+  <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
+    <span style="color:#94a3b8">${x.l}</span><span style="color:${x.c};font-weight:700">${x.kb} KB</span>
+  </div>${bar((x.kb/18.4)*100,x.c,5)}</div>`).join('');
+
+// ── Tab 4 data ────────────────────────────────────────────────────────────────
+document.getElementById('arch-cards').innerHTML=[
+  {arch:'RISC-V (VeeR EL2)',sub:'Primary target',sup:'YES',sC:C.green,ent:'64 PMP',eC:C.green,al:'4 B (TOR)',alC:C.green,wa:'~16 KB',wC:C.green,si:'YES',siC:C.green,mx:'5+',v:'GO',vC:C.green,fr:210,wo:134},
+  {arch:'ARMv8-M (Cortex-M33)',sub:'MPS2-AN505 · RP2350',sup:'YES',sC:C.green,ent:'8 MPU (swapped)',eC:C.amber,al:'32 B (base+limit)',alC:C.green,wa:'~1–16 KB',wC:C.green,si:'NO*',siC:C.amber,mx:'4',v:'GO',vC:C.green,fr:200,wo:125},
+  {arch:'ARMv7-M (Cortex-M3/M4)',sub:'Unofficial port',sup:'UNOFFICIAL',sC:C.amber,ent:'8 MPU (swapped)',eC:C.red,al:'Power-of-2',alC:C.red,wa:'~141 KB',wC:C.red,si:'NO',siC:C.red,mx:'2–3',v:'MARGINAL†',vC:C.amber,fr:60,wo:-20},
+].map(a=>`<div class="box" style="border-color:${a.vC}45">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+    <div>${tg(a.v,a.vC)}<div style="color:#cbd5e1;font-size:13px;font-weight:700;margin-top:8px">${a.arch}</div>
+      <div style="color:#475569;font-size:10px">${a.sub}</div></div>
+    ${tg(a.sup==='YES'?'pw-kernel: SUPPORTED':a.sup==='UNOFFICIAL'?'pw-kernel: UNOFFICIAL PORT':'pw-kernel: NO PORT',a.sC)}
+  </div>
+  ${[['Protection Entries',a.ent,a.eC],['Min Alignment',a.al,a.alC],['Alignment Waste',a.wa,a.wC],['Simultaneous Protect.',a.si,a.siC],['Max Processes',a.mx,a.vC]]
+    .map(([l,v,c])=>`<div style="display:flex;justify-content:space-between;margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid #1c2028">
+      <span style="color:#475569;font-size:11px">${l}</span><span style="color:${c};font-size:11px;font-weight:700">${v}</span></div>`).join('')}
+  <div style="margin-top:12px">
+    <div style="color:#475569;font-size:9px;margin-bottom:4px">FREE (best · worst +25%)</div>
+    ${bar(a.fr>0?(a.fr/210)*100:0,a.vC,8)}
+    <div style="display:flex;justify-content:space-between;margin-top:4px">
+      <span style="color:${a.vC};font-size:12px;font-weight:700">${a.fr>0?'~'+a.fr+' KB':'N/A'}</span>
+      <span style="color:${a.wo>=0?C.mid:C.red};font-size:11px">${a.wo>=0?'~'+a.wo+' KB worst':Math.abs(a.wo)+' KB over'}</span>
+    </div>
+  </div>
+</div>`).join('');
+
+const pmpGrid=document.getElementById('pmp-grid');
+for(let i=0;i<64;i++){
+  let c;
+  if(i>=54)c=C.accent; else if(i>=48)c='#0c4a6e'; else if(i>=18&&i<=25)c=C.amber;
+  else if(i>=12&&i<=17)c=C.green; else if(i>=8&&i<=11)c=C.teal; else if(i>=4&&i<=7)c=C.purple; else c='#1c2028';
+  const d=document.createElement('div');
+  d.className='pmp-c';d.style.background=c;d.style.opacity=c==='#1c2028'?'0.2':'1';
+  pmpGrid.appendChild(d);
+}
+document.getElementById('pmp-legend').innerHTML=[['Kernel (10–16)',C.accent],['Kernel rsvd','#0c4a6e'],['P1: spdm (4)',C.purple],['P2: pldm (4)',C.teal],['P3: mbox (6)',C.green],['P4: proxy (8)',C.amber],['~30 free','#1c2028']]
+  .map(([l,c])=>`<div style="display:flex;align-items:center;gap:5px"><div style="width:10px;height:10px;background:${c};border-radius:2px;opacity:${c==='#1c2028'?'0.3':'1'}"></div><span style="color:#475569;font-size:10px">${l}</span></div>`).join('');
+
+document.getElementById('armv7-waste').innerHTML=[['P1 Code',65,128],['P1 Data',12,16],['P2 Code',33,64],['P2 Data',7,8],['P3 Code',25,32],['P3 Data',8,8],['P4 Code',30,32],['P4 Data',25,32]]
+  .map(([l,a,r])=>`<div style="background:#451a0340;border:1px solid #fbbf2425;border-radius:4px;padding:8px">
+    <div style="color:#475569;font-size:10px">${l}</div>
+    <div style="font-size:11px;margin-top:4px"><span style="color:#cbd5e1">${a} KB</span><span style="color:#475569"> → </span><span style="color:#fbbf24;font-weight:700">${r} KB</span></div>
+    <div style="color:#fbbf24;font-size:10px;opacity:.7">+${r-a} KB wasted</div>
+  </div>`).join('');
+
+// ── Tab 5 data ────────────────────────────────────────────────────────────────
+document.getElementById('sizing-cards').innerHTML=[
+  {sz:'384 KB',tot:310,fr:74,wo:-4,v:'MARGINAL',c:C.amber,n:'Fits at best estimate. +25% error pushes to edge. Merge P3→P1 for safety.'},
+  {sz:'448 KB',tot:310,fr:138,wo:60,v:'GO',c:C.green,n:'Comfortable. 60 KB free even with 25% estimation error.'},
+  {sz:'512 KB',tot:310,fr:202,wo:124,v:'GO',c:C.green,n:'Very comfortable. ~200 KB free — ample room for future growth.'},
+].map(s=>{
+  const n=parseInt(s.sz),pct=(s.fr/n*100).toFixed(0),wpct=(Math.max(0,s.wo)/n*100).toFixed(0);
+  return `<div class="box" style="border-color:${s.c}45;text-align:center">
+    <div style="font-size:36px;font-weight:800;color:${s.c};margin-bottom:6px">${s.sz}</div>
+    <div style="margin-bottom:14px">${tg(s.v,s.c)}</div>
+    <div style="height:80px;background:#1c2028;border-radius:4px;position:relative;overflow:hidden;margin-bottom:10px">
+      <div style="position:absolute;bottom:0;left:0;right:0;height:${(s.tot/n*100)}%;background:${s.c};opacity:.25"></div>
+      <div style="position:absolute;bottom:0;left:0;right:0;height:${(s.tot/n*100)}%;border:1px solid ${s.c};border-radius:2px"></div>
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+        <div style="color:${s.c};font-size:14px;font-weight:800">~${s.fr} KB</div>
+        <div style="color:#475569;font-size:10px">${pct}% free</div>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:8px">
+      <span style="color:#475569">Used (est.)</span><span style="font-family:monospace">~${s.tot} KB</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:12px">
+      <span style="color:#475569">Free (worst +25%)</span>
+      <span style="color:${s.wo>=0?C.mid:C.red};font-family:monospace;font-weight:700">${s.wo>=0?'~'+s.wo+' KB ('+wpct+'%)':'−'+Math.abs(s.wo)+' KB EDGE'}</span>
+    </div>
+    <div style="color:#94a3b8;font-size:11px;line-height:1.5;text-align:left">${s.n}</div>
+  </div>`;
+}).join('');
+
+document.getElementById('opt-list').innerHTML=[
+  {r:1,n:'Shared read-only code regions (caliptra-api)',sv:30,d:'Medium',c:C.green},
+  {r:2,n:'Merge mcu_mbox → spdm_service',sv:25,d:'Low',c:C.green},
+  {r:3,n:'Eliminate global allocator (Hubris convention)',sv:4,d:'Medium',c:C.green},
+  {r:4,n:'MCTP buffer right-sizing',sv:5,d:'Low',c:C.amber},
+  {r:5,n:'Merge caliptra_proxy → kernel',sv:30,d:'High',c:C.red},
+  {r:6,n:'XIP from flash (hardware change required)',sv:180,d:'Very High',c:C.red},
+].map(o=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #1c2028">
+  <div style="width:22px;height:22px;border-radius:50%;background:${o.c}18;border:1px solid ${o.c}50;display:flex;align-items:center;justify-content:center;color:${o.c};font-size:10px;font-weight:700;flex-shrink:0">${o.r}</div>
+  <div style="flex:1;font-size:12px">${o.n}</div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <div style="width:80px;height:5px;background:#1c2028;border-radius:3px"><div style="height:5px;background:${o.c};width:${Math.min(100,(o.sv/30)*100)}%;border-radius:3px;opacity:.7"></div></div>
+    <span style="color:${o.c};font-size:13px;font-weight:700;min-width:55px;font-family:monospace">~${o.sv} KB</span>
+    ${tg(o.d,o.d==='Low'?C.green:o.d==='Medium'?C.amber:C.red)}
+  </div>
+</div>`).join('');
+
+document.getElementById('risk-list').innerHTML=[
+  {lv:'HIGH',c:C.amber,ri:'Synchronous stacks deeper than estimated',de:'Full call chain runs on stack; complex SPDM ops may need >8 KB',fx:'Stack canaries + watermark measurement during porting; use static buffers for large protocol state'},
+  {lv:'MED',c:C.amber,ri:'Code duplication exceeds estimate',de:'Could add 15–30 KB if Rust generics monomorphize more than expected',fx:'Shared read-only .text mappings; merge mcu_mbox → spdm_service'},
+  {lv:'MED',c:C.amber,ri:'pw-kernel binary >10 KB target',de:'15–25 KB realistic for this config (8 IPC channels, 4 threads)',fx:'103 KB Tock→pw-kernel savings provide ample buffer'},
+  {lv:'LOW',c:C.green,ri:'Protocol refactoring complexity',de:'Converting async SPDM/PLDM to sync event loops is non-trivial',fx:'SPDM MCTP and DOE handle one message at a time — concurrency not needed'},
+].map(r=>`<div style="display:flex;gap:12px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #1c2028">
+  ${tg(r.lv,r.c)}
+  <div><div style="color:#cbd5e1;font-size:12px;font-weight:700;margin-bottom:2px">${r.ri}</div>
+    <div style="color:#475569;font-size:11px">${r.de}</div>
+    <div style="color:#4ade80;font-size:11px;margin-top:2px">→ ${r.fx}</div>
+  </div></div>`).join('');
+</script>
+</body>
+</html>
