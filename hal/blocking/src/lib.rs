@@ -35,6 +35,11 @@ pub mod key_vault;
 /// Symmetric cipher abstractions with zero-copy support
 pub mod cipher;
 
+/// NOR flash storage traits (re-exported from `embedded-storage`)
+pub mod nor_flash {
+    pub use embedded_storage::nor_flash::*;
+}
+
 // Re-export embedded-hal 1.0 traits
 pub use embedded_hal::delay::DelayNs;
 pub use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};

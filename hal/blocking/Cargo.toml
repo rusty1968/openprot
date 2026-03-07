@@ -13,3 +13,4 @@ zeroize = { workspace = true }
 subtle = { workspace = true }
 rand_core = { workspace = true }
 embedded-hal = { workspace = true }
+embedded-storage = { workspace = true }

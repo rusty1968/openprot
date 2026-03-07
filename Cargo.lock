@@ -35,6 +35,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-storage"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a21dea9854beb860f3062d10228ce9b976da520a73474aed3171ec276bc0c032"
+
+[[package]]
 name = "nb"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -56,6 +62,7 @@ name = "openprot-hal-blocking"
 version = "0.1.0"
 dependencies = [
  "embedded-hal",
+ "embedded-storage",
  "rand_core",
  "subtle",
  "zerocopy",
