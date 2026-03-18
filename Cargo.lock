@@ -59,6 +59,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
 
 [[package]]
+name = "bitfield"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -102,7 +108,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ec610d8f49840a5b376c69663b6369e71f4b34484b9b2eb29fb918d92516cb9"
 dependencies = [
  "bare-metal",
- "bitfield",
+ "bitfield 0.13.2",
  "embedded-hal 0.2.7",
  "volatile-register",
 ]
@@ -494,7 +500,10 @@ dependencies = [
 name = "openprot-mctp-client"
 version = "0.1.0"
 dependencies = [
+ "mctp",
+ "mctp-lib",
  "openprot-mctp-api",
+ "openprot-mctp-server",
 ]
 
 [[package]]
@@ -559,6 +568,22 @@ version = "0.1.0"
 [[package]]
 name = "openprot-services-telemetry"
 version = "0.1.0"
+
+[[package]]
+name = "openprot-spdm-requester"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.1",
+ "spdm-lib",
+]
+
+[[package]]
+name = "openprot-spdm-responder"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.1",
+ "spdm-lib",
+]
 
 [[package]]
 name = "p256"
@@ -751,6 +776,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca0763a680cd5d72b28f7bfc8a054c117d8841380a6ad4f72f05bd2a34217d3e"
 dependencies = [
  "embedded-crc-macros",
+]
+
+[[package]]
+name = "spdm-lib"
+version = "0.1.0"
+source = "git+https://github.com/9elements/spdm-lib.git?branch=buildup#dcd0f23f1431b0a7cab21704b1c8584d911a8e2e"
+dependencies = [
+ "bitfield 0.14.0",
+ "zerocopy",
 ]
 
 [[package]]

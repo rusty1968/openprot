@@ -58,6 +58,12 @@ alias(
 )
 
 alias(
+    name = "spdm-lib",
+    actual = "@oot_crates_no_std//:spdm-lib",
+    visibility = ["//visibility:public"],
+)
+
+alias(
     name = "heapless",
     actual = "@oot_crates_no_std//:heapless",
     visibility = ["//visibility:public"],

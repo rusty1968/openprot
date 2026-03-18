@@ -18,6 +18,8 @@ members = [
     "services/mctp/server",
     "services/mctp/transport-i2c",
     "services/mctp/client",
+    "services/spdm/requester",
+    "services/spdm/responder",
     "services/telemetry",
     "services/storage",
 ]
