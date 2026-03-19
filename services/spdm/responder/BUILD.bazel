@@ -9,6 +9,7 @@ rust_library(
     edition = "2024",
     visibility = ["//visibility:public"],
     deps = [
+        "//services/spdm/transport-mctp:spdm_transport_mctp",
         "@rust_crates//:heapless",
         "@rust_crates//:spdm-lib",
     ],

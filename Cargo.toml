@@ -20,6 +20,7 @@ members = [
     "services/mctp/client",
     "services/spdm/requester",
     "services/spdm/responder",
+    "services/spdm/transport-mctp",
     "services/telemetry",
     "services/storage",
 ]
