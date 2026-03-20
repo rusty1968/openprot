@@ -25,7 +25,7 @@
 use i2c_api::{
     wire::{
         self, encode_configure_slave_request, encode_disable_slave_request,
-        encode_disable_slave_notification_request, encode_enable_slave_request,
+        encode_enable_slave_request,
         encode_enable_slave_notification_request, encode_probe_request, encode_read_request,
         encode_slave_receive_request, encode_slave_set_response_request,
         encode_slave_wait_event_request, encode_write_read_request, encode_write_request,
