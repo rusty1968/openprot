@@ -72,6 +72,12 @@
                         handler_app: "i2c_server",
                         handler_object_name: "I2C",
                     },
+                    {
+                        // WaitGroup: multiplexes IPC channel (READABLE) and I2C slave
+                        // notification (USER). user_data=0 → IPC from a client, user_data=1 → inbound.
+                        name: "WG",
+                        type: "wait_group",
+                    },
                 ],
                 threads: [
                     {
