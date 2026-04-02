@@ -84,47 +84,34 @@ bazel test --config=k_ast1060_evb //target/ast1060-evb/mctp:mctp_test
 
 ## Tests
 
-The `tests/` directory contains two integration tests that run on the host (std):
+The `tests/` directory contains integration tests that run on the host (std) with **no I2C transport** — a `BufferSender` mock replaces it entirely.
+
+### Test files
 
 | File | What it tests |
 |------|---------------|
-| `tests/echo.rs` | Full MCTP echo round-trip: server A listens, server B sends a request, verifies the echoed response via a mock `BufferSender` transport. |
-| `tests/dispatch.rs` | IPC wire-protocol dispatch: encodes a request with `wire::encode_*`, calls `dispatch_mctp_op`, and verifies the decoded response. |
+| `tests/common/mod.rs` | Shared fixtures: `BufferSender`, `DroppingBufferSender`, `DirectClient`, `DirectListener`, `DirectRespChannel`, `DirectReqChannel` |
+| `tests/echo.rs` | Full MCTP echo round-trip via `MctpClient` trait |
+| `tests/dispatch.rs` | IPC wire-protocol dispatch: encodes requests, calls `dispatch_mctp_op`, verifies responses. Includes edge cases: malformed request, unknown opcode, `Recv` with no message, `Unbind` |
+| `tests/server_unit.rs` | Unit tests for `Server` methods: EID management, handle allocation, `try_recv` before/after `inbound`, oversized payload, timeout via `register_recv` + `update` |
+| `tests/integration.rs` | Multi-fragment reassembly, multiple concurrent listeners (no cross-talk), echo via `MctpListener` + `MctpRespChannel` traits, `MctpReqChannel` trait, `drop_handle` mid-flight, response EID/tag threading |
 
-### Running with Bazel (primary)
+The echo via `MctpListener` + `MctpRespChannel` test (`echo_via_mctplistener_trait`) is the key one: it exercises the exact interface the real echo application uses, with `BufferSender` as the only transport.
 
-This is a Bazel project. Use these commands from the workspace root:
+### Running with Bazel
 
 ```sh
-# Run both integration tests via the mctp_server_test rule
-bazel test //services/mctp/server:mctp_server_test
-
-# Run alongside the API tests
-bazel test //services/mctp/server:mctp_server_test //services/mctp/api:mctp_api_test
+# Run all test targets
+bazel test //services/mctp/server:mctp_server_echo_test \
+           //services/mctp/server:mctp_server_dispatch_test \
+           //services/mctp/server:mctp_server_unit_test \
+           //services/mctp/server:mctp_server_integration_test
 
 # Show test output
-bazel test //services/mctp/server:mctp_server_test --test_output=all
+bazel test //services/mctp/server:mctp_server_unit_test --test_output=all
 ```
 
 > **Note:** Do not use the `//services/mctp/...` wildcard — it will also pick up
 > the `mctp_server` and `mctp_echo` kernel binaries, which require `kernel_config`
-> (generated only during a full system image build). Target the test rule directly
+> (generated only during a full system image build). Target the test rules directly
 > as shown above.
-
-### Running with Cargo (host-only convenience)
-
-Because the integration tests are `std`-only, they can also be run with Cargo for quick iteration without a full Bazel setup:
-
-```sh
-# Run all tests for this crate
-cargo test -p openprot-mctp-server
-
-# Run only the echo test
-cargo test -p openprot-mctp-server --test echo
-
-# Run only the dispatch test
-cargo test -p openprot-mctp-server --test dispatch
-
-# Show stdout from passing tests
-cargo test -p openprot-mctp-server -- --nocapture
-```

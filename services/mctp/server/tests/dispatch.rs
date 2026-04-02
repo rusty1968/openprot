@@ -7,53 +7,16 @@
 //! work together correctly, simulating what happens when `IpcMctpClient`
 //! talks to the MCTP server process over a Pigweed IPC channel.
 
+mod common;
+
 use std::cell::RefCell;
 
-use mctp::{Eid, Tag};
-use mctp_lib::fragment::{Fragmenter, SendOutput};
-use mctp_lib::Sender;
+use mctp::Eid;
 use openprot_mctp_api::wire;
 use openprot_mctp_server::{dispatch::dispatch_mctp_op, Server};
 
-// ---------------------------------------------------------------------------
-// Mock transport (same as echo.rs)
-// ---------------------------------------------------------------------------
+use common::{transfer, BufferSender};
 
-struct BufferSender<'a> {
-    packets: &'a RefCell<Vec<Vec<u8>>>,
-}
-
-impl Sender for BufferSender<'_> {
-    fn send_vectored(
-        &mut self,
-        mut fragmenter: Fragmenter,
-        payload: &[&[u8]],
-    ) -> mctp::Result<Tag> {
-        loop {
-            let mut buf = [0u8; 255];
-            match fragmenter.fragment_vectored(payload, &mut buf) {
-                SendOutput::Packet(p) => {
-                    self.packets.borrow_mut().push(p.to_vec());
-                }
-                SendOutput::Complete { tag, .. } => return Ok(tag),
-                SendOutput::Error { err, .. } => return Err(err),
-            }
-        }
-    }
-
-    fn get_mtu(&self) -> usize {
-        255
-    }
-}
-
-fn transfer<S: Sender, const N: usize>(
-    packets: &RefCell<Vec<Vec<u8>>>,
-    dest: &mut Server<S, N>,
-) {
-    for pkt in packets.borrow().iter() {
-        dest.inbound(pkt).unwrap();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -171,4 +134,130 @@ fn dispatch_echo_roundtrip() {
     assert_eq!(header.eid, 8); // from server A
     let echo_payload = wire::get_response_payload(&resp[..resp_len], &header).unwrap();
     assert_eq!(echo_payload, payload);
+}
+
+// ---------------------------------------------------------------------------
+// Malformed request → BadArgument
+// ---------------------------------------------------------------------------
+
+/// A request buffer shorter than the header size must return `BadArgument`.
+#[test]
+fn dispatch_malformed_request_returns_bad_argument() {
+    use openprot_mctp_api::ResponseCode;
+
+    let buf = RefCell::new(Vec::new());
+    let sender = BufferSender { packets: &buf };
+    let mut server: Server<_, 16> = Server::new(Eid(8), 0, sender);
+
+    let mut resp = [0u8; 64];
+    let mut recv_buf = [0u8; 255];
+
+    // Two bytes — shorter than MctpRequestHeader::SIZE (12)
+    let bad_request = [0u8; 2];
+    let resp_len = dispatch_mctp_op(&bad_request, &mut resp, &mut server, &mut recv_buf);
+
+    let header = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(!header.is_success());
+    assert_eq!(header.response_code(), ResponseCode::BadArgument);
+}
+
+/// An opcode byte that is not a known `MctpOp` must return `BadArgument`.
+#[test]
+fn dispatch_unknown_opcode_returns_bad_argument() {
+    use openprot_mctp_api::ResponseCode;
+
+    let buf = RefCell::new(Vec::new());
+    let sender = BufferSender { packets: &buf };
+    let mut server: Server<_, 16> = Server::new(Eid(8), 0, sender);
+
+    let mut resp = [0u8; 64];
+    let mut recv_buf = [0u8; 255];
+
+    // 12-byte header with opcode 0xFF (unrecognised)
+    let mut bad_request = [0u8; 12];
+    bad_request[0] = 0xFF;
+    let resp_len = dispatch_mctp_op(&bad_request, &mut resp, &mut server, &mut recv_buf);
+
+    let header = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(!header.is_success());
+    assert_eq!(header.response_code(), ResponseCode::BadArgument);
+}
+
+// ---------------------------------------------------------------------------
+// MctpOp::Recv when no message is ready → TimedOut
+// ---------------------------------------------------------------------------
+
+/// `Recv` dispatched when no message has arrived must return `TimedOut`.
+#[test]
+fn dispatch_recv_no_message_returns_timed_out() {
+    use openprot_mctp_api::ResponseCode;
+
+    let buf = RefCell::new(Vec::new());
+    let sender = BufferSender { packets: &buf };
+    let mut server: Server<_, 16> = Server::new(Eid(8), 0, sender);
+
+    let mut req = [0u8; 64];
+    let mut resp = [0u8; 64];
+    let mut recv_buf = [0u8; 255];
+
+    // Register a listener
+    let req_len = wire::encode_listener(&mut req, 1).unwrap();
+    let resp_len = dispatch_mctp_op(&req[..req_len], &mut resp, &mut server, &mut recv_buf);
+    let h = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(h.is_success());
+    let listener_handle = h.handle;
+
+    // Attempt Recv immediately — no inbound packet
+    let req_len = wire::encode_recv(&mut req, listener_handle, 0).unwrap();
+    let resp_len = dispatch_mctp_op(&req[..req_len], &mut resp, &mut server, &mut recv_buf);
+    let header = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(!header.is_success());
+    assert_eq!(header.response_code(), ResponseCode::TimedOut);
+}
+
+// ---------------------------------------------------------------------------
+// MctpOp::Unbind
+// ---------------------------------------------------------------------------
+
+/// `Unbind` on a valid handle returns success.
+#[test]
+fn dispatch_unbind_valid_handle() {
+    let buf = RefCell::new(Vec::new());
+    let sender = BufferSender { packets: &buf };
+    let mut server: Server<_, 16> = Server::new(Eid(8), 0, sender);
+
+    let mut req = [0u8; 64];
+    let mut resp = [0u8; 64];
+    let mut recv_buf = [0u8; 255];
+
+    // Allocate a listener handle
+    let req_len = wire::encode_listener(&mut req, 1).unwrap();
+    let resp_len = dispatch_mctp_op(&req[..req_len], &mut resp, &mut server, &mut recv_buf);
+    let h = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(h.is_success());
+    let listener_handle = h.handle;
+
+    // Unbind it
+    let req_len = wire::encode_unbind(&mut req, listener_handle).unwrap();
+    let resp_len = dispatch_mctp_op(&req[..req_len], &mut resp, &mut server, &mut recv_buf);
+    let header = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(header.is_success());
+}
+
+/// `Unbind` on a handle that was never allocated still returns success.
+/// (The server's `unbind` is idempotent — it ignores unknown handles.)
+#[test]
+fn dispatch_unbind_unknown_handle_is_idempotent() {
+    let buf = RefCell::new(Vec::new());
+    let sender = BufferSender { packets: &buf };
+    let mut server: Server<_, 16> = Server::new(Eid(8), 0, sender);
+
+    let mut req = [0u8; 64];
+    let mut resp = [0u8; 64];
+    let mut recv_buf = [0u8; 255];
+
+    let req_len = wire::encode_unbind(&mut req, 0xDEAD_BEEF).unwrap();
+    let resp_len = dispatch_mctp_op(&req[..req_len], &mut resp, &mut server, &mut recv_buf);
+    let header = wire::decode_response_header(&resp[..resp_len]).unwrap();
+    assert!(header.is_success());
 }

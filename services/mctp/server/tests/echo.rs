@@ -13,123 +13,16 @@
 //! the `Server` + transport plumbing is the server side. This mirrors the
 //! real deployment where the echo task is an IPC client of the MCTP server.
 
+mod common;
+
 use std::cell::RefCell;
 
-use mctp::{Eid, Tag};
-use mctp_lib::fragment::{Fragmenter, SendOutput};
-use mctp_lib::Sender;
-use openprot_mctp_api::{Handle, MctpClient, MctpError, RecvMetadata, ResponseCode};
+use mctp::Eid;
+use openprot_mctp_api::{Handle, MctpClient};
 use openprot_mctp_server::Server;
 
-// ---------------------------------------------------------------------------
-// Mock transport
-// ---------------------------------------------------------------------------
+use common::{transfer, BufferSender, DirectClient};
 
-/// A mock sender that captures outbound packets in a buffer.
-struct BufferSender<'a> {
-    packets: &'a RefCell<Vec<Vec<u8>>>,
-}
-
-impl Sender for BufferSender<'_> {
-    fn send_vectored(
-        &mut self,
-        mut fragmenter: Fragmenter,
-        payload: &[&[u8]],
-    ) -> mctp::Result<Tag> {
-        loop {
-            let mut buf = [0u8; 255];
-            match fragmenter.fragment_vectored(payload, &mut buf) {
-                SendOutput::Packet(p) => {
-                    self.packets.borrow_mut().push(p.to_vec());
-                }
-                SendOutput::Complete { tag, .. } => return Ok(tag),
-                SendOutput::Error { err, .. } => return Err(err),
-            }
-        }
-    }
-
-    fn get_mtu(&self) -> usize {
-        255
-    }
-}
-
-/// Transfer packets from one server's outbound buffer to another server.
-fn transfer<S: Sender, const N: usize>(
-    packets: &RefCell<Vec<Vec<u8>>>,
-    dest: &mut Server<S, N>,
-) {
-    let pkts = packets.borrow();
-    for pkt in pkts.iter() {
-        dest.inbound(pkt).unwrap();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Client-side wrapper (simulates IPC client)
-// ---------------------------------------------------------------------------
-
-/// A direct (in-process) MCTP client that wraps a `Server` via `RefCell`.
-///
-/// This plays the same role as the Hubris `mctp_api::Stack` — it provides the
-/// `MctpClient` trait interface to application code. In production, IPC would
-/// sit between client and server; here we call `Server` methods directly.
-struct DirectClient<'a, S: Sender, const N: usize> {
-    server: &'a RefCell<Server<S, N>>,
-}
-
-impl<'a, S: Sender, const N: usize> DirectClient<'a, S, N> {
-    fn new(server: &'a RefCell<Server<S, N>>) -> Self {
-        Self { server }
-    }
-}
-
-impl<S: Sender, const N: usize> MctpClient for DirectClient<'_, S, N> {
-    fn req(&self, eid: u8) -> Result<Handle, MctpError> {
-        self.server.borrow_mut().req(eid)
-    }
-
-    fn listener(&self, msg_type: u8) -> Result<Handle, MctpError> {
-        self.server.borrow_mut().listener(msg_type)
-    }
-
-    fn get_eid(&self) -> u8 {
-        self.server.borrow().get_eid()
-    }
-
-    fn set_eid(&self, eid: u8) -> Result<(), MctpError> {
-        self.server.borrow_mut().set_eid(eid)
-    }
-
-    fn recv(
-        &self,
-        handle: Handle,
-        _timeout_millis: u32,
-        buf: &mut [u8],
-    ) -> Result<RecvMetadata, MctpError> {
-        self.server
-            .borrow_mut()
-            .try_recv(handle, buf)
-            .ok_or(MctpError::from_code(ResponseCode::TimedOut))
-    }
-
-    fn send(
-        &self,
-        handle: Option<Handle>,
-        msg_type: u8,
-        eid: Option<u8>,
-        tag: Option<u8>,
-        integrity_check: bool,
-        buf: &[u8],
-    ) -> Result<u8, MctpError> {
-        self.server
-            .borrow_mut()
-            .send(handle, msg_type, eid, tag, integrity_check, buf)
-    }
-
-    fn drop_handle(&self, handle: Handle) {
-        let _ = self.server.borrow_mut().unbind(handle);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Echo application logic (client side — mirrors Hubris mctp-echo task)
