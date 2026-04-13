@@ -28,9 +28,9 @@ use app_mctp_echo::handle;
 /// MCTP message type for echo (vendor-defined type 1).
 const ECHO_MSG_TYPE: u8 = 1;
 
-fn die(context: &'static str, e: MctpError) -> ! {
-    pw_log::error!("{}: error code {}", context, e.code as u8);
+fn die(e: MctpError) -> ! {
     let _ = syscall::debug_shutdown(Err(pw_status::Error::Internal));
+    let _ = e;
     loop {}
 }
 
@@ -42,7 +42,10 @@ fn mctp_echo_loop() -> ! {
     // Register a listener for type-1 messages
     let listener = client
         .listener(ECHO_MSG_TYPE)
-        .unwrap_or_else(|e| die("Failed to register listener", e));
+        .unwrap_or_else(|e| {
+            pw_log::error!("Failed to register listener: error code {}", e.code as u8);
+            die(e)
+        });
 
     let mut buf = [0u8; 1024];
 
@@ -50,7 +53,10 @@ fn mctp_echo_loop() -> ! {
         // Block until a message arrives
         let meta = client
             .recv(listener, 0, &mut buf)
-            .unwrap_or_else(|e| die("recv failed", e));
+            .unwrap_or_else(|e| {
+                pw_log::error!("recv failed: error code {}", e.code as u8);
+                die(e)
+            });
 
         pw_log::info!(
             "Echo: received {} bytes from EID {}",
@@ -69,7 +75,10 @@ fn mctp_echo_loop() -> ! {
                 meta.msg_ic,             // preserve integrity check
                 payload,
             )
-            .unwrap_or_else(|e| die("send failed", e));
+            .unwrap_or_else(|e| {
+                pw_log::error!("send failed: error code {}", e.code as u8);
+                die(e)
+            });
     }
 }
 
