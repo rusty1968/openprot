@@ -97,7 +97,7 @@ use userspace::syscall;
 use app_mctp_server::handle;
 
 // Imports used only by the in-process SPDM responder (i2c-polling + direct-client).
-#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+#[cfg(feature = "i2c-polling")]
 use core::cell::RefCell;
 #[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
 use mock_platform::{MockCertStore, MockEvidence, MockHash, MockRng};
@@ -167,27 +167,21 @@ fn mctp_loop() -> Result<()> {
     let sender = I2cSender::new(IpcI2cClient::new(handle::I2C), BusIndex::BUS_2, OWN_I2C_ADDR);
     let receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
 
-    // Wrap in RefCell so DirectMctpClient can borrow it alongside the I2C path.
-    #[cfg(feature = "direct-client")]
-    let server_cell = RefCell::new(openprot_mctp_server::Server::<_, 16>::new(
+    // RefCell lets DirectMctpClient borrow `server` alongside the I2C path in
+    // the same polling loop.  A single name is used in both cfg variants so
+    // every call site is uniform.
+    let server = RefCell::new(openprot_mctp_server::Server::<_, 16>::new(
         mctp::Eid(OWN_EID),
         0,
         sender,
     ));
-
-    #[cfg(not(feature = "direct-client"))]
-    let mut server_plain = openprot_mctp_server::Server::<_, 16>::new(
-        mctp::Eid(OWN_EID),
-        0,
-        sender,
-    );
 
     // ---------------------------------------------------------------------------
     // SPDM responder setup (only when direct-client feature is enabled)
     // ---------------------------------------------------------------------------
     #[cfg(feature = "direct-client")]
     let mut transport = {
-        let client = DirectMctpClient::new(&server_cell);
+        let client = DirectMctpClient::new(&server);
         MctpSpdmTransport::new_responder(client)
     };
 
@@ -340,20 +334,7 @@ fn mctp_loop() -> Result<()> {
                                 src_addr as u32,
                                 pkt.len() as u32,
                             );
-                            #[cfg(feature = "direct-client")]
-                            if let Err(e) = server_cell.borrow_mut().inbound(pkt) {
-                                inbound_err = inbound_err.wrapping_add(1);
-                                if inbound_err == 1 || inbound_err & 0xf == 0 {
-                                    pw_log::error!(
-                                        "MCTP server: inbound() error code={} \
-                                        total_inbound_errors={}",
-                                        e.code as u32,
-                                        inbound_err as u32,
-                                    );
-                                }
-                            }
-                            #[cfg(not(feature = "direct-client"))]
-                            if let Err(e) = server_plain.inbound(pkt) {
+                            if let Err(e) = server.borrow_mut().inbound(pkt) {
                                 inbound_err = inbound_err.wrapping_add(1);
                                 if inbound_err == 1 || inbound_err & 0xf == 0 {
                                     pw_log::error!(
