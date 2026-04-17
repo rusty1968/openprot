@@ -341,8 +341,26 @@ impl I2cTargetClient for IpcI2cClient {
         bus: BusIndex,
         messages: &mut [TargetMessage],
     ) -> Result<usize, Self::Error> {
-        // Non-blocking variant: same as wait_for_messages (hardware poll returns
-        // immediately on timeout with 0 bytes).
-        self.wait_for_messages(bus, messages, None)
+        // Non-blocking: in notification mode the server returns 0 bytes immediately
+        // when the buffer is empty, so we stop on the first empty response.
+        let mut count = 0;
+        for msg in messages.iter_mut() {
+            let req_len = encode_slave_receive_request(
+                &mut self.request_buf,
+                bus.value(),
+                TARGET_MESSAGE_MAX_LEN as u16,
+            )
+            .map_err(wire_to_i2c_error)?;
+            let resp_len = self.send_recv(req_len)?;
+            let data = self.decode_response(resp_len)?;
+            if data.is_empty() {
+                break;
+            }
+            let copy_len = data.len().min(TARGET_MESSAGE_MAX_LEN);
+            msg.data_mut()[..copy_len].copy_from_slice(&data[..copy_len]);
+            msg.set_len(copy_len);
+            count += 1;
+        }
+        Ok(count)
     }
 }
