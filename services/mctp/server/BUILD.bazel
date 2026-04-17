@@ -6,10 +6,12 @@ load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_app")
 rust_library(
     name = "mctp_server_lib",
     srcs = [
+        "src/direct_client.rs",
         "src/dispatch.rs",
         "src/lib.rs",
         "src/server.rs",
     ],
+    crate_features = ["direct-client"],
     crate_name = "openprot_mctp_server",
     edition = "2024",
     visibility = ["//visibility:public"],
@@ -99,6 +101,10 @@ rust_app(
     name = "mctp_server",
     codegen_crate_name = "app_mctp_server",
     srcs = ["src/main.rs"],
+    crate_features = [
+        "i2c-polling",
+        "direct-client",
+    ],
     edition = "2024",
     system_config = "//target/ast1060-evb/mctp:system_config",
     tags = ["kernel"],
@@ -109,11 +115,14 @@ rust_app(
         "//services/i2c/client:i2c_client",
         "//services/mctp/api:mctp_api",
         "//services/mctp/transport-i2c:mctp_transport_i2c",
+        "//services/spdm/transport-mctp:spdm_transport_mctp",
+        "//target/ast1060-evb/spdm-req-resp-test:mock_platform",
         "@rust_crates//:mctp",
         "@rust_crates//:mctp-lib",
         "@pigweed//pw_kernel/syscall:syscall_user",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",
+        "@oot_crates_no_std//:spdm-lib",
     ],
 )

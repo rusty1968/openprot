@@ -28,6 +28,8 @@
 #![warn(missing_docs)]
 
 pub mod dispatch;
+#[cfg(feature = "direct-client")]
+pub mod direct_client;
 mod server;
 
 pub use mctp_lib::Sender;

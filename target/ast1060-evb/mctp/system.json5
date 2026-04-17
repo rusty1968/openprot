@@ -69,8 +69,9 @@
                         start_address: 0x7e6e2000,
                         size_bytes: 0x1000,
                     },
-                ],            
-            },
+                ],
+                },
+            ],
         },
         // ──── MCTP Server ────
         // Runs the MCTP stack. Receives MCTP operations via IPC,

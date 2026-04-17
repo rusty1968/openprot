@@ -5,7 +5,17 @@
 //! Userspace service that receives MCTP requests over a Pigweed IPC channel,
 //! dispatches them to the MCTP server core, and responds with results.
 //!
-//! # Architecture
+//! # Build Modes
+//!
+//! Two mutually exclusive event loops are compiled depending on feature flags:
+//!
+//! | Features | Mode | IPC served | SPDM in-process |
+//! |---|---|---|---|
+//! | _(none)_ | Notification (WaitGroup + IRQ) | Yes | No |
+//! | `i2c-polling` | Polling | No | No |
+//! | `i2c-polling` + `direct-client` | Polling + SPDM | No | Yes |
+//!
+//! # Notification Mode Architecture (default)
 //!
 //! ```text
 //! ┌─ Client ──────────────────────────┐
@@ -14,10 +24,13 @@
 //!                │ IPC channel
 //!                ▼
 //! ┌─ This Server ─────────────────────┐
-//! │ object_wait(READABLE)             │
-//! │ channel_read → MctpRequestHeader  │
-//! │ dispatch_mctp_op(op, server)      │
-//! │ channel_respond ← MctpRespHeader  │
+//! │ object_wait(WG, READABLE)         │
+//! │  ├─ user_data=0: IPC client       │
+//! │  │   channel_read / dispatch /    │
+//! │  │   channel_respond              │
+//! │  └─ user_data=1: I2C slave IRQ    │
+//! │      get_pending_messages         │
+//! │      receiver.decode → inbound()  │
 //! └──────────────┬────────────────────┘
 //!                │ mctp-stack Router
 //!                ▼
@@ -26,46 +39,399 @@
 //! └──────────────────────────────────┘
 //! ```
 //!
-//! # IPC Pattern
+//! # In-Process SPDM Responder Architecture (`i2c-polling` + `direct-client`)
 //!
-//! Follows the same loop as `services/i2c/server/src/main.rs`:
+//! When both features are enabled the SPDM responder runs inside this process.
+//! `DirectMctpClient` replaces the IPC channel — it calls `Server` methods
+//! directly via a `RefCell`. No separate `spdm_responder` app process is needed.
 //!
-//! 1. `object_wait(handle, READABLE)` — block until a client sends a request
-//! 2. `channel_read(handle)` — read the raw request bytes
-//! 3. Parse `MctpRequestHeader`, dispatch via `dispatch_mctp_op`
-//! 4. `channel_respond(handle)` — send response header + data
+//! ```text
+//! ┌─ I2C Hardware ───────────────────────────────────────┐
+//! │  Slave-mode frames arrive on bus 2                   │
+//! └──────────────┬───────────────────────────────────────┘
+//!                │ wait_for_messages() → TargetMessage
+//!                ▼
+//! ┌─ This Process ───────────────────────────────────────┐
+//! │  Phase 1: receiver.decode() → raw MCTP packet        │
+//! │           server_cell.borrow_mut().inbound(pkt)      │
+//! │               └─ Router reassembles fragments        │
+//! │                                                      │
+//! │  Phase 2: spdm_ctx.responder_process_message()       │
+//! │    │  MctpSpdmTransport::recv_request()              │
+//! │    │    DirectMctpClient::recv()                     │
+//! │    │      server_cell.borrow_mut().try_recv()        │
+//! │    │        └─ returns Ok(msg) or Err(TimedOut)      │
+//! │    └─ on TimedOut: no-op, loop continues             │
+//! │    └─ on Ok: SPDM state machine processes request    │
+//! │      MctpSpdmTransport::send_response()              │
+//! │        DirectMctpClient::send()                      │
+//! │          server_cell.borrow_mut().send()             │
+//! │            I2cSender → I2C Server IPC → wire        │
+//! └──────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # IPC Pattern (notification mode)
+//!
+//! 1. `object_wait(WG, READABLE)` — block until an event fires
+//! 2. `channel_read(MCTP, ...)` — read raw request bytes from IPC client
+//! 3. `dispatch_mctp_op(...)` — decode and execute the MCTP operation
+//! 4. `channel_respond(MCTP, ...)` — send response back to client
 //!
 //! # Handle Binding
 //!
-//! The IPC handle is provided by the `app_package` Bazel rule, which generates
-//! `app_mctp_server::handle::MCTP` from the system configuration.
+//! Handles are provided by the `app_package` Bazel rule, generated from
+//! `system.json5` into `app_mctp_server::handle::{I2C, MCTP, WG}`.
+
 
 #![no_main]
 #![no_std]
 
-use openprot_mctp_api::wire::{MctpRequestHeader, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE, MAX_PAYLOAD_SIZE};
-use openprot_mctp_api::ResponseCode;
-use openprot_mctp_server::dispatch;
-
+// Imports shared by both modes.
 use i2c_api::{BusIndex, I2cAddress, I2cTargetClient, TargetMessage};
 use i2c_client::IpcI2cClient;
 use openprot_mctp_transport_i2c::{I2cSender, MctpI2cReceiver};
-
+use openprot_mctp_api::wire::MAX_PAYLOAD_SIZE;
 use pw_status::Result;
 use userspace::entry;
-use userspace::syscall::{self, Signals};
-use userspace::time::Instant;
-
+use userspace::syscall;
 use app_mctp_server::handle;
+
+// Imports used only by the in-process SPDM responder (i2c-polling + direct-client).
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use core::cell::RefCell;
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use mock_platform::{MockCertStore, MockEvidence, MockHash, MockRng};
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use openprot_mctp_server::direct_client::DirectMctpClient;
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use openprot_spdm_transport_mctp::MctpSpdmTransport;
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use spdm_lib::codec::MessageBuf;
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use spdm_lib::context::SpdmContext;
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use spdm_lib::platform::transport::SpdmTransport;
+#[cfg(all(feature = "i2c-polling", feature = "direct-client"))]
+use spdm_lib::protocol::{
+    AeadCipherSuite, AlgorithmPriorityTable, BaseAsymAlgo, BaseHashAlgo, CapabilityFlags,
+    DeviceAlgorithms, DeviceCapabilities, DheNamedGroup, KeySchedule, LocalDeviceAlgorithms,
+    MeasurementHashAlgo, MeasurementSpecification, MelSpecification, OtherParamSupport,
+    ReqBaseAsymAlg, SpdmVersion,
+};
+
+// Imports used only by the notification (WaitGroup + IRQ) loop.
+#[cfg(not(feature = "i2c-polling"))]
+use openprot_mctp_api::wire::{MctpRequestHeader, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE};
+#[cfg(not(feature = "i2c-polling"))]
+use openprot_mctp_api::ResponseCode;
+#[cfg(not(feature = "i2c-polling"))]
+use openprot_mctp_server::dispatch;
+#[cfg(not(feature = "i2c-polling"))]
+use userspace::syscall::Signals;
+#[cfg(not(feature = "i2c-polling"))]
+use userspace::time::Instant;
 
 const OWN_EID: u8 = 8;
 const OWN_I2C_ADDR: u8 = 0x10;
 
 // ---------------------------------------------------------------------------
-// Server loop
+// Polling mode — blocks on wait_for_messages(); no WaitGroup or IRQ needed.
+// When built with the "direct-client" feature, an SPDM responder runs
+// in-process using DirectMctpClient (no IPC channel to a separate process).
+// Enable with crate_features = ["i2c-polling", "direct-client"] in Bazel.
 // ---------------------------------------------------------------------------
 
-fn mctp_server_loop() -> Result<()> {
+#[cfg(feature = "i2c-polling")]
+fn mctp_loop() -> Result<()> {
+    pw_log::info!("MCTP server starting (I2C polling mode, eid=0x{:02x} addr=0x{:02x})",
+        OWN_EID as u32, OWN_I2C_ADDR as u32);
+
+    let mut i2c = IpcI2cClient::new(handle::I2C);
+
+    pw_log::info!("MCTP server: configuring I2C target address 0x{:02x} on bus 2",
+        OWN_I2C_ADDR as u32);
+    let addr = I2cAddress::new(OWN_I2C_ADDR).map_err(|_| {
+        pw_log::error!("MCTP server: invalid I2C address 0x{:02x}", OWN_I2C_ADDR as u32);
+        pw_status::Error::InvalidArgument
+    })?;
+    i2c.configure_target_address(BusIndex::BUS_2, addr).map_err(|_| {
+        pw_log::error!("MCTP server: configure_target_address failed");
+        pw_status::Error::Internal
+    })?;
+    pw_log::info!("MCTP server: enabling I2C receive on bus 2");
+    i2c.enable_receive(BusIndex::BUS_2).map_err(|_| {
+        pw_log::error!("MCTP server: enable_receive failed");
+        pw_status::Error::Internal
+    })?;
+
+    let sender = I2cSender::new(IpcI2cClient::new(handle::I2C), BusIndex::BUS_2, OWN_I2C_ADDR);
+    let receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
+
+    // Wrap in RefCell so DirectMctpClient can borrow it alongside the I2C path.
+    #[cfg(feature = "direct-client")]
+    let server_cell = RefCell::new(openprot_mctp_server::Server::<_, 16>::new(
+        mctp::Eid(OWN_EID),
+        0,
+        sender,
+    ));
+
+    #[cfg(not(feature = "direct-client"))]
+    let mut server_plain = openprot_mctp_server::Server::<_, 16>::new(
+        mctp::Eid(OWN_EID),
+        0,
+        sender,
+    );
+
+    // ---------------------------------------------------------------------------
+    // SPDM responder setup (only when direct-client feature is enabled)
+    // ---------------------------------------------------------------------------
+    #[cfg(feature = "direct-client")]
+    let mut transport = {
+        let client = DirectMctpClient::new(&server_cell);
+        MctpSpdmTransport::new_responder(client)
+    };
+
+    #[cfg(feature = "direct-client")]
+    {
+        pw_log::info!("MCTP server: registering SPDM listener (msg_type=0x05)");
+        if transport.init_sequence().is_err() {
+            pw_log::error!("MCTP server: SPDM transport init_sequence failed — \
+                listener(0x05) rejected; router listener table may be full");
+            return Err(pw_status::Error::Internal);
+        }
+        pw_log::info!("MCTP server: SPDM listener registered");
+    }
+
+    #[cfg(feature = "direct-client")]
+    let mut cert_store = MockCertStore::new();
+    #[cfg(feature = "direct-client")]
+    let mut hash = MockHash::new();
+    #[cfg(feature = "direct-client")]
+    let mut m1_hash = MockHash::new();
+    #[cfg(feature = "direct-client")]
+    let mut l1_hash = MockHash::new();
+    #[cfg(feature = "direct-client")]
+    let mut rng = MockRng::new();
+    #[cfg(feature = "direct-client")]
+    let evidence = MockEvidence::new();
+
+    #[cfg(feature = "direct-client")]
+    let mut flags = CapabilityFlags::default();
+    #[cfg(feature = "direct-client")]
+    {
+        flags.set_cert_cap(1);
+        flags.set_chal_cap(1);
+        flags.set_meas_cap(2);
+        flags.set_meas_fresh_cap(1);
+        flags.set_chunk_cap(1);
+    }
+
+    #[cfg(feature = "direct-client")]
+    let capabilities = DeviceCapabilities {
+        ct_exponent: 0,
+        flags,
+        data_transfer_size: 1024,
+        max_spdm_msg_size: 4096,
+        include_supported_algorithms: true,
+    };
+
+    #[cfg(feature = "direct-client")]
+    static SUPPORTED_VERSIONS: [SpdmVersion; 2] = [SpdmVersion::V12, SpdmVersion::V13];
+
+    #[cfg(feature = "direct-client")]
+    let algorithms = {
+        let mut measurement_spec = MeasurementSpecification::default();
+        measurement_spec.set_dmtf_measurement_spec(1);
+        let mut measurement_hash_algo = MeasurementHashAlgo::default();
+        measurement_hash_algo.set_tpm_alg_sha_384(1);
+        let mut base_asym_algo = BaseAsymAlgo::default();
+        base_asym_algo.set_tpm_alg_ecdsa_ecc_nist_p384(1);
+        let mut base_hash_algo = BaseHashAlgo::default();
+        base_hash_algo.set_tpm_alg_sha_384(1);
+        let device_algorithms = DeviceAlgorithms {
+            measurement_spec,
+            other_param_support: OtherParamSupport::default(),
+            measurement_hash_algo,
+            base_asym_algo,
+            base_hash_algo,
+            mel_specification: MelSpecification::default(),
+            dhe_group: DheNamedGroup::default(),
+            aead_cipher_suite: AeadCipherSuite::default(),
+            req_base_asym_algo: ReqBaseAsymAlg::default(),
+            key_schedule: KeySchedule::default(),
+        };
+        LocalDeviceAlgorithms {
+            device_algorithms,
+            algorithm_priority_table: AlgorithmPriorityTable {
+                measurement_specification: None,
+                opaque_data_format: None,
+                base_asym_algo: None,
+                base_hash_algo: None,
+                mel_specification: None,
+                dhe_group: None,
+                aead_cipher_suite: None,
+                req_base_asym_algo: None,
+                key_schedule: None,
+            },
+        }
+    };
+
+    #[cfg(feature = "direct-client")]
+    let mut spdm_ctx = {
+        pw_log::info!("MCTP server: creating SPDM context (v1.2+v1.3, ECDSA-P384, SHA-384)");
+        match SpdmContext::new(
+            &SUPPORTED_VERSIONS,
+            &mut transport,
+            capabilities,
+            algorithms,
+            &mut cert_store,
+            None,
+            &mut hash,
+            &mut m1_hash,
+            &mut l1_hash,
+            &mut rng,
+            &evidence,
+        ) {
+            Ok(ctx) => {
+                pw_log::info!("MCTP server: SPDM context ready");
+                ctx
+            }
+            Err(_) => {
+                pw_log::error!("MCTP server: SpdmContext::new failed — \
+                    check cert_store, hash, rng platform impls");
+                return Err(pw_status::Error::Internal);
+            }
+        }
+    };
+
+    #[cfg(feature = "direct-client")]
+    let mut spdm_buf = [0u8; MAX_PAYLOAD_SIZE];
+    // MessageBuf is created once outside the loop; reset() is called each iteration.
+    // Creating it inside the loop would leave the mutable borrow of spdm_buf live
+    // across loop iterations, which the borrow checker rejects (E0499).
+    #[cfg(feature = "direct-client")]
+    let mut msg_buf = MessageBuf::new(&mut spdm_buf);
+
+    // Fault-isolation counters — logged on first error and at every 16th recurrence.
+    let mut i2c_recv_err: u32 = 0;
+    let mut decode_err: u32 = 0;
+    let mut inbound_err: u32 = 0;
+    #[cfg(feature = "direct-client")]
+    let mut spdm_ok: u32 = 0;
+    #[cfg(feature = "direct-client")]
+    let mut spdm_err: u32 = 0;
+    let mut i2c_pkt: u32 = 0;
+
+    pw_log::info!("MCTP server ready, polling for I2C packets");
+
+    loop {
+        // Phase 1: drain inbound I2C packets into the MCTP router.
+        let mut msgs = [TargetMessage::default(); 1];
+
+        match i2c.wait_for_messages(BusIndex::BUS_2, &mut msgs, None) {
+            Ok(n) => {
+                for msg in msgs.get(..n).unwrap_or(&[]) {
+                    match receiver.decode(msg) {
+                        Ok((pkt, src_addr)) => {
+                            i2c_pkt = i2c_pkt.wrapping_add(1);
+                            pw_log::debug!(
+                                "MCTP server: I2C pkt #{} src=0x{:02x} len={}",
+                                i2c_pkt as u32,
+                                src_addr as u32,
+                                pkt.len() as u32,
+                            );
+                            #[cfg(feature = "direct-client")]
+                            if let Err(e) = server_cell.borrow_mut().inbound(pkt) {
+                                inbound_err = inbound_err.wrapping_add(1);
+                                if inbound_err == 1 || inbound_err & 0xf == 0 {
+                                    pw_log::error!(
+                                        "MCTP server: inbound() error code={} \
+                                        total_inbound_errors={}",
+                                        e.code as u32,
+                                        inbound_err as u32,
+                                    );
+                                }
+                            }
+                            #[cfg(not(feature = "direct-client"))]
+                            if let Err(e) = server_plain.inbound(pkt) {
+                                inbound_err = inbound_err.wrapping_add(1);
+                                if inbound_err == 1 || inbound_err & 0xf == 0 {
+                                    pw_log::error!(
+                                        "MCTP server: inbound() error code={} \
+                                        total_inbound_errors={}",
+                                        e.code as u32,
+                                        inbound_err as u32,
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            decode_err = decode_err.wrapping_add(1);
+                            if decode_err == 1 || decode_err & 0xf == 0 {
+                                pw_log::error!(
+                                    "MCTP server: I2C frame decode failed \
+                                    total_decode_errors={}",
+                                    decode_err as u32,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                i2c_recv_err = i2c_recv_err.wrapping_add(1);
+                if i2c_recv_err == 1 || i2c_recv_err & 0xf == 0 {
+                    pw_log::error!(
+                        "MCTP server: wait_for_messages failed \
+                        total_i2c_recv_errors={}",
+                        i2c_recv_err as u32,
+                    );
+                }
+            }
+        }
+
+        // Phase 2: poll the SPDM responder for an assembled message.
+        // Transport returning TimedOut means no SPDM message is assembled yet
+        // — this is the normal steady-state; log only genuine protocol errors.
+        #[cfg(feature = "direct-client")]
+        {
+            msg_buf.reset();
+            match spdm_ctx.responder_process_message(&mut msg_buf) {
+                Ok(_) => {
+                    spdm_ok = spdm_ok.wrapping_add(1);
+                    pw_log::info!(
+                        "MCTP server: SPDM request processed ok total_spdm_ok={}",
+                        spdm_ok as u32,
+                    );
+                }
+                Err(_) => {
+                    // Most errors here are TransportError::NoRequestInFlight
+                    // (TimedOut from DirectMctpClient::recv — no message ready).
+                    // Count and log only on first occurrence and every 256th after,
+                    // to avoid flooding the log during idle polling.
+                    spdm_err = spdm_err.wrapping_add(1);
+                    if spdm_err == 1 || spdm_err & 0xff == 0 {
+                        pw_log::debug!(
+                            "MCTP server: responder_process_message returned Err \
+                            (likely no message yet) total_spdm_err={}",
+                            spdm_err as u32,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Notification mode — WaitGroup multiplexes IPC (MCTP channel) and the I2C
+// slave interrupt (USER signal).  Serves both local IPC MCTP clients and
+// inbound I2C transport.  Default when "i2c-polling" feature is not set.
+// Requires WG and I2C2_IRQ objects in system.json5.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "i2c-polling"))]
+fn mctp_loop() -> Result<()> {
     pw_log::info!("MCTP server starting");
 
     // I2C notification client: receives slave-mode interrupts via Signals::USER.
@@ -157,7 +523,7 @@ fn mctp_server_loop() -> Result<()> {
 
 #[entry]
 fn entry() -> ! {
-    if let Err(e) = mctp_server_loop() {
+    if let Err(e) = mctp_loop() {
         pw_log::error!("MCTP server error: {}", e as u32);
         let _ = syscall::debug_shutdown(Err(e));
     }
