@@ -93,16 +93,20 @@ fn transfer_and_clear<S: openprot_mctp_server::Sender, const N: usize>(
 /// Try to answer a previously parked `Recv` IPC now that new data may have
 /// arrived in `server`'s inbox.
 ///
-/// If a message is available: encodes the response, calls `channel_respond`
-/// to wake the client, then re-adds the channel to the WG.
-/// If the inbox is still empty (race: both sides parked simultaneously before
-/// any data arrived): **re-parks** the pending recv and returns `Ok(())`.
-/// The parked Recv will be answered the next time data arrives from the other
-/// side.  Sending `InternalError` in this case would corrupt the client's
-/// state and is never correct.
+/// Calls `transfer_and_clear(outbox, server)` first so that packets buffered
+/// in the outbox are injected lazily — at the moment we need them — rather
+/// than eagerly at Send-dispatch time (when the destination listener may not
+/// yet be registered).  This eliminates the startup race where GET_VERSION
+/// is silently dropped because it arrived before the responder registered.
+///
+/// If a message is available after transfer: encodes the response, calls
+/// `channel_respond` to wake the client, then re-adds the channel to the WG.
+/// If the inbox is still empty: **re-parks** and returns `Ok(())`.  Sending
+/// `InternalError` in this case would corrupt the client's state.
 fn try_service_pending<S: openprot_mctp_server::Sender, const N: usize>(
     pending: &mut Option<PendingRecv>,
     server: &mut openprot_mctp_server::Server<S, N>,
+    outbox: &RefCell<PacketBuffer>,
     response_buf: &mut [u8],
     recv_buf: &mut [u8],
     wg_handle: u32,
@@ -117,6 +121,11 @@ fn try_service_pending<S: openprot_mctp_server::Sender, const N: usize>(
         "try_service_pending: chan={} wg={} ud={} pending_handle={}",
         chan_handle as u32, wg_handle as u32, wg_user_data as u32, p.handle.0 as u32
     );
+
+    // Lazily inject any buffered outbound packets from the other side before
+    // checking the inbox.  If this is the first time we check after a Send,
+    // the packets will be queued in the destination server's inbox here.
+    transfer_and_clear(outbox, server);
 
     let Some(meta) = server.try_recv(p.handle, recv_buf) else {
         // Inbox still empty — both sides parked simultaneously (startup race).
@@ -261,11 +270,13 @@ fn mctp_loopback_server_loop() -> Result<()> {
                         pending_recv_req = Some(PendingRecv { handle: h });
                         syscall::wait_group_remove(handle::WG, handle::MCTP_REQ)
                             .map_err(|e| { pw_log::error!("wait_group_remove(MCTP_REQ) failed: {}", e as u32); e })?;
-                        // The responder may already have data and a parked Recv — service it
-                        // now so the WG is never left with zero members.
+                        // The responder may already have a parked Recv — service it
+                        // now.  Pass packets_req so any buffered outbound is lazily
+                        // transferred into server_resp before try_recv.
                         try_service_pending(
                             &mut pending_recv_resp,
                             &mut server_resp,
+                            &packets_req,
                             &mut response_buf,
                             &mut recv_buf,
                             handle::WG,
@@ -285,16 +296,16 @@ fn mctp_loopback_server_loop() -> Result<()> {
                 &mut recv_buf,
             );
 
-            // Transfer requester's outbound packets → responder's inbound.
-            transfer_and_clear(&packets_req, &mut server_resp);
-
+            // Packets stay in packets_req until lazily transferred inside
+            // try_service_pending when the responder's parked Recv is serviced.
             syscall::channel_respond(handle::MCTP_REQ, &response_buf[..response_len])
                 .map_err(|e| { pw_log::error!("channel_respond(MCTP_REQ, dispatch) failed: {}", e as u32); e })?;
 
-            // Packets may have just arrived for responder — service any parked Recv.
+            // If the responder has a parked Recv, transfer and answer it now.
             try_service_pending(
                 &mut pending_recv_resp,
                 &mut server_resp,
+                &packets_req,
                 &mut response_buf,
                 &mut recv_buf,
                 handle::WG,
@@ -352,11 +363,13 @@ fn mctp_loopback_server_loop() -> Result<()> {
                         pending_recv_resp = Some(PendingRecv { handle: h });
                         syscall::wait_group_remove(handle::WG, handle::MCTP_RESP)
                             .map_err(|e| { pw_log::error!("wait_group_remove(MCTP_RESP) failed: {}", e as u32); e })?;
-                        // The requester may already have data and a parked Recv — service it
-                        // now so the WG is never left with zero members.
+                        // The requester may already have a parked Recv — service it
+                        // now.  Pass packets_resp so any buffered outbound is lazily
+                        // transferred into server_req before try_recv.
                         try_service_pending(
                             &mut pending_recv_req,
                             &mut server_req,
+                            &packets_resp,
                             &mut response_buf,
                             &mut recv_buf,
                             handle::WG,
@@ -376,16 +389,16 @@ fn mctp_loopback_server_loop() -> Result<()> {
                 &mut recv_buf,
             );
 
-            // Transfer responder's outbound packets → requester's inbound.
-            transfer_and_clear(&packets_resp, &mut server_req);
-
+            // Packets stay in packets_resp until lazily transferred inside
+            // try_service_pending when the requester's parked Recv is serviced.
             syscall::channel_respond(handle::MCTP_RESP, &response_buf[..response_len])
                 .map_err(|e| { pw_log::error!("channel_respond(MCTP_RESP, dispatch) failed: {}", e as u32); e })?;
 
-            // Packets may have just arrived for requester — service any parked Recv.
+            // If the requester has a parked Recv, transfer and answer it now.
             try_service_pending(
                 &mut pending_recv_req,
                 &mut server_req,
+                &packets_resp,
                 &mut response_buf,
                 &mut recv_buf,
                 handle::WG,
