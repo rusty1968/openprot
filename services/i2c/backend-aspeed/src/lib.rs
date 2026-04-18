@@ -548,6 +548,8 @@ impl AspeedI2cBackend {
         // Polling loop — spins until a relevant event or budget exhausted.
         // At 200 MHz, ~10_000 iterations ≈ a few hundred microseconds.
         const POLL_BUDGET: usize = 10_000;
+        // Track whether any non-idle HW event was seen before budget expires.
+        let mut saw_hw_event = false;
         for _ in 0..POLL_BUDGET {
             match i2c.handle_slave_interrupt() {
                 Some(SlaveEvent::DataReceived { len: _ }) => {
@@ -560,10 +562,12 @@ impl AspeedI2cBackend {
                 }
                 Some(SlaveEvent::WriteRequest) | Some(SlaveEvent::ReadRequest) => {
                     // Transaction in progress — keep polling for data.
+                    saw_hw_event = true;
                     continue;
                 }
                 Some(SlaveEvent::DataSent { len: _ }) => {
                     // Master read from us; not relevant for receive path.
+                    saw_hw_event = true;
                     continue;
                 }
                 None => {
@@ -573,6 +577,12 @@ impl AspeedI2cBackend {
             }
         }
 
+        if saw_hw_event {
+            pw_log::warn!(
+                "slave_receive bus={}: budget exhausted after HW event (partial txn?)",
+                bus as u32,
+            );
+        }
         Err(ResponseCode::Timeout)
     }
 

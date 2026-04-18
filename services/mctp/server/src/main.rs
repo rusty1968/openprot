@@ -189,7 +189,7 @@ fn mctp_loop() -> Result<()> {
     {
         pw_log::info!("MCTP server: registering SPDM listener (msg_type=0x05)");
         if transport.init_sequence().is_err() {
-            pw_log::error!("MCTP server: SPDM transport init_sequence failed — \
+            pw_log::error!("MCTP server: S  PDM transport init_sequence failed — \
                 listener(0x05) rejected; router listener table may be full");
             return Err(pw_status::Error::Internal);
         }
@@ -315,6 +315,7 @@ fn mctp_loop() -> Result<()> {
     #[cfg(feature = "direct-client")]
     let mut spdm_err: u32 = 0;
     let mut i2c_pkt: u32 = 0;
+    let mut idle_polls: u32 = 0;
 
     pw_log::info!("MCTP server ready, polling for I2C packets");
 
@@ -325,14 +326,41 @@ fn mctp_loop() -> Result<()> {
         match i2c.wait_for_messages(BusIndex::BUS_2, &mut msgs, None) {
             Ok(n) => {
                 for msg in msgs.get(..n).unwrap_or(&[]) {
+                    // Log the raw I2C frame before decode so we can confirm
+                    // the hardware actually delivered a well-formed SMBus frame.
+                    // Format: dest_addr cmd byte_count src_addr | MCTP hdr[0..3]
+                    let raw = msg.data();
+                    if raw.len() >= 8 {
+                        pw_log::info!(
+                            "I2C frame raw: dest=0x{:02x} cmd=0x{:02x} bc={} src=0x{:02x} \
+                            | mctp: ver=0x{:02x} deid=0x{:02x} seid=0x{:02x} flags=0x{:02x} \
+                            len={}",
+                            raw[0] as u32, raw[1] as u32, raw[2] as u32, raw[3] as u32,
+                            raw[4] as u32, raw[5] as u32, raw[6] as u32, raw[7] as u32,
+                            raw.len() as u32,
+                        );
+                    } else {
+                        pw_log::warn!(
+                            "I2C frame too short ({} bytes) to contain MCTP header",
+                            raw.len() as u32,
+                        );
+                    }
+
                     match receiver.decode(msg) {
                         Ok((pkt, src_addr)) => {
                             i2c_pkt = i2c_pkt.wrapping_add(1);
-                            pw_log::debug!(
-                                "MCTP server: I2C pkt #{} src=0x{:02x} len={}",
+                            // Log MCTP packet fields: SOM/EOM from flags byte (pkt[3])
+                            let som = pkt.get(3).map_or(0u8, |b| (b >> 7) & 1);
+                            let eom = pkt.get(3).map_or(0u8, |b| (b >> 6) & 1);
+                            let seq = pkt.get(3).map_or(0u8, |b| (b >> 4) & 0x3);
+                            let msg_type = pkt.get(4).map_or(0u8, |b| b & 0x7f);
+                            pw_log::info!(
+                                "MCTP pkt #{}: src_i2c=0x{:02x} len={} \
+                                SOM={} EOM={} seq={} msg_type=0x{:02x}",
                                 i2c_pkt as u32,
                                 src_addr as u32,
                                 pkt.len() as u32,
+                                som as u32, eom as u32, seq as u32, msg_type as u32,
                             );
                             if let Err(e) = server.borrow_mut().inbound(pkt) {
                                 inbound_err = inbound_err.wrapping_add(1);
@@ -357,6 +385,19 @@ fn mctp_loop() -> Result<()> {
                             }
                         }
                     }
+                }
+            }
+            Err(e) if e.is_timeout() => {
+                // Timeout is the normal "no frame yet" result from the backend's
+                // poll-budget loop — not a real error.  Just proceed to Phase 2
+                // (SPDM responder poll) and loop again.
+                idle_polls = idle_polls.wrapping_add(1);
+                if idle_polls & 0xfff == 0 {
+                    pw_log::info!(
+                        "MCTP alive: idle_polls={} pkts={}",
+                        idle_polls as u32,
+                        i2c_pkt as u32,
+                    );
                 }
             }
             Err(_) => {

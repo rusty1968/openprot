@@ -293,7 +293,19 @@ fn dispatch_i2c_op(
             } else {
                 // Blocking poll: spins in the backend until DataReceived or timeout.
                 match backend.slave_receive(header.bus, buf) {
-                    Ok(n) => encode_success(response, n),
+                    Ok(0) => {
+                        pw_log::info!("slave_receive bus={}: Stop (0 bytes)", header.bus as u32);
+                        encode_success(response, 0)
+                    }
+                    Ok(n) => {
+                        pw_log::info!(
+                            "slave_receive bus={}: received {} bytes",
+                            header.bus as u32,
+                            n as u32,
+                        );
+                        encode_success(response, n)
+                    }
+                    Err(ResponseCode::Timeout) => encode_success(response, 0),
                     Err(code) => encode_error(response, code),
                 }
             }
