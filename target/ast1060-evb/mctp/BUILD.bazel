@@ -1,6 +1,5 @@
 # Licensed under the Apache-2.0 license
 
-load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_app")
 load("@pigweed//pw_kernel/tooling:system_image.bzl", "system_image", "system_image_test")
 load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")
 load("@pigweed//pw_kernel/tooling:target_linker_script.bzl", "target_linker_script")
@@ -9,28 +8,7 @@ load("//target/ast1060-evb:defs.bzl", "TARGET_COMPATIBLE_WITH")
 load("//target:uart_boot_image.bzl", "uart_boot_image")
 
 # ---------------------------------------------------------------------------
-# MCTP echo binary (userspace process)
-# ---------------------------------------------------------------------------
-
-rust_app(
-    name = "mctp_echo",
-    codegen_crate_name = "app_mctp_echo",
-    srcs = ["mctp_echo.rs"],
-    edition = "2024",
-    system_config = ":system_config",
-    tags = ["kernel"],
-    deps = [
-        "//services/mctp/api:mctp_api",
-        "//services/mctp/client:mctp_client",
-        "@pigweed//pw_kernel/syscall:syscall_user",
-        "@pigweed//pw_kernel/userspace",
-        "@pigweed//pw_log/rust:pw_log",
-        "@pigweed//pw_status/rust:pw_status",
-    ],
-)
-
-# ---------------------------------------------------------------------------
-# System image: I2C server + MCTP server + echo client
+# System image: I2C server + MCTP server
 # ---------------------------------------------------------------------------
 
 system_image(
@@ -38,7 +16,6 @@ system_image(
     apps = [
         "//services/i2c/server:i2c_server",
         "//services/mctp/server:mctp_server",
-        ":mctp_echo",
     ],
     kernel = ":target",
     platform = "//target/ast1060-evb",

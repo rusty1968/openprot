@@ -6,26 +6,24 @@
 //
 // Memory Layout (PMSAv7-friendly, power-of-2 aligned regions):
 // FIXED: Kernel RAM now comes BEFORE application RAM to avoid boot crashes
-//   0x00000000 - 0x00000500: Vector table + kernel annotations (1280 bytes)
-//   0x00000500 - 0x00020000: Kernel flash (~127KB)
+//   0x00000000 - 0x00000800: Vector table + kernel annotations (2048 bytes)
+//   0x00000800 - 0x00020000: Kernel flash (~126KB)
 //   0x00020000 - 0x00040000: i2c_server flash (128KB)
-//   0x00040000 - 0x00050000: mctp_server flash (64KB)
-//   0x00050000 - 0x00060000: mctp_echo flash (64KB)
-//   0x00060000 - 0x00080000: Kernel RAM (128KB) <- MOVED HERE
+//   0x00040000 - 0x00060000: mctp_server flash (128KB)
+//   0x00060000 - 0x00080000: Kernel RAM (128KB)
 //   0x00080000 - 0x00090000: i2c_server RAM (64KB)
-//   0x00090000 - 0x00098000: mctp_server RAM (32KB)
-//   0x00098000 - 0x000A0000: mctp_echo RAM (32KB)
+//   0x00090000 - 0x000A0000: mctp_server RAM (64KB)
 //
 // Total: 0xA0000 = 640KB (fits within the 640KB usable window of the AST1060's 768KB SRAM).
 {
     arch: {
         type: "armv7m",
         vector_table_start_address: 0x00000000,
-        vector_table_size_bytes: 1280,  // 0x500 (272 vectors + thread/stack annotations)
+        vector_table_size_bytes: 2048,  // 0x800 (vector table + process annotations for all 3 apps)
     },
     kernel: {
-        flash_start_address: 0x00000500,  // After vector table + annotations
-        flash_size_bytes: 129792,         // 0x1FB00: ends at exactly 0x20000 (128KB boundary)
+        flash_start_address: 0x00000800,  // After vector table + annotations
+        flash_size_bytes: 129024,         // 0x1F800: ends at exactly 0x20000 (128KB boundary)
         ram_start_address: 0x00060000,    // Kernel RAM comes FIRST, before all app RAM
         ram_size_bytes: 131072,           // 128KB
     },
@@ -44,6 +42,21 @@
                     {
                         name: "I2C",
                         type: "channel_handler",  // Server side of client→server channel
+                    },
+                    {
+                        // AST1060 I2C2 combined master+slave interrupt (IRQ 112).
+                        name: "I2C2_IRQ",
+                        type: "interrupt",
+                        irqs: [
+                            {
+                                name: "i2c2",
+                                number: 112,
+                            },
+                        ],
+                    },
+                    {
+                        name: "WG",
+                        type: "wait_group",
                     },
                 ],
                 threads: [
@@ -79,7 +92,7 @@
         {
             name: "mctp_server",
             flash_size_bytes: 65536,      // 64KB for MCTP server code
-            ram_size_bytes: 32768,        // 32KB RAM (Router state, buffers)
+            ram_size_bytes: 65536,        // 64KB RAM (Router state + SPDM context + buffers)
             processes: [
                 {
                     name: "mctp server process",
@@ -103,32 +116,6 @@
                         {
                             name: "mctp server thread",
                             stack_size_bytes: 8192,   // 8KB stack (Router + fragmentation buffers)
-                        },
-                    ],
-                },
-            ],
-        },
-        // ──── MCTP Echo Client ────
-        // Listens for MCTP type-1 messages and echoes the payload back.
-        {
-            name: "mctp_echo",
-            flash_size_bytes: 65536,      // 64KB for echo app
-            ram_size_bytes: 32768,        // 32KB RAM
-            processes: [
-                {
-                    name: "mctp echo process",
-                    objects: [
-                        {
-                            name: "MCTP",
-                            type: "channel_initiator",  // Client side: echo → MCTP server
-                            handler_process: "mctp server process",
-                            handler_object_name: "MCTP",
-                        },
-                    ],
-                    threads: [
-                        {
-                            name: "mctp echo thread",
-                            stack_size_bytes: 4096,   // 4KB stack
                         },
                     ],
                 },
