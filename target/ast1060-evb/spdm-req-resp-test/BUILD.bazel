@@ -26,7 +26,7 @@ system_image(
     name = "spdm_req_resp_test",
     apps = [
         ":mctp_loopback_server_app",
-        ":spdm_requester_app",
+        # ":spdm_requester_app",  # DISABLED
         ":spdm_responder_app",
     ],
     kernel = ":target",

@@ -10,7 +10,10 @@ This script is designed to be invoked by Bazel test rules or used standalone.
 """
 
 import argparse
+import base64
+import binascii
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -45,6 +48,7 @@ _PW_TOKENIZER_AVAILABLE = _find_pw_tokenizer()
 
 if _PW_TOKENIZER_AVAILABLE:
     from pw_tokenizer import Detokenizer
+    from pw_tokenizer.detokenize import NestedMessageParser
 
 try:
     import serial
@@ -67,19 +71,74 @@ class UartTestExecutor:
         self.log_file_handle = None
         elf = getattr(args, "elf", None)
         self.detokenizer = Detokenizer(elf) if (elf and _PW_TOKENIZER_AVAILABLE) else None
+        self._token_parser = NestedMessageParser() if _PW_TOKENIZER_AVAILABLE else None
 
     def log(self, message: str):
         """Print message unless in quiet mode."""
         if not self.args.quiet:
             print(message, flush=True)
 
-    def print_uart_data(self, data: str):
-        """Print UART data, with detokenized output on the following line in green."""
-        print(data, end="", flush=True)
-        if self.detokenizer:
-            detokenized = self.detokenizer.detokenize_text(data)
-            if detokenized != data:
-                print(f"\033[32m{detokenized}\033[0m", end="", flush=True)
+    def _write_log(self, text: str):
+        """Write text to the log file if open."""
+        if self.log_file_handle:
+            self.log_file_handle.write(text)
+            self.log_file_handle.flush()
+
+    def print_uart_data(self, raw: bytes):
+        """Print UART data, detokenizing base64-encoded pw_log tokens when possible.
+
+        raw  -- the undecoded bytes straight from the serial port.
+
+        pw_tokenizer embeds $-prefixed base64 token frames in otherwise plain
+        text.  We use NestedMessageParser.read_messages() to scan the chunk for
+        those frames byte-by-byte.  The parser preserves state between calls so
+        tokens split across successive reads are handled correctly.
+
+        Each yielded span is either a raw non-token run or a complete $<base64>
+        token.  Tokens are base64-decoded and looked up in the detokenizer; on
+        a hit the decoded string is printed in green (and, unless --notok, the
+        raw frame is printed first).  On a miss the raw frame is printed as-is.
+
+        When no ELF / detokenizer is available we just decode and print the raw
+        bytes.
+        """
+        if self.detokenizer and self._token_parser:
+            notok = getattr(self.args, "notok", False)
+
+            for is_token, span in self._token_parser.read_messages(raw):
+                if not is_token:
+                    text = span.decode("utf-8", errors="replace")
+                    print(text, end="", flush=True)
+                    self._write_log(text)
+                    continue
+
+                # span is b'$<base64chars>' — strip the leading '$' before decoding.
+                # Add standard base64 padding so b64decode accepts unpadded tokens.
+                raw_text = span.decode("utf-8", errors="replace")
+                try:
+                    b64 = span[1:]
+                    b64 += b"=" * (-len(b64) % 4)
+                    encoded = base64.b64decode(b64, validate=True)
+                    result = self.detokenizer.detokenize(encoded)
+                except (binascii.Error, ValueError):
+                    result = None
+
+                if result is not None and result.ok():
+                    if not notok:
+                        print(raw_text, end="", flush=True)
+                        self._write_log(raw_text)
+                    decoded_str = str(result)
+                    print(f"\033[32m{decoded_str}\033[0m", end="", flush=True)
+                    self._write_log(decoded_str)
+                else:
+                    # Token not in database or decode failed — print as plain text
+                    print(raw_text, end="", flush=True)
+                    self._write_log(raw_text)
+            return
+
+        text = raw.decode("utf-8", errors="replace")
+        print(text, end="", flush=True)
+        self._write_log(text)
 
     def run_command(self, cmd: list, check: bool = True) -> Tuple[int, str, str]:
         """Run command and return (returncode, stdout, stderr)."""
@@ -137,6 +196,10 @@ class UartTestExecutor:
         self.log("Entering FWSPICK mode sequence...")
         self.toggle_srst("dl")  # SRST low
         time.sleep(0.1)
+        # Empty UART buffer after asserting SRST to ensure clean state
+        discarded = self.read_serial_data(timeout_seconds=0.1)
+        if discarded:
+            self.log(f"Discarded {len(discarded)} bytes from UART buffer after SRST assert")
         self.toggle_fwspick("dh")  # FWSPICK high
         time.sleep(1)
         self.toggle_srst("dh")  # SRST high
@@ -150,6 +213,10 @@ class UartTestExecutor:
         time.sleep(0.1)
         self.toggle_srst("dl")  # SRST low
         time.sleep(0.5)
+        # Empty UART buffer after asserting SRST to ensure clean state
+        discarded = self.read_serial_data(timeout_seconds=0.1)
+        if discarded:
+            self.log(f"Discarded {len(discarded)} bytes from UART buffer after SRST assert")
         self.toggle_srst("dh")  # SRST high
         time.sleep(2)
         self.log("Normal boot mode sequence complete")
@@ -194,33 +261,22 @@ class UartTestExecutor:
             self.log_file_handle.close()
             self.log_file_handle = None
 
-    def read_serial_data(self, timeout_seconds: float = 1.0) -> str:
-        """Read available data from serial port."""
+    def read_serial_data(self, timeout_seconds: float = 1.0) -> bytes:
+        """Read available data from serial port, returning raw bytes."""
         if not self.serial_port or self.args.skip_uart:
-            return ""
+            return b""
 
         if self.args.dry_run:
-            return ""
+            return b""
 
         try:
             self.serial_port.timeout = timeout_seconds
             data = self.serial_port.read(1024)
-
-            if data:
-                decoded = data.decode("utf-8", errors="ignore")
-
-                # Log to file
-                if self.log_file_handle:
-                    self.log_file_handle.write(decoded)
-                    self.log_file_handle.flush()
-
-                return decoded
-
-            return ""
+            return data if data else b""
 
         except Exception as e:
             self.log(f"Serial read error: {e}")
-            return ""
+            return b""
 
     def write_serial_data(self, data: bytes) -> bool:
         """Write data to serial port."""
@@ -253,19 +309,23 @@ class UartTestExecutor:
             return True
 
         start_time = time.time()
-        buffer = ""
+        buffer = b""
 
-        while time.time() - start_time < timeout:
-            data = self.read_serial_data(0.1)
-            if data:
-                buffer += data
-                if not self.args.quiet:
-                    self.print_uart_data(data)
+        try:
+            while time.time() - start_time < timeout:
+                data = self.read_serial_data(0.1)
+                if data:
+                    buffer += data
+                    if not self.args.quiet:
+                        self.print_uart_data(data)
 
-                # Look for 'U' character
-                if "U" in buffer:
-                    self.log("\nUART bootloader ready detected!")
-                    return True
+                    # Look for 'U' character
+                    if b"U" in buffer:
+                        self.log("\nUART bootloader ready detected!")
+                        return True
+        except KeyboardInterrupt:
+            self.log("\nInterrupted while waiting for UART ready")
+            raise
 
         self.log("\nTimeout waiting for UART ready signal")
         return False
@@ -296,20 +356,26 @@ class UartTestExecutor:
             chunk_size = 1024
             bytes_sent = 0
 
-            for i in range(0, len(firmware_data), chunk_size):
-                chunk = firmware_data[i : i + chunk_size]
+            try:
+                for i in range(0, len(firmware_data), chunk_size):
+                    chunk = firmware_data[i : i + chunk_size]
 
-                if not self.write_serial_data(chunk):
-                    self.log("Failed to write firmware chunk")
-                    return False
+                    if not self.write_serial_data(chunk):
+                        self.log("Failed to write firmware chunk")
+                        return False
 
-                bytes_sent += len(chunk)
-                time.sleep(0.01)
+                    bytes_sent += len(chunk)
+                    time.sleep(0.01)
 
-                # Progress indicator
-                if not self.args.quiet and bytes_sent % (chunk_size * 10) == 0:
-                    progress = (bytes_sent * 100) // len(firmware_data)
-                    print(f"\rProgress: {progress}%", end="", flush=True)
+                    # Progress indicator
+                    if not self.args.quiet and bytes_sent % (chunk_size * 10) == 0:
+                        progress = (bytes_sent * 100) // len(firmware_data)
+                        print(f"\rProgress: {progress}%", end="", flush=True)
+            except KeyboardInterrupt:
+                if not self.args.quiet:
+                    print()
+                self.log("Firmware upload interrupted")
+                raise
 
             if not self.args.quiet:
                 print()
@@ -317,6 +383,8 @@ class UartTestExecutor:
             self.log("Firmware upload completed")
             return True
 
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             self.log(f"Failed to upload firmware: {e}")
             return False
@@ -327,47 +395,55 @@ class UartTestExecutor:
             self.log("Skipping test monitoring")
             return True
 
-        actual_timeout = getattr(self.args, "test_timeout", timeout)
-        self.log(f"Monitoring test execution with {actual_timeout}s timeout...")
+        actual_timeout = getattr(self.args, "timeout", timeout)
+        if actual_timeout == 0:
+            self.log("Monitoring test execution with no timeout...")
+        else:
+            self.log(f"Monitoring test execution with {actual_timeout}s timeout...")
 
         if self.args.dry_run:
             self.log("DRY RUN: Would monitor test execution")
             return True
 
         start_time = time.time()
-        buffer = ""
+        line_buffer = ""
         test_results = {"passed": 0, "failed": 0, "skipped": 0}
 
-        while time.time() - start_time < actual_timeout:
-            data = self.read_serial_data(0.5)
-            if data:
-                buffer += data
-                if not self.args.quiet:
-                    self.print_uart_data(data)
+        try:
+            while actual_timeout == 0 or time.time() - start_time < actual_timeout:
+                data = self.read_serial_data(0.5)
+                if data:
+                    if not self.args.quiet:
+                        self.print_uart_data(data)
 
-                lines = buffer.split("\n")
-                for line in lines:
-                    if "PASS" in line:
-                        test_results["passed"] += 1
-                    elif "FAIL" in line:
-                        test_results["failed"] += 1
-                    elif "SKIP" in line:
-                        test_results["skipped"] += 1
+                    line_buffer += data.decode("utf-8", errors="replace")
+                    lines = line_buffer.split("\n")
+                    # Keep the last (possibly incomplete) line in the buffer
+                    line_buffer = lines[-1]
 
-                    # Check for completion
-                    for pattern in self.SUCCESS_PATTERNS:
-                        if pattern in line:
-                            self.log(f"\nTest execution completed!")
-                            self.log(f"Results: {test_results}")
-                            return test_results["failed"] == 0
+                    for line in lines[:-1]:
+                        if "PASS" in line:
+                            test_results["passed"] += 1
+                        elif "FAIL" in line:
+                            test_results["failed"] += 1
+                        elif "SKIP" in line:
+                            test_results["skipped"] += 1
 
-                    # Check for failure
-                    for pattern in self.FAILURE_PATTERNS:
-                        if pattern.lower() in line.lower():
-                            self.log(f"\nFailure detected: {pattern}")
-                            return False
+                        # Check for completion
+                        for pattern in self.SUCCESS_PATTERNS:
+                            if pattern in line:
+                                self.log(f"\nTest execution completed!")
+                                self.log(f"Results: {test_results}")
+                                return test_results["failed"] == 0
 
-                buffer = "\n".join(lines[-10:])
+                        # Check for failure
+                        for pattern in self.FAILURE_PATTERNS:
+                            if pattern.lower() in line.lower():
+                                self.log(f"\nFailure detected: {pattern}")
+                                return False
+        except KeyboardInterrupt:
+            self.log(f"\nMonitoring interrupted. Results so far: {test_results}")
+            raise
 
         self.log(f"\nTest monitoring timeout. Results so far: {test_results}")
         return test_results["failed"] == 0
@@ -375,6 +451,34 @@ class UartTestExecutor:
     def cleanup(self):
         """Clean up resources."""
         self.close_serial()
+
+    def _install_signal_handler(self):
+        """Install SIGINT handler so Ctrl+C always triggers clean shutdown."""
+        def _handler(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGINT, _handler)
+
+    def run_parse_only(self) -> int:
+        """Read and print UART output indefinitely. Returns 0 on KeyboardInterrupt."""
+        try:
+            if not self.open_serial():
+                return 1
+
+            self.log(
+                f"Listening on {self.args.uart_device} @ {self.args.baudrate} baud"
+                " (Ctrl+C to stop)..."
+            )
+
+            while True:
+                data = self.read_serial_data(timeout_seconds=0.1)
+                if data:
+                    self.print_uart_data(data)
+
+        except KeyboardInterrupt:
+            self.log("\nStopped.")
+            return 0
+        finally:
+            self.cleanup()
 
     def run_full_test_sequence(self) -> bool:
         """Execute the complete test sequence."""
@@ -427,6 +531,11 @@ Examples:
     )
     parser.add_argument("firmware", nargs="?", help="Firmware binary file path")
     parser.add_argument("--elf", help="ELF file for pw_tokenizer detokenization")
+    parser.add_argument(
+        "--notok",
+        action="store_true",
+        help="Suppress raw base64 tokens; only show detokenized output. Requires --elf.",
+    )
 
     # GPIO control
     parser.add_argument(
@@ -469,6 +578,12 @@ Examples:
         help="Test execution monitoring timeout in seconds (default: 600)",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Test execution timeout in seconds (default: 600, 0 for no timeout)",
+    )
+    parser.add_argument(
         "--log-file", help="Log file path (auto-generated if not specified)"
     )
 
@@ -497,22 +612,55 @@ Examples:
         action="store_true",
         help="Skip GPIO operations but still monitor tests",
     )
+    parser.add_argument(
+        "--parse-only",
+        action="store_true",
+        help=(
+            "Read and print UART output indefinitely. "
+            "Requires UART device. Accepts only --baudrate, --log-file, and --elf. "
+            "No timeout; stop with Ctrl+C."
+        ),
+    )
 
     args = parser.parse_args()
 
     # Validate pw_tokenizer / --elf argument consistency
-    if os.environ.get("PW_TOK_ROOT") and not args.elf:
-        print(
-            "Error: PW_TOK_ROOT is set but --elf was not provided. "
-            "Detokenization requires an ELF file."
-        )
-        sys.exit(1)
     if args.elf and not _PW_TOKENIZER_AVAILABLE:
         print(
             "Error: --elf was provided but pw_tokenizer could not be located. "
             "Set PW_TOK_ROOT to the Pigweed root or ensure Bazel has fetched it."
         )
         sys.exit(1)
+    if args.elf and not Path(args.elf).exists():
+        print(f"Error: ELF file not found: {args.elf}")
+        sys.exit(1)
+    if args.notok and not args.elf:
+        parser.error("--notok requires --elf")
+
+    # Validate --parse-only exclusivity
+    if args.parse_only:
+        incompatible = [
+            name
+            for flag, name in [
+                (args.firmware,       "firmware"),
+                (args.manual_srst,    "--manual-srst"),
+                (args.manual_fwspick, "--manual-fwspick"),
+                (args.sequence,       "--sequence"),
+                (args.skip_uart,      "--skip-uart"),
+                (args.dry_run,        "--dry-run"),
+                (args.upload_only,    "--upload-only"),
+                (args.bazel_test,     "--bazel-test"),
+                (args.skip_gpio,      "--skip-gpio"),
+                (args.quiet,          "--quiet"),
+            ]
+            if flag
+        ]
+        if incompatible:
+            parser.error(
+                f"--parse-only is incompatible with: {', '.join(incompatible)}"
+            )
+        if not args.uart_device:
+            parser.error("--parse-only requires a UART device path")
 
     # Validate arguments
     if args.upload_only:
@@ -532,8 +680,13 @@ Examples:
         parser.error(f"UART device not found: {args.uart_device}")
 
     executor = UartTestExecutor(args)
+    executor._install_signal_handler()
 
     try:
+        # Parse-only mode: read UART indefinitely
+        if args.parse_only:
+            return executor.run_parse_only()
+
         # Handle manual GPIO operations
         if args.manual_srst:
             state = "dl" if args.manual_srst in ["low", "dl"] else "dh"
@@ -586,7 +739,8 @@ Examples:
                 return 1
 
     except KeyboardInterrupt:
-        executor.log("\nInterrupted by user")
+        executor.log("\nInterrupted.")
+        executor.cleanup()
         return 130
     except Exception as e:
         executor.log(f"Error: {e}")

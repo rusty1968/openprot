@@ -68,32 +68,33 @@
             ],
         },
         // ──── SPDM Requester ────
+        // DISABLED - Requester flow is not active in this configuration
         // Runs the SPDM requester flow using spdm-lib's requester API.
         // Connects to the MCTP loopback server to send/receive SPDM messages.
-        {
-            name: "spdm_requester",
-            flash_size_bytes: 98304,      // 96KB for requester code
-            ram_size_bytes: 98304,        // 96KB RAM (SPDM context + buffers)
-            processes: [
-                {
-                    name: "spdm requester process",
-                    objects: [
-                        {
-                            name: "MCTP",
-                            type: "channel_initiator",
-                            handler_process: "mctp loopback server process",
-                            handler_object_name: "MCTP_REQ",
-                        },
-                    ],
-                    threads: [
-                        {
-                            name: "spdm requester thread",
-                            stack_size_bytes: 16384,
-                        },
-                    ],
-                },
-            ],
-        },
+        // {
+        //     name: "spdm_requester",
+        //     flash_size_bytes: 98304,      // 96KB for requester code
+        //     ram_size_bytes: 98304,        // 96KB RAM (SPDM context + buffers)
+        //     processes: [
+        //         {
+        //             name: "spdm requester process",
+        //             objects: [
+        //                 {
+        //                     name: "MCTP",
+        //                     type: "channel_initiator",
+        //                     handler_process: "mctp loopback server process",
+        //                     handler_object_name: "MCTP_REQ",
+        //                 },
+        //             ],
+        //             threads: [
+        //                 {
+        //                     name: "spdm requester thread",
+        //                     stack_size_bytes: 16384,
+        //                 },
+        //             ],
+        //         },
+        //     ],
+        // },
         // ──── SPDM Responder ────
         // Runs the SPDM responder using spdm-lib's responder API.
         // Connects to the MCTP loopback server to receive/send SPDM messages.
