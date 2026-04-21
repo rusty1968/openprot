@@ -9,7 +9,7 @@
 //! `mctp-server/src/main.rs`, using `mctp_lib::i2c::MctpI2cEncap`
 //! for decoding (same as Hubris).
 
-use mctp_lib::i2c::MctpI2cEncap;
+use mctp_lib::i2c::{MctpI2cHeader, MctpI2cEncap};
 use i2c_api::TargetMessage;
 
 /// Decodes I2C target messages into raw MCTP packets.
@@ -39,7 +39,7 @@ impl MctpI2cReceiver {
     pub fn decode<'a>(
         &self,
         msg: &'a TargetMessage,
-    ) -> Result<(&'a [u8], u8), mctp::Error> {
+    ) -> Result<(&'a [u8], MctpI2cHeader), mctp::Error> {
         let data = msg.data();
         // MctpI2cEncap::decode strips the I2C header, validates PEC,
         // and returns the raw MCTP packet + source I2C address.
@@ -157,9 +157,10 @@ mod tests {
         let result = receiver.decode(&msg);
 
         match &result {
-            Ok((pkt, src_addr)) => {
+            Ok((pkt, header)) => {
                 println!("\n✓ Decode SUCCEEDED!");
-                println!("  Source address: 0x{:02X}", src_addr);
+                println!("  Source address: 0x{:02X}", header.source);
+                println!("  Dest address: 0x{:02X}", header.dest);
                 println!("  MCTP packet ({} bytes):", pkt.len());
                 print!("    ");
                 for (i, byte) in pkt.iter().enumerate() {
@@ -251,7 +252,6 @@ mod tests {
         println!("  20 0F 0A 85 01 08 30 C8 05 10 84 00 00 65");
         println!("  ^^ added destination address");
         println!();
-        println!("Current decode result: {:?}", result);
         println!("========================================\n");
 
         // Still getting BadArgument - need to investigate mctp-lib's exact
@@ -312,7 +312,10 @@ mod tests {
         ];
         let msg1 = TargetMessage::from_data(I2cAddress::new(0x50).unwrap(), &full_frame);
         let result1 = receiver.decode(&msg1);
-        println!("Result: {:?}", result1);
+        match result1 {
+            Ok((_, hdr)) => println!("OK: src: {:02X?}, dest: {:02X?}", hdr.source, hdr.dest),
+            Err(e) => println!("ERROR: {e}")
+        }
 
         println!("\n--- Test 2: Without destination address (if HW strips it) ---");
         // Maybe the I2C hardware already stripped the destination address byte?
@@ -321,7 +324,10 @@ mod tests {
         ];
         let msg2 = TargetMessage::from_data(I2cAddress::new(0x50).unwrap(), &without_dest);
         let result2 = receiver.decode(&msg2);
-        println!("Result: {:?}", result2);
+        match result2 {
+            Ok((_, hdr)) => println!("OK: src: {:02X?}, dest: {:02X?}", hdr.source, hdr.dest),
+            Err(e) => println!("ERROR: {e}")
+        }
 
         println!("\n--- Test 3: Starting from command code with dest prepended ---");
         // SMBus master-to-slave write: dest_addr(W) + cmd + data
@@ -333,7 +339,10 @@ mod tests {
         ];
         let msg3 = TargetMessage::from_data(I2cAddress::new(0x50).unwrap(), &with_dest_addr);
         let result3 = receiver.decode(&msg3);
-        println!("Result: {:?}", result3);
+        match result3 {
+            Ok((_, hdr)) => println!("OK: src: {:02X?}, dest: {:02X?}", hdr.source, hdr.dest),
+            Err(e) => println!("ERROR: {e}")
+        }
 
         println!("\n--- Test 4: Just the SMBus data block (byte count onwards) ---");
         // Maybe mctp-lib expects: byte_count + src_addr + hdr + EIDs + packet + PEC
@@ -342,7 +351,10 @@ mod tests {
         ];
         let msg4 = TargetMessage::from_data(I2cAddress::new(0x50).unwrap(), &smbus_block);
         let result4 = receiver.decode(&msg4);
-        println!("Result: {:?}", result4);
+        match result4 {
+            Ok((_, hdr)) => println!("OK: src: {:02X?}, dest: {:02X?}", hdr.source, hdr.dest),
+            Err(e) => println!("ERROR: {e}")
+        }
 
         println!("\n--- Test 5: WITH destination address prepended (what I2C HW delivers) ---");
         // The I2C hardware should prepend the destination address!
@@ -369,10 +381,13 @@ mod tests {
         ];
         let msg5 = TargetMessage::from_data(I2cAddress::new(0x50).unwrap(), &complete_frame);
         let result5 = receiver.decode(&msg5);
-        println!("Result: {:?}", result5);
-        if let Ok((pkt, src_addr)) = &result5 {
+        match result5 {
+            Ok((_, ref hdr)) => println!("OK: src: {:02X?}, dest: {:02X?}", hdr.source, hdr.dest),
+            Err(ref e) => println!("ERROR: {e}")
+        }
+        if let Ok((pkt, header)) = &result5 {
             println!("  SUCCESS! Decoded MCTP packet:");
-            println!("    Source I2C addr: 0x{:02X}", src_addr);
+            println!("    I2C Header: dest: {:02X?}, src: {:02X?}, byte_count: {:02X?}", header.dest, header.source, header.byte_count);
             println!("    Packet ({} bytes): {:02X?}", pkt.len(), pkt);
         }
 
@@ -380,11 +395,13 @@ mod tests {
         // The MctpI2cEncap::decode second parameter controls PEC validation
         // Let me manually call it with false to see if that helps
         let result6 = receiver.encap.decode(&complete_frame, false);
-        println!("Result (PEC disabled): {:?}", result6);
-        if let Ok((pkt, src_addr)) = &result6 {
-            println!("  SUCCESS! Decoded MCTP packet:");
-            println!("    Source I2C addr: 0x{:02X}", src_addr);
-            println!("    Packet ({} bytes): {:02X?}", pkt.len(), pkt);
+        match &result6 {
+            Ok((pkt, header)) => {
+                println!("  SUCCESS! Decoded MCTP packet:");
+                println!("    I2C Header: dest: {:02X?}, src: {:02X?}, byte_count: {:02X?}", header.dest, header.source, header.byte_count);
+                println!("    Packet ({} bytes): {:02X?}", pkt.len(), pkt);
+                }
+            Err(e) => println!("  ERROR: {e:?}")
         }
 
         println!("\n========================================\n");

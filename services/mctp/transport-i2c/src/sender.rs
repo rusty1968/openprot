@@ -6,7 +6,7 @@
 //! Only the I2C driver API is replaced: `drv_i2c_api::I2cDevice` →
 //! `i2c_api::I2cClientBlocking`.
 
-use mctp::Result;
+use mctp::{Result, Eid};
 use mctp_lib::i2c::{MctpI2cEncap, MCTP_I2C_MAXMTU};
 use i2c_api::{BusIndex, I2cAddress, I2cClientBlocking};
 
@@ -46,6 +46,7 @@ impl<C: I2cClientBlocking> I2cSender<C> {
 impl<C: I2cClientBlocking> mctp_lib::Sender for I2cSender<C> {
     fn send_vectored(
         &mut self,
+        _eid: Eid,
         mut fragmenter: mctp_lib::fragment::Fragmenter,
         payload: &[&[u8]],
     ) -> Result<mctp::Tag> {
