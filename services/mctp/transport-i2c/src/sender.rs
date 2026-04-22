@@ -23,9 +23,10 @@ pub struct I2cSender<C: I2cClientBlocking> {
     i2c: C,
     bus: BusIndex,
     own_addr: u8,
-    // TODO: neighbor table mapping EID → I2C address
-    //       see https://github.com/OpenPRoT/mctp-lib/issues/4
-    //       For now, destination address is hardcoded (same as Hubris).
+    /// Destination I2C address (7-bit) of the remote MCTP endpoint.
+    /// TODO: replace with a neighbor table mapping EID → I2C address
+    ///       see https://github.com/OpenPRoT/mctp-lib/issues/4
+    dest_addr: u8,
 }
 
 impl<C: I2cClientBlocking> I2cSender<C> {
@@ -34,11 +35,13 @@ impl<C: I2cClientBlocking> I2cSender<C> {
     /// * `i2c` - I2C client for bus writes
     /// * `bus` - I2C bus index to use
     /// * `own_addr` - Own I2C address (7-bit, used in MCTP-I2C header)
-    pub fn new(i2c: C, bus: BusIndex, own_addr: u8) -> Self {
+    /// * `dest_addr` - Destination I2C address (7-bit) of the remote endpoint
+    pub fn new(i2c: C, bus: BusIndex, own_addr: u8, dest_addr: u8) -> Self {
         Self {
             i2c,
             bus,
             own_addr,
+            dest_addr,
         }
     }
 }
@@ -50,12 +53,9 @@ impl<C: I2cClientBlocking> mctp_lib::Sender for I2cSender<C> {
         mut fragmenter: mctp_lib::fragment::Fragmenter,
         payload: &[&[u8]],
     ) -> Result<mctp::Tag> {
-        // TODO The stack needs to provide the destination EID to the sender
-        // let addr = self
-        //     .neighbor_table
-        //     .get(eid)
-        //     .ok_or(mctp::Error::Unreachable)?;
-        let addr = 0x42;
+        // TODO: replace with neighbor table lookup: EID → I2C address
+        //       see https://github.com/OpenPRoT/mctp-lib/issues/4
+        let addr = self.dest_addr;
         let dest_address = I2cAddress::new_unchecked(addr);
         let encoder = MctpI2cEncap::new(self.own_addr);
 
@@ -66,9 +66,9 @@ impl<C: I2cClientBlocking> mctp_lib::Sender for I2cSender<C> {
             match r {
                 mctp_lib::fragment::SendOutput::Packet(p) => {
                     let mut out = [0; MCTP_I2C_MAXMTU + 8]; // max MTU + I2C header size
-                    let _packet = encoder.encode(addr, p, &mut out, true)?;
+                    let packet = encoder.encode(addr, p, &mut out, true)?;
                     self.i2c
-                        .write(self.bus, dest_address, &out)
+                        .write(self.bus, dest_address, packet)
                         .map_err(|_| mctp::Error::TxFailure)?;
                 }
                 mctp_lib::fragment::SendOutput::Complete { tag, .. } => {

@@ -161,8 +161,24 @@ use userspace::syscall::Signals;
 #[cfg(not(feature = "i2c-polling"))]
 use userspace::time::Instant;
 
+// Own EID and I2C address differ per role so the two images can coexist on
+// the same bus.  The requester is at 0x42/0x30; the responder at 0x10/0x08.
+#[cfg(feature = "in-process-requester")]
+const OWN_EID: u8 = 0x30;
+#[cfg(feature = "in-process-requester")]
+const OWN_I2C_ADDR: u8 = 0x42;
+#[cfg(not(feature = "in-process-requester"))]
 const OWN_EID: u8 = 8;
+#[cfg(not(feature = "in-process-requester"))]
 const OWN_I2C_ADDR: u8 = 0x10;
+
+/// I2C address of the remote MCTP endpoint to send to.
+/// Requester sends requests to the responder (0x10);
+/// responder sends replies back to the requester (0x42).
+#[cfg(feature = "in-process-requester")]
+const REMOTE_I2C_ADDR: u8 = 0x10;
+#[cfg(not(feature = "in-process-requester"))]
+const REMOTE_I2C_ADDR: u8 = 0x42;
 
 /// Remote EID of the SPDM responder targeted by the in-process requester.
 /// Matches `spdm_requester.rs` so the two requester implementations are
@@ -227,7 +243,7 @@ fn mctp_loop() -> Result<()> {
         pw_status::Error::Internal
     })?;
 
-    let sender = I2cSender::new(IpcI2cClient::new(handle::I2C), BusIndex::BUS_2, OWN_I2C_ADDR);
+    let sender = I2cSender::new(IpcI2cClient::new(handle::I2C), BusIndex::BUS_2, OWN_I2C_ADDR, REMOTE_I2C_ADDR);
     let receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
 
     // RefCell lets DirectMctpClient borrow `server` alongside the I2C path in
@@ -887,7 +903,7 @@ fn mctp_loop() -> Result<()> {
         .map_err(|_| pw_status::Error::Internal)?;
 
     // Separate handle for the sender — I2cSender takes ownership.
-    let sender = I2cSender::new(IpcI2cClient::new(handle::I2C), BusIndex::BUS_2, OWN_I2C_ADDR);
+    let sender = I2cSender::new(IpcI2cClient::new(handle::I2C), BusIndex::BUS_2, OWN_I2C_ADDR, REMOTE_I2C_ADDR);
     let receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
     let mut server = openprot_mctp_server::Server::<_, 16>::new(
         mctp::Eid(OWN_EID),
