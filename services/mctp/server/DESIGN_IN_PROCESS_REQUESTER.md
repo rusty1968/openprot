@@ -1,6 +1,6 @@
 # In-Process SPDM Requester — Design Spec
 
-Status: draft
+Status: implemented (Phases 0–6a complete — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md))
 Scope: add an in-process SPDM **requester** to the MCTP server, mirroring the
 existing in-process SPDM responder at
 [src/main.rs:144-446](src/main.rs#L144-L446).
@@ -162,14 +162,15 @@ to the existing `mctp_server` target:
 ```starlark
 rust_app(
     name = "mctp_server_requester",
-    codegen_crate_name = "app_mctp_server",       # same handle::MCTP/I2C bindings
+    codegen_crate_name = "app_mctp_server_requester",
     srcs = ["src/main.rs"],
     crate_features = [
         "i2c-polling",
+        "direct-client",        # Bazel does not resolve transitive features
         "in-process-requester",
     ],
     edition = "2024",
-    system_config = "//target/ast1060-evb/mctp:system_config",
+    system_config = "//target/ast1060-evb/mctp-requester:system_config",
     tags = ["kernel"],
     visibility = ["//visibility:public"],
     deps = [
@@ -178,17 +179,27 @@ rust_app(
 )
 ```
 
-The existing `mctp_server` target flips to
-`crate_features = ["i2c-polling", "in-process-responder"]` once downstream
-system images migrate.
+Note: two `rust_app` rules in the same Bazel package cannot share
+`codegen_crate_name`. The QEMU virt variant therefore expands the rule inline
+(via `rust_app_codegen` + `app_linker_script` + `rust_binary`) in
+`//target/virt-ast1060-evb/mctp-requester/BUILD.bazel` rather than adding a
+third `rust_app` target here.
 
 ### 4.4 System configuration
 
-No new kernel objects are required. The in-process requester reuses exactly
-the same `system.json5` process definition as the in-process responder
-([target/ast1060-evb/mctp/system.json5](../../target/ast1060-evb/mctp/system.json5)):
-`MCTP` channel_handler (still unused in polling+in-process mode), `I2C`
-channel_initiator, `WG` wait_group (unused in polling mode).
+No new kernel objects are required. Each requester image has its own
+`system.json5` (i2c_server + mctp_server_requester) rather than reusing the
+responder's config:
+
+| Target | system.json5 location |
+|---|---|
+| Hardware (AST1060-EVB) | [target/ast1060-evb/mctp-requester/system.json5](../../target/ast1060-evb/mctp-requester/system.json5) |
+| QEMU (virt-ast1060-evb) | [target/virt-ast1060-evb/mctp-requester/system.json5](../../target/virt-ast1060-evb/mctp-requester/system.json5) |
+
+Both use the same two-process layout: `I2C` channel_initiator and
+`WG` wait_group (unused in polling mode); the `MCTP` channel_handler from
+the responder config is absent. The QEMU variant sets ASPEED I2C MMIO at
+`0x7e7b0000` / `0x7e6e2000` to match QEMU's emulated address map.
 
 ---
 
