@@ -757,8 +757,24 @@ fn mctp_loop() -> Result<()> {
                         pw_log::info!("SPDM requester: sent GET_VERSION, awaiting VERSION");
                         req_state = ReqState::AwaitVersion;
                     } else {
-                        pw_log::error!("SPDM requester: GET_VERSION send failed");
-                        req_state = ReqState::Failed;
+                        // Stay in SendVersion and retry next loop iteration.
+                        // Use await_steps as the send-retry budget so we
+                        // eventually give up if the I2C path is permanently broken.
+                        await_steps = await_steps.wrapping_add(1);
+                        if await_steps >= AWAIT_STEP_BUDGET {
+                            pw_log::error!(
+                                "SPDM requester: GET_VERSION send failed after {} retries \
+                                — giving up",
+                                await_steps as u32,
+                            );
+                            req_state = ReqState::Failed;
+                        } else if await_steps == 1 || await_steps & 0xff == 0 {
+                            pw_log::warn!(
+                                "SPDM requester: GET_VERSION send failed, retrying \
+                                (attempt={})",
+                                await_steps as u32,
+                            );
+                        }
                     }
                 }
                 ReqState::AwaitVersion => {
