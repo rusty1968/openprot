@@ -543,27 +543,56 @@ fn mctp_loop() -> Result<()> {
         match i2c.wait_for_messages(BusIndex::BUS_2, &mut msgs, None) {
             Ok(n) => {
                 for msg in msgs.get(..n).unwrap_or(&[]) {
-                    // Log the raw I2C frame before decode so we can confirm
-                    // the hardware actually delivered a well-formed SMBus frame.
-                    // Format: dest_addr cmd byte_count src_addr | MCTP hdr[0..3]
                     let raw = msg.data();
-                    if raw.len() >= 8 {
+
+                    // WORKAROUND: Manually prepend destination address to I2C frame.
+                    // The I2C hardware currently does NOT prepend the destination address,
+                    // but mctp-lib's I2C decoder expects it (needs full SMBus frame for PEC).
+                    // This will be fixed when the I2C driver is updated to prepend the
+                    // destination address automatically.
+                    // TODO: Remove this workaround once I2C driver change is in place.
+                    let mut frame_with_dest = [0u8; 256];
+                    if raw.len() + 1 > frame_with_dest.len() {
+                        pw_log::warn!(
+                            "I2C frame too large ({} bytes), skipping",
+                            raw.len() as u32,
+                        );
+                        continue;
+                    }
+
+                    // Prepend destination address (OWN_I2C_ADDR << 1 | 0 for write)
+                    frame_with_dest[0] = OWN_I2C_ADDR << 1;
+                    frame_with_dest[1..raw.len() + 1].copy_from_slice(raw);
+                    let frame_len = raw.len() + 1;
+
+                    // Log the frame AFTER prepending destination.
+                    // Format: dest_addr cmd byte_count src_addr | MCTP hdr[0..3]
+                    if frame_len >= 9 {
                         pw_log::info!(
-                            "I2C frame raw: dest=0x{:02x} cmd=0x{:02x} bc={} src=0x{:02x} \
+                            "I2C frame (with prepended dest): dest=0x{:02x} cmd=0x{:02x} bc={} src=0x{:02x} \
                             | mctp: ver=0x{:02x} deid=0x{:02x} seid=0x{:02x} flags=0x{:02x} \
                             len={}",
-                            raw[0] as u32, raw[1] as u32, raw[2] as u32, raw[3] as u32,
-                            raw[4] as u32, raw[5] as u32, raw[6] as u32, raw[7] as u32,
-                            raw.len() as u32,
+                            frame_with_dest[0] as u32, frame_with_dest[1] as u32,
+                            frame_with_dest[2] as u32, frame_with_dest[3] as u32,
+                            frame_with_dest[4] as u32, frame_with_dest[5] as u32,
+                            frame_with_dest[6] as u32, frame_with_dest[7] as u32,
+                            frame_len as u32,
                         );
                     } else {
                         pw_log::warn!(
                             "I2C frame too short ({} bytes) to contain MCTP header",
-                            raw.len() as u32,
+                            frame_len as u32,
                         );
                     }
 
-                    match receiver.decode(msg) {
+                    // Create a temporary TargetMessage with the prepended destination
+                    // byte so that MctpI2cEncap::decode sees a valid SMBus frame.
+                    let msg_with_dest = i2c_api::TargetMessage::from_data(
+                        msg.source_address,
+                        &frame_with_dest[..frame_len],
+                    );
+
+                    match receiver.decode(&msg_with_dest) {
                         Ok((pkt, hdr)) => {
                             i2c_pkt = i2c_pkt.wrapping_add(1);
                             // Log MCTP packet fields: SOM/EOM from flags byte (pkt[3])
