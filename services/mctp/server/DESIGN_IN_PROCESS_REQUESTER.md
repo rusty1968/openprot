@@ -329,7 +329,85 @@ if await_steps >= AWAIT_STEP_BUDGET {
 10k steps at the measured steady-state poll rate gives an order-of-magnitude
 wall-clock ceiling; the exact number is tunable once we measure.
 
-### 6.5 Interleaving constraints
+### 6.5 `await_try!` macro
+
+All three `Await*` states share identical retry logic: call
+`requester_process_message`, increment a counter on `Ok`, increment a
+different counter and check the budget on `Err`. Rather than duplicate that
+block three times, the implementation defines a `macro_rules!` inside the
+`#[cfg(feature = "in-process-requester")]` loop body:
+
+```rust
+macro_rules! await_try {
+    ($next:expr, $state_code:expr) => {{
+        msg_buf.reset();
+        match spdm_ctx.requester_process_message(&mut msg_buf) {
+            Ok(_) => {
+                req_recv_ok = req_recv_ok.wrapping_add(1);
+                await_steps = 0;          // reset budget for next Await state
+                req_state = $next;
+            }
+            Err(_) => {
+                req_recv_pending = req_recv_pending.wrapping_add(1);
+                await_steps = await_steps.wrapping_add(1);
+                if await_steps >= AWAIT_STEP_BUDGET {
+                    pw_log::error!(
+                        "SPDM requester: AWAIT_STEP_BUDGET exhausted in \
+                        state={} (steps={} pending_total={}) — giving up",
+                        $state_code as u32,
+                        await_steps as u32,
+                        req_recv_pending as u32,
+                    );
+                    req_state = ReqState::Failed;
+                }
+            }
+        }
+    }};
+}
+```
+
+**Parameters**
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `$next` | `ReqState` expr | State to transition to on `Ok` |
+| `$state_code` | `ReqState` expr | Current state, cast to `u32` in the timeout error log |
+
+**Behaviour**
+
+- `Ok(_)` path: increments `req_recv_ok`, **resets `await_steps` to 0**
+  (budget is per-state, not cumulative), transitions to `$next`.
+- `Err(_)` path: increments both `req_recv_pending` (total lifetime pending
+  count) and `await_steps` (consecutive steps in this Await state).
+  If `await_steps >= AWAIT_STEP_BUDGET` the macro logs the exhaustion
+  (including state name, step count, lifetime pending total) and transitions
+  to `ReqState::Failed`.
+
+**Scope note**: the macro is defined *inside* the loop body, after the
+variables it closes over (`msg_buf`, `spdm_ctx`, `req_state`, `req_recv_ok`,
+`req_recv_pending`, `await_steps`) are in scope. Rust resolves macro
+hygiene correctly here; the captured names are bound at the expansion
+call site, not at the macro definition site.
+
+**Call sites** (`src/main.rs`):
+
+```rust
+ReqState::AwaitVersion      => { await_try!(ReqState::SendCapabilities,  ReqState::AwaitVersion); }
+ReqState::AwaitCapabilities => { await_try!(ReqState::SendAlgorithms,    ReqState::AwaitCapabilities); }
+ReqState::AwaitAlgorithms   => { await_try!(ReqState::Done,              ReqState::AwaitAlgorithms); }
+```
+
+Each call site follows with an `if req_state == $next { pw_log::info!(...) }`
+check to log the successful state transition exactly once.
+
+**Why a macro rather than a function**: the loop body already borrows
+`spdm_ctx`, `msg_buf`, `req_state`, and the counters mutably at various
+points. A helper function would require all of these as `&mut` arguments
+(seven parameters), making the call sites noisier than the macro. An inner
+closure is also viable but has the same ergonomic cost. The macro is the
+idiomatic choice for this pattern in `no_std` Rust.
+
+### 6.6 Interleaving constraints
 
 The two-phase loop's interleaving of I2C draining and SPDM FSM steps is the
 mechanism that makes the design work — without Phase 1 pumping inbound
@@ -347,7 +425,7 @@ be safe and responsive:
 2. **Multi-fragment responses.** `wait_for_messages` reads at most one
    frame per call (`msgs: [TargetMessage; 1]`). A response that spans N
    MCTP fragments needs N Phase-1 iterations before Phase 2 can succeed,
-   so `AWAIT_STEP_BUDGET` (§6.4) must cover
+   so `AWAIT_STEP_BUDGET` (§6.4/§6.5) must cover
    `N × (I2C poll period)` for the largest expected message. The 10,000
    default is generous for VCA; recheck when GET_CERTIFICATE lands.
 
