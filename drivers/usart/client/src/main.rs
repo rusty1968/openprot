@@ -6,6 +6,7 @@
 use app_usart_client::handle;
 use usart_client::UsartClient;
 use userspace::entry;
+use userspace::syscall;
 
 #[entry]
 fn entry() -> ! {
@@ -21,9 +22,7 @@ fn entry() -> ! {
         Err(_) => pw_log::error!("USART client write failed"),
     }
 
-    let mut read_buf = [0u8; 16];
-    let _ = client.read(&mut read_buf);
-
+    let _ = syscall::debug_shutdown(Ok(()));
     loop {}
 }
 
