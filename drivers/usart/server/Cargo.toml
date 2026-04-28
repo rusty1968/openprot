@@ -1,0 +1,8 @@
+[package]
+name = "usart-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+usart-api = { path = "../api" }
+usart-backend-ast10x0 = { path = "../backend-ast10x0" }

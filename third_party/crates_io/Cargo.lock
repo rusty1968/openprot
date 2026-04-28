@@ -1218,6 +1218,7 @@ dependencies = [
  "tock-registers",
  "tokio",
  "tokio-util",
+ "vcell",
  "zerocopy",
  "zeroize",
 ]
