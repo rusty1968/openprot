@@ -1,0 +1,35 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_app")
+load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
+
+filegroup(
+    name = "system_config",
+    srcs = ["system.json5"],
+    visibility = ["//visibility:public"],
+)
+
+rust_app(
+    name = "mctp_server",
+    srcs = ["main.rs"],
+    codegen_crate_name = "app_mctp_server",
+    edition = "2024",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//services/mctp/server:mctp_server_lib",
+        "//services/i2c/api:i2c_api",
+        "//services/i2c/client:i2c_client",
+        "//services/mctp/api:mctp_api",
+        "//services/mctp/transport-i2c:mctp_transport_i2c",
+        "@rust_crates//:mctp",
+        "@rust_crates//:mctp-lib",
+        "@pigweed//pw_kernel/syscall:syscall_user",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+        "@pigweed//pw_status/rust:pw_status",
+    ],
+)
