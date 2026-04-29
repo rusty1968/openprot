@@ -1,0 +1,55 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 MCTP Server Configuration
+//
+// Single-app configuration for building the MCTP server runtime wrapper.
+// The process exposes:
+// - `mctp` channel handler for MCTP client requests
+// - `i2c` channel handle used by I2C client calls from the server
+// - `wg` wait group used by the server event loop
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 1280,
+    },
+    kernel: {
+        flash_start_address: 0x00000500,
+        flash_size_bytes: 129792,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "mctp_server",
+            flash_size_bytes: 262144,
+            processes: [
+                {
+                    name: "mctp_server_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "mctp",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "i2c",
+                            type: "channel_handler",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "mctp_server_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}
