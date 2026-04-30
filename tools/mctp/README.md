@@ -71,16 +71,16 @@ All Bazel commands **must be run from the repo root** — the directory containi
 cd /path/to/userspace_runtime   # repo root
 ```
 
-### Build the MCTP server image (without running)
-
-```bash
-bazel build //target/ast10x0/mctp/server:mctp_server
-```
-
-### Build the MCTP echo test image (internal app-to-app echo)
+### Build the bootable MCTP firmware image
 
 ```bash
 bazel build --config=virt_ast10x0 //target/ast10x0/tests/mctp_echo:mctp_echo_image
+```
+
+If you only want a compile check for the standalone userspace server app, build the generated app target instead:
+
+```bash
+bazel build --config=virt_ast10x0 //target/ast10x0/mctp/server:app_mctp_server
 ```
 
 ### Run the built-in MCTP echo test under QEMU
