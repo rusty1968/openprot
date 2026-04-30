@@ -4,6 +4,12 @@
 load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_app")
 load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 
+filegroup(
+    name = "system_config",
+    srcs = ["system.json5"],
+    visibility = ["//visibility:public"],
+)
+
 rust_app(
     name = "mctp_server",
     srcs = ["main.rs"],
