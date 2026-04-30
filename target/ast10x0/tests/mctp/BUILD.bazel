@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_app")
+load("@pigweed//pw_kernel/tooling:system_image.bzl", "system_image", "system_image_test")
 load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")
 load("@pigweed//pw_kernel/tooling:target_linker_script.bzl", "target_linker_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
@@ -48,46 +49,48 @@ rust_binary(
 )
 
 rust_app(
-    name = "mctp_server",
-    srcs = ["main.rs"],
-    codegen_crate_name = "app_mctp_server",
+    name = "mctp_server_boot",
+    srcs = ["server_main.rs"],
+    codegen_crate_name = "app_mctp_server_boot",
     edition = "2024",
     system_config = ":system_config",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    visibility = ["//visibility:public"],
     deps = [
-        "//target/ast10x0/serial:ast10x0_serial_direct",
-        "//target/ast10x0:userspace_runtime",
-        "//services/mctp/server:mctp_server_lib",
-        "//services/mctp/api:mctp_api",
-        "//services/mctp/transport-serial:mctp_transport_serial",
-        "@rust_crates//:mctp",
-        "@rust_crates//:mctp-lib",
-        "@rust_crates//:embedded-io",
-        "@pigweed//pw_kernel/syscall:syscall_user",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
-        "@pigweed//pw_status/rust:pw_status",
     ],
 )
 
 rust_app(
-    name = "mctp_echo",
-    srcs = ["mctp_echo.rs"],
-    codegen_crate_name = "app_mctp_echo",
+    name = "mctp_shutdown_app",
+    srcs = ["shutdown_main.rs"],
+    codegen_crate_name = "app_mctp_shutdown",
     edition = "2024",
     system_config = ":system_config",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    visibility = ["//visibility:public"],
     deps = [
-        "//services/mctp/api:mctp_api",
-        "//services/mctp/client:mctp_client",
-        "//target/ast10x0:userspace_runtime",
-        "@rust_crates//:mctp",
         "@pigweed//pw_kernel/userspace",
-        "@pigweed//pw_log/rust:pw_log",
-        "@pigweed//pw_status/rust:pw_status",
     ],
+)
+
+system_image(
+    name = "mctp_boot",
+    apps = [
+        ":mctp_server_boot",
+        ":mctp_shutdown_app",
+    ],
+    kernel = ":target",
+    platform = "//target/ast10x0",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+)
+
+system_image_test(
+    name = "mctp_boot_test",
+    image = ":mctp_boot",
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
 )

@@ -1,0 +1,62 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 MCTP Boot Smoke Test Configuration
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 1280,
+    },
+    kernel: {
+        flash_start_address: 0x00000500,
+        flash_size_bytes: 129792,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "mctp_server_boot",
+            flash_size_bytes: 32768,
+            processes: [
+                {
+                    name: "mctp_server_boot_process",
+                    ram_size_bytes: 16384,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "mctp",
+                            type: "channel_handler",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "mctp_server_boot_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "mctp_shutdown_app",
+            flash_size_bytes: 32768,
+            processes: [
+                {
+                    name: "mctp_shutdown_process",
+                    ram_size_bytes: 16384,
+                    objects: [],
+                    threads: [
+                        {
+                            name: "mctp_shutdown_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}

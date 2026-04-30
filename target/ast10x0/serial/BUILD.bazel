@@ -4,12 +4,42 @@
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 
+rust_library(
+    name = "ast10x0_serial_direct",
+    srcs = [
+        "src/lib.rs",
+        "src/direct.rs",
+        "src/ipc.rs",
+    ],
+    crate_name = "ast10x0_serial_direct",
+    edition = "2024",
+    rustc_flags = [
+        "--cfg",
+        "serial_direct",
+    ],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//services/mctp/transport-serial:mctp_transport_serial",
+        "//target/ast10x0/peripherals",
+        "@rust_crates//:embedded-io",
+    ],
+)
+
 # IPC-based serial implementation (microkernel USART driver)
 rust_library(
     name = "ast10x0_serial_ipc",
-    srcs = ["src/ipc.rs"],
+    srcs = [
+        "src/lib.rs",
+        "src/direct.rs",
+        "src/ipc.rs",
+    ],
     crate_name = "ast10x0_serial_ipc",
     edition = "2024",
+    rustc_flags = [
+        "--cfg",
+        "serial_ipc",
+    ],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     visibility = ["//visibility:public"],
     deps = [
@@ -19,9 +49,9 @@ rust_library(
     ],
 )
 
-# Default: use IPC variant (microkernel architecture)
+# Default: use direct HAL variant.
 alias(
     name = "ast10x0_serial",
-    actual = ":ast10x0_serial_ipc",
+    actual = ":ast10x0_serial_direct",
     visibility = ["//visibility:public"],
 )

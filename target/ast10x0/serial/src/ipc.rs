@@ -1,31 +1,67 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-//! AST10x0 IPC-based serial transport implementation.
-//!
-//! This module implements the `SerialPort` trait for the AST10x0 microkernel
-//! architecture, providing access to the userspace USART driver via IPC syscalls.
-
-use embedded_io::Write;
-use mctp::Result;
+use embedded_io::{Error, ErrorKind, ErrorType, Write};
 use openprot_mctp_transport_serial::{SerialError, SerialPort};
-use usart_client::UsartClient;
+use usart_client::{ClientError, UsartClient};
 
-impl SerialPort for UsartClient {
-    fn configure(&mut self, baud_rate: u32) -> Result<(), SerialError> {
-        self.configure(baud_rate).map_err(|_| SerialError::Io)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcSerialError {
+    Io,
+    Server,
+    InvalidResponse,
+    BufferTooSmall,
+}
+
+impl Error for IpcSerialError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
     }
 }
 
-impl Write for UsartClient {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, embedded_io::Error> {
-        self.write(buf)
-            .map_err(|_| embedded_io::Error::Other)
-            .map(|_| buf.len())
+/// IPC serial backend for AST10x0 userspace USART driver.
+pub struct Ast10x0IpcSerial {
+    client: UsartClient,
+}
+
+impl Ast10x0IpcSerial {
+    pub const fn new(handle: u32) -> Self {
+        Self {
+            client: UsartClient::new(handle),
+        }
     }
 
-    fn flush(&mut self) -> Result<(), embedded_io::Error> {
-        // USART driver handles write buffering; nothing to do locally
+    pub const fn from_client(client: UsartClient) -> Self {
+        Self { client }
+    }
+}
+
+impl ErrorType for Ast10x0IpcSerial {
+    type Error = IpcSerialError;
+}
+
+impl Write for Ast10x0IpcSerial {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.client.write(buf).map_err(|e| match e {
+            ClientError::IpcError(_) => IpcSerialError::Io,
+            ClientError::ServerError(_) => IpcSerialError::Server,
+            ClientError::InvalidResponse => IpcSerialError::InvalidResponse,
+            ClientError::BufferTooSmall => IpcSerialError::BufferTooSmall,
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+}
+
+impl SerialPort for Ast10x0IpcSerial {
+    fn configure(&mut self, baud_rate: u32) -> Result<(), SerialError> {
+        self.client.configure(baud_rate).map_err(|e| match e {
+            ClientError::IpcError(_) => SerialError::Io,
+            ClientError::ServerError(_) => SerialError::Invalid,
+            ClientError::InvalidResponse => SerialError::Invalid,
+            ClientError::BufferTooSmall => SerialError::Invalid,
+        })
     }
 }

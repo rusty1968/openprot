@@ -6,7 +6,7 @@
 // Single-app configuration for building the MCTP server runtime wrapper.
 // The process exposes:
 // - `mctp` channel handler for MCTP client requests
-// - `i2c` channel handle used by I2C client calls from the server
+// - `uart_irq` interrupt handle for serial RX notifications
 // - `wg` wait group used by the server event loop
 {
     arch: {
@@ -23,7 +23,7 @@
     apps: [
         {
             name: "mctp_server",
-            flash_size_bytes: 262144,
+            flash_size_bytes: 196608,
             processes: [
                 {
                     name: "mctp_server_process",
@@ -38,14 +38,52 @@
                             type: "channel_handler",
                         },
                         {
-                            name: "i2c",
-                            type: "channel_handler",
+                            name: "uart_irq",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "uart",
+                                    number: 8,
+                                },
+                            ],
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            name: "uart5",
+                            type: "device",
+                            start_address: 0x7e784000,
+                            size_bytes: 0x1000,
                         },
                     ],
                     threads: [
                         {
                             name: "mctp_server_thread",
                             kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "mctp_echo",
+            flash_size_bytes: 65536,
+            processes: [
+                {
+                    name: "mctp_echo_process",
+                    ram_size_bytes: 32768,
+                    objects: [
+                        {
+                            name: "mctp",
+                            type: "channel_initiator",
+                            handler_process: "mctp_server_process",
+                            handler_object_name: "mctp",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "mctp_echo_thread",
+                            kernel_stack_size_bytes: 2048,
                         },
                     ],
                 },

@@ -17,7 +17,5 @@ rust_library(
     visibility = ["//visibility:public"],
     deps = [
         "@rust_crates//:embedded-io",
-        "@rust_crates//:mctp",
-        "@rust_crates//:mctp-lib",
     ],
 )
