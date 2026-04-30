@@ -80,6 +80,17 @@ rust_library(
     deps = ["@pigweed//pw_kernel/config:kernel_config_interface"],
 )
 
+rust_library(
+    name = "userspace_runtime",
+    srcs = ["userspace_runtime.rs"],
+    crate_name = "ast10x0_userspace_runtime",
+    edition = "2024",
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        "@pigweed//pw_log/rust:pw_log",
+    ],
+)
+
 filegroup(
     name = "linker_script_template",
     srcs = ["target.ld.tmpl"],
