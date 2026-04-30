@@ -87,10 +87,18 @@ impl IpcMctpClient {
         if req_len > MAX_REQUEST_SIZE {
             return Err(MctpError::from_code(ResponseCode::InternalError));
         }
+        // Copy request to a local buffer to avoid split-borrow when passing
+        // both an immutable send slice and mutable receive slice from `inner`.
+        let req_copy = {
+            let inner = self.inner.borrow();
+            let mut buf = [0u8; MAX_REQUEST_SIZE];
+            buf[..req_len].copy_from_slice(&inner.request_buf[..req_len]);
+            buf
+        };
         let mut inner = self.inner.borrow_mut();
         userspace::syscall::channel_transact(
             self.handle,
-            &inner.request_buf[..req_len],
+            &req_copy[..req_len],
             &mut inner.response_buf,
             userspace::time::Instant::MAX,
         )
