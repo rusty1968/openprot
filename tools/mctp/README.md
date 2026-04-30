@@ -22,14 +22,91 @@ Use mctp-dev if you want a full MCTP control-protocol responder/initiator on the
 
 ## Prerequisites (Both Paths)
 
+### Bazelisk (required for firmware builds)
+
+Do **not** install the `bazel` apt package (`sudo apt install bazel-bootstrap`) — it is an old version that does not support Bzlmod (`MODULE.bazel`) and will fail with `WORKSPACE file not found`.
+
+This repo uses `bazelisk`, which reads `.bazelversion` and automatically downloads the correct Bazel version (8.5.1).
+
+```bash
+# Download bazelisk and install it as 'bazel' on PATH
+curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
+  -o /usr/local/bin/bazel && chmod +x /usr/local/bin/bazel
+```
+
+If you already installed `bazel-bootstrap` via apt, remove it first:
+
+```bash
+sudo apt remove bazel-bootstrap
+```
+
+Verify bazelisk is active:
+
+```bash
+bazel version
+# Should print: Bazel version 8.5.1 (or similar, downloaded by bazelisk)
+# Should NOT print: Build label: 5.x.x or earlier
+```
+
 ### QEMU
 - `qemu-system-arm` 8.0 or newer (must include `ast1030-evb` machine)
-- Knowledge of which UART your firmware uses for MCTP (default: UART5 for boot console, pick another like UART1 for MCTP)
+
+```bash
+sudo apt install qemu-system-arm
+qemu-system-arm --version  # must be 8.0 or newer
+```
 
 ### Host Tools
-- `socat` (for socket-to-PTY bridging)
-- `mctp-dev` (if using Path 1): `git clone https://github.com/CodeConstruct/mctp-dev && cd mctp-dev && cargo build --release`
-- `echo_linux` tool (this repo): Pre-built here
+- `socat` (for socket-to-PTY bridging): `sudo apt install socat`
+- `mctp-dev` (if using Path 2): `git clone https://github.com/CodeConstruct/mctp-dev && cd mctp-dev && cargo build --release`
+- `echo_linux` tool (this repo): built with `cargo run --manifest-path tools/mctp/echo_linux/Cargo.toml`
+
+---
+
+## Building the Firmware
+
+All Bazel commands **must be run from the repo root** — the directory containing `MODULE.bazel`. Running from a subdirectory will fail with `not within a workspace`.
+
+```bash
+cd /path/to/userspace_runtime   # repo root
+```
+
+### Build the MCTP server image (without running)
+
+```bash
+bazel build //target/ast10x0/mctp/server:mctp_server
+```
+
+### Build the MCTP echo test image (internal app-to-app echo)
+
+```bash
+bazel build --config=virt_ast10x0 //target/ast10x0/tests/mctp_echo:mctp_echo_image
+```
+
+### Run the built-in MCTP echo test under QEMU
+
+This is the fastest sanity check — no host tooling required:
+
+```bash
+bazel test --config=virt_ast10x0 //target/ast10x0/tests/mctp_echo:mctp_echo_test \
+  --test_output=streamed --test_timeout=10
+```
+
+### Build all AST10x0 targets
+
+```bash
+bazel build //target/ast10x0/...
+```
+
+### Run all AST10x0 tests under QEMU
+
+```bash
+bazel test --config=virt_ast10x0 //target/ast10x0/...
+```
+
+> The `--config=virt_ast10x0` flag selects the Pigweed QEMU runner using the `ast1030-evb` machine with semihosting. Without it, firmware-backed tests are skipped.
+
+The firmware ELF produced by the `mctp_echo_image` target is used as the `-kernel` argument in the QEMU commands below.
 
 ---
 
