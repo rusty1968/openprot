@@ -59,15 +59,18 @@ target-agnostic way.
 
 Operations are identified by a 1-byte opcode in `UsartRequestHeader` (8 bytes, `repr(C, packed)`):
 
+- `flags` low nibble carries protocol version (`0` currently).
+
 | Op | Value | Args |
 |---|---|---|
-| `Configure` | 0x01 | baud_rate split across `arg0`/`arg1` |
-| `Write` | 0x02 | payload bytes |
+| `Configure` | 0x01 | payload = `{ baud_rate: u32, parity: u8, stop_bits: u8, reserved: u16 }` |
+| `Write` | 0x02 | payload bytes (submitted, not guaranteed drained) |
 | `Read` | 0x03 | `arg0` = max bytes to read |
 | `GetLineStatus` | 0x04 | — |
 | `EnableInterrupts` | 0x05 | `arg0` = `IrqMask` bits — **server-internal**, not exposed by `UsartClient` |
 | `DisableInterrupts` | 0x06 | `arg0` = `IrqMask` bits — **server-internal**, not exposed by `UsartClient` |
 | `TryRead` | 0x07 | `arg0` = max bytes to read (non-blocking backend read with IRQ-assisted completion) |
+| `Drain` | 0x08 | wait for TX idle completion (IRQ-assisted) |
 
 `UsartResponseHeader` (4 bytes) carries a `UsartError` status code plus a payload length.
 All structures implement `zerocopy` traits for zero-copy serialization.
