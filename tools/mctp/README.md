@@ -56,6 +56,40 @@ sudo apt install qemu-system-arm
 qemu-system-arm --version  # must be 8.0 or newer
 ```
 
+If your distro package is too old or does not include `ast1030-evb`, build QEMU from source:
+
+```bash
+# Build dependencies (Ubuntu/Debian)
+sudo apt install -y \
+  git build-essential ninja-build meson pkg-config python3 \
+  libglib2.0-dev libpixman-1-dev zlib1g-dev
+
+# Clone and build QEMU (pick any tag >= 8.0)
+git clone https://gitlab.com/qemu-project/qemu.git
+cd qemu
+git checkout v8.2.4
+
+mkdir -p build
+cd build
+../configure --target-list=arm-softmmu --enable-slirp
+ninja -j"$(nproc)"
+
+# Optional install
+sudo ninja install
+```
+
+Verify the machine exists:
+
+```bash
+qemu-system-arm -machine help | grep ast1030-evb
+```
+
+If you did not install globally, use the built binary directly:
+
+```bash
+/path/to/qemu/build/qemu-system-arm --version
+```
+
 ### Host Tools
 - `socat` (for socket-to-PTY bridging): `sudo apt install socat`
 - `mctp-dev` (if using Path 2): `git clone https://github.com/CodeConstruct/mctp-dev && cd mctp-dev && cargo build --release`
