@@ -44,6 +44,7 @@ cortex-m-semihosting = "0.5.0"
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 embedded-hal-nb = "1.0"
+embedded-storage = "0.3"
 heapless = { version = "0.9", default-features = false }
 mctp = { git = "https://github.com/OpenPRoT/mctp-rs.git", branch = "sync-features", default-features = false }
 mctp-lib = { git = "https://github.com/9elements/mctp-lib.git", branch = "buildup" }
