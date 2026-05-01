@@ -98,16 +98,22 @@ pub fn dispatch_request<B: UsartBackend>(
                 }
                 Err(BackendError::WouldBlock) => {
                     // No data yet.  Attempt to park the request; fail with
-                    // Timeout if another TryRead is already pending — UART RX
+                    // Busy if another TryRead is already pending — UART RX
                     // is a single stream and cannot serve two concurrent
                     // consumers.
                     if !pending.park(client_channel, req_len) {
                         return DispatchOutcome::Respond(encode_error(
                             response,
-                            UsartError::Timeout,
+                            UsartError::Busy,
                         ));
                     }
-                    let _ = backend.enable_interrupts(IrqMask::RX_DATA_AVAILABLE);
+
+                    // If we cannot arm RX interrupts, do not leave a parked
+                    // request behind; fail this transaction immediately.
+                    if let Err(e) = backend.enable_interrupts(IrqMask::RX_DATA_AVAILABLE) {
+                        let _ = pending.take();
+                        return DispatchOutcome::Respond(encode_error(response, e.into()));
+                    }
                     DispatchOutcome::Queued
                 }
                 Err(e) => DispatchOutcome::Respond(encode_error(response, e.into())),
@@ -146,4 +152,127 @@ fn encode_success(response: &mut [u8], payload: &[u8]) -> usize {
     response[UsartResponseHeader::SIZE..UsartResponseHeader::SIZE + payload.len()]
         .copy_from_slice(payload);
     UsartResponseHeader::SIZE + payload.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use usart_api::backend::{LineStatus, Parity, UsartConfig};
+
+    struct MockBackend {
+        try_read_result: Result<usize, BackendError>,
+        enable_irq_result: Result<(), BackendError>,
+    }
+
+    impl Default for MockBackend {
+        fn default() -> Self {
+            Self {
+                try_read_result: Ok(0),
+                enable_irq_result: Ok(()),
+            }
+        }
+    }
+
+    impl UsartBackend for MockBackend {
+        fn configure(&mut self, _config: UsartConfig) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn write(&mut self, data: &[u8]) -> Result<usize, BackendError> {
+            Ok(data.len())
+        }
+
+        fn read(&mut self, _out: &mut [u8]) -> Result<usize, BackendError> {
+            Err(BackendError::WouldBlock)
+        }
+
+        fn try_read(&mut self, _out: &mut [u8]) -> Result<usize, BackendError> {
+            self.try_read_result
+        }
+
+        fn line_status(&self) -> Result<LineStatus, BackendError> {
+            Ok(LineStatus(0))
+        }
+
+        fn enable_interrupts(&mut self, _mask: IrqMask) -> Result<(), BackendError> {
+            self.enable_irq_result
+        }
+
+        fn disable_interrupts(&mut self, _mask: IrqMask) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn parse_status(resp: &[u8]) -> Option<UsartError> {
+        zerocopy::Ref::<_, UsartResponseHeader>::from_bytes(&resp[..UsartResponseHeader::SIZE])
+            .ok()
+            .map(|hdr| hdr.error_code())
+    }
+
+    #[test]
+    fn try_read_returns_busy_when_already_pending() {
+        let mut backend = MockBackend {
+            try_read_result: Err(BackendError::WouldBlock),
+            enable_irq_result: Ok(()),
+        };
+        let mut pending = runtime::PendingRead::new();
+        let _ = pending.park(99, 16);
+
+        let hdr = UsartRequestHeader::new(UsartOp::TryRead, 16, 0, 0);
+        let mut req = [0u8; UsartRequestHeader::SIZE];
+        req.copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        let mut resp = [0u8; MAX_RESPONSE_SIZE];
+
+        let outcome = dispatch_request(&mut backend, &mut pending, 42, &req, &mut resp);
+        assert!(matches!(outcome, DispatchOutcome::Respond(_)));
+        if let DispatchOutcome::Respond(n) = outcome {
+            assert_eq!(n, UsartResponseHeader::SIZE);
+            assert_eq!(parse_status(&resp), Some(UsartError::Busy));
+        }
+    }
+
+    #[test]
+    fn try_read_enable_interrupt_failure_does_not_leave_pending() {
+        let mut backend = MockBackend {
+            try_read_result: Err(BackendError::WouldBlock),
+            enable_irq_result: Err(BackendError::InternalError),
+        };
+        let mut pending = runtime::PendingRead::new();
+
+        let hdr = UsartRequestHeader::new(UsartOp::TryRead, 16, 0, 0);
+        let mut req = [0u8; UsartRequestHeader::SIZE];
+        req.copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        let mut resp = [0u8; MAX_RESPONSE_SIZE];
+
+        let outcome = dispatch_request(&mut backend, &mut pending, 42, &req, &mut resp);
+        assert!(matches!(outcome, DispatchOutcome::Respond(_)));
+        if let DispatchOutcome::Respond(n) = outcome {
+            assert_eq!(n, UsartResponseHeader::SIZE);
+            assert_eq!(parse_status(&resp), Some(UsartError::InternalError));
+            assert!(!pending.is_pending());
+        }
+    }
+
+    #[test]
+    fn configure_path_still_succeeds() {
+        let mut backend = MockBackend::default();
+        let mut pending = runtime::PendingRead::new();
+        let _ = UsartConfig {
+            baud_rate: 115200,
+            parity: Parity::None,
+            stop_bits: 1,
+        };
+
+        let hdr = UsartRequestHeader::new(UsartOp::Configure, 115200u32 as u16, (115200u32 >> 16) as u16, 0);
+        let mut req = [0u8; UsartRequestHeader::SIZE];
+        req.copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        let mut resp = [0u8; MAX_RESPONSE_SIZE];
+
+        let outcome = dispatch_request(&mut backend, &mut pending, 7, &req, &mut resp);
+        assert!(matches!(outcome, DispatchOutcome::Respond(_)));
+        if let DispatchOutcome::Respond(n) = outcome {
+            assert_eq!(n, UsartResponseHeader::SIZE);
+            assert_eq!(parse_status(&resp), Some(UsartError::Success));
+        }
+    }
 }

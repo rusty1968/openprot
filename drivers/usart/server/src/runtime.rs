@@ -1,7 +1,7 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-use usart_api::backend::{IrqMask, UsartBackend};
+use usart_api::backend::{BackendError, IrqMask, UsartBackend};
 use usart_api::{UsartResponseHeader};
 use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
@@ -108,13 +108,25 @@ pub fn run<B: UsartBackend>(backend: &mut B, wg: u32, irq: u32, irq_signals: Sig
                             .copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
                         UsartResponseHeader::SIZE + n
                     }
-                    Err(e) => {
-                        // Still not ready (shouldn't happen after IRQ, but handle gracefully).
+                    Err(BackendError::WouldBlock) => {
+                        // Still not ready (possible if IRQ fired but FIFO drained elsewhere).
                         // Re-arm and re-park with the original size.
-                        let _ = backend.enable_interrupts(IrqMask::RX_DATA_AVAILABLE);
-                        pending.park(client_channel, req_size);
-                        let _ = e; // suppress
-                        continue;
+                        if backend.enable_interrupts(IrqMask::RX_DATA_AVAILABLE).is_ok()
+                            && pending.park(client_channel, req_size)
+                        {
+                            continue;
+                        }
+
+                        let hdr = UsartResponseHeader::error(usart_api::UsartError::InternalError);
+                        response_buf[..UsartResponseHeader::SIZE]
+                            .copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+                        UsartResponseHeader::SIZE
+                    }
+                    Err(e) => {
+                        let hdr = UsartResponseHeader::error(e.into());
+                        response_buf[..UsartResponseHeader::SIZE]
+                            .copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+                        UsartResponseHeader::SIZE
                     }
                 };
 

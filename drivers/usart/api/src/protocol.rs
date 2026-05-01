@@ -12,7 +12,13 @@ pub enum UsartOp {
     Write = 0x02,
     Read = 0x03,
     GetLineStatus = 0x04,
+    /// **Server-internal.** Arms the hardware RX/TX interrupt source.
+    /// Not part of the public `UsartClient` API; called by the server
+    /// dispatcher automatically when managing `TryRead` completion.
     EnableInterrupts = 0x05,
+    /// **Server-internal.** Disarms the hardware RX/TX interrupt source.
+    /// Not part of the public `UsartClient` API; called by the server
+    /// dispatcher automatically when managing `TryRead` completion.
     DisableInterrupts = 0x06,
     /// Non-blocking read attempt.  Returns data immediately if available;
     /// the server queues the request and completes it when the RX IRQ fires
