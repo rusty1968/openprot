@@ -144,6 +144,46 @@ Use this section as an append-only log.
 - Test command + result:
 - Notes/risk:
 
+---
+
+- Date: 2026-05-02
+- Req ID(s): DEV-PAR-001
+- RED test added: `target/ast10x0/tests/smc/target_device_qemu_multi_cs_capacity.rs`
+  (target `//target/ast10x0/tests/smc:smc_device_qemu_multi_cs_capacity_test`,
+  tag `integration`).
+- Commit hashes:
+  - RED: `f6025a9` — `test(smc/device): add RED test for DEV-PAR-001 per-CS capacity`
+  - GREEN: `f38f5e8` — `feat(smc/device): per-CS capacity validation (DEV-PAR-001)`
+  - REFACTOR: skipped — `cs_config` has only two call sites
+    (`SpiNorFlash::from_fmc_cs`, `SpiNorFlash::from_spi_cs`); the plan's
+    "more than two callers" trigger for hoisting `cs_capacity_bytes` was
+    not met.
+- Build command + result:
+  - `bazelisk build --platforms=//target/ast10x0 //target/ast10x0/tests/smc:smc`
+    → `Build completed successfully`.
+- Test command + result:
+  - `bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/tests/smc:smc_device_qemu_multi_cs_capacity_test //target/ast10x0/tests/smc:smc_device_qemu_multi_cs_test //target/ast10x0/tests/smc:smc_device_qemu_program_erase_test //target/ast10x0/tests/smc:smc_device_test`
+    → all 4 PASS.
+  - Pre-GREEN run of the RED target alone: `FAILED in 0.5s` (asserted
+    failure on assertions 1 & 3 of the new test, where the constructor
+    rejects a correctly-sized per-CS config because it compares
+    against CS0+CS1 total).
+  - Post-GREEN sanity: `bazelisk test //target/ast10x0/peripherals:smc_flash_encoding_test`
+    → PASS (host stub `host_flash_mod.rs` updated to expose `cs_config`).
+- Notes/risk:
+  - Deviation from plan §3.1.5: `cs_capacity_bytes` helper in
+    `helpers.rs` was *not* added in WP-1 because no GREEN call site
+    needs it — `validate_capacity_cfg` uses the controller's
+    `cs_config(cs)` accessor and compares full `FlashConfig` equality
+    via the new `PartialEq`/`Eq` derive. WP-2 (DEV-PAR-002/003) will
+    add `cs_capacity_bytes` when its `device_to_controller_offset`
+    helper introduces a real caller.
+  - `validate_capacity_cfg` now compares whole-`FlashConfig` rather
+    than `capacity_mb` alone (plan suggested either is fine). Stricter:
+    catches drift between init-time `SmcConfig.cs*` and facade-time
+    `FlashConfig` in page/sector/clock fields too.
+  - Status: PASS.
+
 ## 8. Exit Criteria
 
 Plan is complete when:
