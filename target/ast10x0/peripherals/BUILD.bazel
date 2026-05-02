@@ -55,3 +55,23 @@ rust_test(
         "@rust_crates//:nb",
     ],
 )
+
+rust_test(
+    name = "smc_flash_encoding_test",
+    srcs = [
+        "flash_host_test.rs",
+        "smc/host_flash_mod.rs",
+        "smc/device/flash.rs",
+        "smc/helpers.rs",
+        "smc/types.rs",
+    ],
+    crate_root = "flash_host_test.rs",
+    edition = "2024",
+    rustc_flags = [
+        "-Adead_code",
+    ],
+    deps = [
+        "@rust_crates//:embedded-storage",
+        "@rust_crates//:nb",
+    ],
+)

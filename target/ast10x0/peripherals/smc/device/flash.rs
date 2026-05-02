@@ -6,7 +6,7 @@
 use crate::smc::fmc::FmcReady;
 use crate::smc::helpers::flash_capacity_bytes;
 use crate::smc::spi::SpiReady;
-use crate::smc::types::{AddressWidth, FlashConfig, SmcError, TransferMode};
+use crate::smc::types::{AddressWidth, ChipSelect, FlashConfig, SmcError, TransferMode};
 
 /// Build a command byte array: opcode followed by address bytes selected by
 /// `width`. Returns a fixed-size buffer and the valid length.
@@ -81,24 +81,38 @@ pub struct SpiNorFlash<'a> {
     backend: FlashBackend<'a>,
     // Validated metadata for Phase 3B alignment/policy checks.
     cfg: FlashConfig,
+    /// Chip select this flash device sits on.
+    cs: ChipSelect,
 }
 
 impl<'a> SpiNorFlash<'a> {
     /// Build a flash facade from an initialized FMC controller wrapper.
     pub fn from_fmc(fmc: &'a mut FmcReady, cfg: FlashConfig) -> Result<Self, SmcError> {
+        Self::from_fmc_cs(fmc, cfg, ChipSelect::Cs0)
+    }
+
+    /// Build a flash facade from an initialized FMC controller wrapper with explicit CS.
+    pub fn from_fmc_cs(fmc: &'a mut FmcReady, cfg: FlashConfig, cs: ChipSelect) -> Result<Self, SmcError> {
         Self::validate_capacity_cfg(cfg, fmc.capacity_bytes()?)?;
         Ok(Self {
             backend: FlashBackend::Fmc(fmc),
             cfg,
+            cs,
         })
     }
 
     /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper.
     pub fn from_spi(spi: &'a mut SpiReady, cfg: FlashConfig) -> Result<Self, SmcError> {
+        Self::from_spi_cs(spi, cfg, ChipSelect::Cs0)
+    }
+
+    /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper with explicit CS.
+    pub fn from_spi_cs(spi: &'a mut SpiReady, cfg: FlashConfig, cs: ChipSelect) -> Result<Self, SmcError> {
         Self::validate_capacity_cfg(cfg, spi.capacity_bytes()?)?;
         Ok(Self {
             backend: FlashBackend::Spi(spi),
             cfg,
+            cs,
         })
     }
 
@@ -139,20 +153,22 @@ impl<'a> SpiNorFlash<'a> {
     }
 
     fn issue_command(&mut self, _cmd: &[u8], _payload: &[u8]) -> Result<(), SmcError> {
+        let cs = self.cs;
         match &self.backend {
-            FlashBackend::Fmc(fmc) => fmc.transceive_user(_cmd, _payload, &mut [], TransferMode::Mode111),
-            FlashBackend::Spi(spi) => spi.transceive_user(_cmd, _payload, &mut [], TransferMode::Mode111),
+            FlashBackend::Fmc(fmc) => fmc.transceive_user(cs, _cmd, _payload, &mut [], TransferMode::Mode111),
+            FlashBackend::Spi(spi) => spi.transceive_user(cs, _cmd, _payload, &mut [], TransferMode::Mode111),
         }
     }
 
     fn read_status_impl(&self) -> Result<u8, SmcError> {
+        let cs = self.cs;
         let mut status = [0u8; 1];
         match &self.backend {
             FlashBackend::Fmc(fmc) => {
-                fmc.transceive_user(&[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
+                fmc.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
             }
             FlashBackend::Spi(spi) => {
-                spi.transceive_user(&[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
+                spi.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
             }
         }
         Ok(status[0])
@@ -217,5 +233,32 @@ impl FlashDevice for SpiNorFlash<'_> {
 
     fn status(&self) -> Result<u8, SmcError> {
         self.read_status_impl()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_addr_cmd;
+    use crate::smc::types::AddressWidth;
+
+    #[test]
+    fn encode_addr_cmd_none_emits_opcode_only() {
+        let (buf, len) = encode_addr_cmd(0x06, 0x1234_5678, AddressWidth::None);
+        assert_eq!(len, 1);
+        assert_eq!(&buf[..len], &[0x06]);
+    }
+
+    #[test]
+    fn encode_addr_cmd_three_byte_emits_low_24_bits() {
+        let (buf, len) = encode_addr_cmd(0x20, 0x1234_5678, AddressWidth::ThreeByte);
+        assert_eq!(len, 4);
+        assert_eq!(&buf[..len], &[0x20, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn encode_addr_cmd_four_byte_emits_full_32_bits() {
+        let (buf, len) = encode_addr_cmd(0x13, 0x1234_5678, AddressWidth::FourByte);
+        assert_eq!(len, 5);
+        assert_eq!(&buf[..len], &[0x13, 0x12, 0x34, 0x56, 0x78]);
     }
 }
