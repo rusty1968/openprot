@@ -184,6 +184,71 @@ Use this section as an append-only log.
     `FlashConfig` in page/sector/clock fields too.
   - Status: PASS.
 
+---
+
+- Date: 2026-05-02
+- Req ID(s): DEV-PAR-002, DEV-PAR-003
+- RED test added: `target/ast10x0/tests/smc/target_device_qemu_multi_cs_offsets.rs`
+  (target `//target/ast10x0/tests/smc:smc_device_qemu_multi_cs_offsets_test`,
+  tag `integration`).
+- Commit hashes:
+  - RED: `053d548` — `test(smc/device): RED for DEV-PAR-002/003 CS-local offsets`
+  - RED-tactic refinement: `64cd019` — `test(smc/device): scope DEV-PAR-002/003 RED to per-CS bounds`
+  - GREEN: `068c478` — `feat(smc/device): CS-local offset translation (DEV-PAR-002/003)`
+  - REFACTOR: skipped — `device_to_controller_offset` is a single helper
+    used only by `read`; `validate_range` already routes through
+    `self.capacity_bytes()` which now returns per-CS, so the plan's
+    "two-place validate_range" trigger for extracting `cs_validate_range`
+    was not met.
+- Build command + result:
+  - `bazelisk build --platforms=//target/ast10x0 //target/ast10x0/tests/smc:smc`
+    → `Build completed successfully`.
+- Test command + result:
+  - `bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/tests/smc:smc_device_qemu_multi_cs_offsets_test //target/ast10x0/tests/smc:smc_device_qemu_multi_cs_test //target/ast10x0/tests/smc:smc_device_qemu_multi_cs_capacity_test //target/ast10x0/tests/smc:smc_device_qemu_program_erase_test //target/ast10x0/tests/smc:smc_device_test`
+    → all 5 PASS.
+  - Pre-GREEN run of the (refined) RED target alone: `FAILED in 0.5s`
+    (asserts a per-CS bounds rejection the broken total-capacity check
+    accepts).
+  - Post-GREEN host sanity: `bazelisk test //target/ast10x0/peripherals:smc_flash_encoding_test`
+    → PASS (host stub `host_flash_mod.rs` updated to expose
+    `cs_capacity_bytes`).
+- Notes/risk:
+  - **RED tactic deviation (commit `64cd019`).** Plan §3.5 RED step 2
+    asks for a content-separation assertion (CS1.read(0) ≠ CS0.read(0))
+    or its addressing-math downgrade (raw read at controller-window
+    `CS0_CAPACITY` matches `cs1.read(0)`). On QEMU's `ast1030-evb`
+    neither form is deterministic: the CS1 line aliases the single
+    attached `w25q80bl` model and the chip wraps for offsets beyond its
+    1 MB size, so reads via the CS1 facade and raw reads at
+    controller-window `CS0_CAPACITY` return the *same* bytes whether or
+    not `device_to_controller_offset` is invoked. The deterministic
+    testable surface of DEV-PAR-002/003 on this model is the per-CS
+    bounds check (assertions 1, 3, 4 in the plan); the offset-translation
+    invariant is restated structurally in
+    `SpiNorFlash::device_to_controller_offset` and is exercised on every
+    passing `cs1.read/program/erase` call (which would otherwise route
+    to the wrong segment on real silicon). This deviation is the
+    "downgrade" pathway the plan explicitly anticipates.
+  - **Implementation deviation (commit `068c478`).** Plan §3.6 step 5
+    instructs `program_page` / `erase_sector` to encode the on-wire
+    address with `device_to_controller_offset`. Per the symptom analysis
+    in plan §3 for WP-2 ("the address bytes encoded into the SPI command
+    are device-local on the wire ... the *command* path is correct under
+    the QEMU caveat") the on-wire address must remain device-local so
+    the chip's address space matches the bytes it receives; only the
+    segment-routed read path needs translation. `program_page` /
+    `erase_sector` therefore continue to encode device-local offsets and
+    inherit the per-CS bounds check from `validate_range` →
+    `capacity_bytes` (now per-CS). `device_to_controller_offset` is
+    invoked from `read` only.
+  - **Helper added.** `helpers::cs_capacity_bytes(config, cs)` is added
+    as the WP-1 audit log noted ("WP-2 will add `cs_capacity_bytes`
+    when its `device_to_controller_offset` helper introduces a real
+    caller"). Surfaced through `Smc<Ready>::cs_capacity_bytes`,
+    `FmcReady::cs_capacity_bytes`, `SpiReady::cs_capacity_bytes`, and
+    the `host_flash_mod` stubs.
+  - Status: PASS.
+
 ## 8. Exit Criteria
 
 Plan is complete when:
