@@ -41,10 +41,14 @@ pub struct Smc<Mode> {
     controller_id: SmcController,
     config: SmcConfig,
     state: SmcState,
-    /// Pre-computed CS0 normal-read control register value stored at init time.
-    /// Restored unconditionally after every user-mode transaction, matching
-    /// aspeed-rust's `deactivate_user()` behavior.
-    normal_read_ctrl: u32,
+    /// Per-CS normal-read control register values stored at init time.
+    /// Indexed by `ChipSelect as usize`. Restored unconditionally after every
+    /// user-mode transaction, matching aspeed-rust `deactivate_user()` behavior.
+    normal_read_ctrl: [u32; 2],
+    /// Per-CS AHB flash window base addresses.
+    /// CS0 starts at `controller_id.flash_window_address()`;
+    /// CS1 starts immediately after the CS0 segment.
+    flash_window_base: [usize; 2],
     _mode: PhantomData<fn() -> Mode>,
 }
 
@@ -75,7 +79,8 @@ impl Smc<Uninitialized> {
             controller_id: config.controller_id,
             config,
             state: SmcState::Ready,
-            normal_read_ctrl: 0,
+            normal_read_ctrl: [0; 2],
+            flash_window_base: [0; 2],
             _mode: PhantomData,
         })
     }
@@ -112,16 +117,23 @@ impl Smc<Uninitialized> {
             });
         }
 
-        // Snapshot the CS0 normal-read control register after all init writes.
-        // This value is restored unconditionally after every user-mode transaction.
-        let normal_read_ctrl = self.regs.read_cs0_ctrl();
+        // Snapshot per-CS normal-read control register values after all init writes.
+        // CS1 value is captured even if cs1 is None (safe: register read is harmless).
+        let cs0_normal_read = self.regs.read_cs0_ctrl();
+        let cs1_normal_read = self.regs.read_cs1_ctrl();
+
+        // Compute per-CS AHB flash window base addresses.
+        let base = self.controller_id.flash_window_address();
+        let cs0_size = flash_capacity_bytes(self.config.cs0).unwrap_or(0);
+        let flash_window_base = [base, base + cs0_size];
 
         Ok(Smc {
             regs: self.regs,
             controller_id: self.controller_id,
             config: self.config,
             state: SmcState::Ready,
-            normal_read_ctrl,
+            normal_read_ctrl: [cs0_normal_read, cs1_normal_read],
+            flash_window_base,
             _mode: PhantomData,
         })
     }
@@ -234,6 +246,7 @@ impl Smc<Ready> {
     /// `spi_nor_transceive_user()`.
     pub fn transceive_user(
         &self,
+        cs: ChipSelect,
         cmd: &[u8],
         tx_payload: &[u8],
         rx: &mut [u8],
@@ -242,39 +255,43 @@ impl Smc<Ready> {
         if self.state != SmcState::Ready {
             return Err(SmcError::ControllerNotReady);
         }
+        if cs == ChipSelect::Cs1 && self.config.cs1.is_none() {
+            return Err(SmcError::InvalidChipSelect);
+        }
 
+        let cs_idx = cs as usize;
         // Derive user-mode base from the stored normal-read value: preserve
         // frequency bits and replace mode type with ASPEED_SPI_USER.
-        let user_base = (self.normal_read_ctrl & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
-        let window = self.controller_id.flash_window_address() as *mut u32;
+        let user_base = (self.normal_read_ctrl[cs_idx] & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
+        let window = self.flash_window_base[cs_idx] as *mut u32;
 
         // Assert CS: inactive first, then active (matches aspeed-rust activate_user).
-        self.regs.write_cs0_ctrl(user_base | ASPEED_SPI_USER_INACTIVE);
-        self.regs.write_cs0_ctrl(user_base);
+        self.regs.write_cs_ctrl(cs, user_base | ASPEED_SPI_USER_INACTIVE);
+        self.regs.write_cs_ctrl(cs, user_base);
 
         // SAFETY: user mode is active; the flash aperture is the hardware-defined
         // byte-stream port for SPI command traffic while user mode is held.
         unsafe {
             // Command phase — always single-wire.
             let cmd_ctrl = (user_base & SPI_CTRL_IO_MODE_MASK) | mode.cmd_io_bits();
-            self.regs.write_cs0_ctrl(cmd_ctrl);
+            self.regs.write_cs_ctrl(cs, cmd_ctrl);
             spi_write_data(window, cmd);
 
             // Address / TX payload phase.
             let addr_ctrl = (user_base & SPI_CTRL_IO_MODE_MASK) | mode.addr_io_bits();
-            self.regs.write_cs0_ctrl(addr_ctrl);
+            self.regs.write_cs_ctrl(cs, addr_ctrl);
             spi_write_data(window, tx_payload);
 
             // RX data phase.
             let data_ctrl = (user_base & SPI_CTRL_IO_MODE_MASK) | mode.data_io_bits();
-            self.regs.write_cs0_ctrl(data_ctrl);
+            self.regs.write_cs_ctrl(cs, data_ctrl);
             spi_read_data(window as *const u32, rx);
         }
 
         // Deassert CS, then restore the pre-computed normal-read configuration
         // (matches aspeed-rust deactivate_user restoring cmd_mode[cs].normal_read).
-        self.regs.write_cs0_ctrl(user_base | ASPEED_SPI_USER_INACTIVE);
-        self.regs.write_cs0_ctrl(self.normal_read_ctrl);
+        self.regs.write_cs_ctrl(cs, user_base | ASPEED_SPI_USER_INACTIVE);
+        self.regs.write_cs_ctrl(cs, self.normal_read_ctrl[cs_idx]);
         Ok(())
     }
 }

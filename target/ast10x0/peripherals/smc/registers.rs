@@ -104,6 +104,22 @@ impl SmcRegisters {
         self.regs().fmc014().write(|w| unsafe { w.bits(value) });
     }
 
+    /// Dispatch CS control register read by index.
+    pub fn read_cs_ctrl(&self, cs: crate::smc::types::ChipSelect) -> u32 {
+        match cs {
+            crate::smc::types::ChipSelect::Cs0 => self.read_cs0_ctrl(),
+            crate::smc::types::ChipSelect::Cs1 => self.read_cs1_ctrl(),
+        }
+    }
+
+    /// Dispatch CS control register write by index.
+    pub fn write_cs_ctrl(&self, cs: crate::smc::types::ChipSelect, value: u32) {
+        match cs {
+            crate::smc::types::ChipSelect::Cs0 => self.write_cs0_ctrl(value),
+            crate::smc::types::ChipSelect::Cs1 => self.write_cs1_ctrl(value),
+        }
+    }
+
     /// FMC030: CS0 segment register (memory mapping)
     pub fn read_cs0_segment(&self) -> u32 {
         self.regs().fmc030().read().bits()

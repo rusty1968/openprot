@@ -30,6 +30,18 @@ pub enum SmcError {
     ControllerNotReady,
 }
 
+/// Chip select index for a controller that may have multiple attached devices.
+///
+/// Matches aspeed-rust's per-CS indexing. Use `Cs0` for single-device
+/// controllers; `Cs1` requires `SmcConfig.cs1` to be populated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChipSelect {
+    /// Primary chip select (CS0) — always valid when any flash is configured.
+    Cs0 = 0,
+    /// Secondary chip select (CS1) — valid only when `SmcConfig.cs1.is_some()`.
+    Cs1 = 1,
+}
+
 impl NorFlashError for SmcError {
     fn kind(&self) -> NorFlashErrorKind {
         NorFlashErrorKind::Other

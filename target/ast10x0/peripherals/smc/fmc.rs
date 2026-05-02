@@ -4,7 +4,7 @@
 //! FMC-specialized wrapper around the generic SMC controller.
 
 use crate::smc::controller::{ReadySmc, UninitSmc};
-use crate::smc::types::{SmcConfig, SmcController, SmcError};
+use crate::smc::types::{ChipSelect, SmcConfig, SmcController, SmcError, TransferMode};
 
 /// FMC handle before hardware initialization.
 pub struct FmcUninit {
@@ -57,18 +57,30 @@ impl FmcReady {
         self.inner.capacity_bytes()
     }
 
-    /// Execute a raw user-mode SPI transfer on the FMC CS0 aperture.
+    /// Execute a raw user-mode SPI transfer on the selected FMC chip select.
     ///
-    /// `mode` controls the per-phase IO width written to the CS control register.
-    /// Use `TransferMode::Mode111` for standard single-wire SPI NOR commands.
+    /// `cs` selects CS0 or CS1; `mode` controls the per-phase IO width.
+    /// Returns `SmcError::InvalidChipSelect` if CS1 is requested but not configured.
     pub fn transceive_user(
+        &self,
+        cs: ChipSelect,
+        cmd: &[u8],
+        tx_payload: &[u8],
+        rx: &mut [u8],
+        mode: TransferMode,
+    ) -> Result<(), SmcError> {
+        self.inner.transceive_user(cs, cmd, tx_payload, rx, mode)
+    }
+
+    /// Convenience wrapper: execute a user-mode transfer on CS0.
+    pub fn transceive_user_cs0(
         &self,
         cmd: &[u8],
         tx_payload: &[u8],
         rx: &mut [u8],
-        mode: crate::smc::types::TransferMode,
+        mode: TransferMode,
     ) -> Result<(), SmcError> {
-        self.inner.transceive_user(cmd, tx_payload, rx, mode)
+        self.inner.transceive_user(ChipSelect::Cs0, cmd, tx_payload, rx, mode)
     }
 
     /// Access the underlying generic ready controller.
