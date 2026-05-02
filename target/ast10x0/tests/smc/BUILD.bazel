@@ -370,3 +370,50 @@ system_image_test(
     ],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
 )
+
+# ── CS-local offset semantics (DEV-PAR-002 + DEV-PAR-003) ────────────────────
+# Verifies SpiNorFlash::{read,program_page,erase_sector} on a CS1 facade use
+# per-CS capacity bounds and translate device-local offsets to per-CS
+# controller-window addresses (not aliasing CS0).
+# Tagged "integration": QEMU-only.
+#   bazelisk test --config=virt_ast10x0 --test_tag_filters= \
+#     //target/ast10x0/tests/smc:smc_device_qemu_multi_cs_offsets_test
+
+rust_binary(
+    name = "target_device_qemu_multi_cs_offsets",
+    srcs = ["target_device_qemu_multi_cs_offsets.rs"],
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        ":linker_script",
+        "//target/ast10x0:entry",
+        "//target/ast10x0/peripherals",
+        "@pigweed//pw_kernel/arch/arm_cortex_m:arch_arm_cortex_m",
+        "@pigweed//pw_kernel/kernel",
+        "@pigweed//pw_kernel/subsys/console:console_backend",
+        "@pigweed//pw_kernel/target:target_common",
+        "@pigweed//pw_log/rust:pw_log",
+        "@rust_crates//:cortex-m-semihosting",
+    ],
+)
+
+system_image(
+    name = "smc_device_qemu_multi_cs_offsets",
+    kernel = ":target_device_qemu_multi_cs_offsets",
+    platform = "//target/ast10x0",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    userspace = False,
+)
+
+system_image_test(
+    name = "smc_device_qemu_multi_cs_offsets_test",
+    image = ":smc_device_qemu_multi_cs_offsets",
+    tags = [
+        "kernel",
+        "integration",  # excluded by k_common; QEMU-only
+    ],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+)
