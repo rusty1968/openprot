@@ -238,6 +238,15 @@ impl Smc<Ready> {
         total_capacity_bytes(self.config.cs0, self.config.cs1)
     }
 
+    /// Return configured flash capacity in bytes for the given chip select.
+    ///
+    /// Returns `SmcError::InvalidChipSelect` if the slot was not populated
+    /// at construction time. Used by the device facade to bounds-check
+    /// per-CS reads and to compute per-CS controller-window offsets.
+    pub fn cs_capacity_bytes(&self, cs: ChipSelect) -> Result<usize, SmcError> {
+        crate::smc::helpers::cs_capacity_bytes(&self.config, cs)
+    }
+
     /// Return the configured `FlashConfig` for the requested chip select.
     ///
     /// Returns `SmcError::InvalidChipSelect` if the slot was not populated at
