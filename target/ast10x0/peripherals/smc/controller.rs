@@ -204,4 +204,9 @@ impl Smc<Ready> {
     pub fn controller_id(&self) -> SmcController {
         self.controller_id
     }
+
+    /// Return configured total flash capacity for this controller in bytes.
+    pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
+        total_capacity_bytes(self.config.cs0, self.config.cs1)
+    }
 }

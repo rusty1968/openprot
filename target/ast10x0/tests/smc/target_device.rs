@@ -55,7 +55,7 @@ fn run_device_smoke_test() -> Result<(), SmcError> {
     }
 
     // --- 2. Build SpiNorFlash facade from FmcReady ---
-    let flash = SpiNorFlash::from_fmc(&mut fmc, FLASH_CFG);
+    let flash = SpiNorFlash::from_fmc(&mut fmc, FLASH_CFG)?;
 
     // --- 3. capacity_bytes ---
     let cap = flash.capacity_bytes()?;

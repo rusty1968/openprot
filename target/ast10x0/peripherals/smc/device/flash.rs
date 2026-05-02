@@ -25,28 +25,31 @@ enum FlashBackend<'a> {
 /// Wrapper-aware SPI NOR flash facade.
 pub struct SpiNorFlash<'a> {
     backend: FlashBackend<'a>,
-    cfg: FlashConfig,
 }
 
 impl<'a> SpiNorFlash<'a> {
     /// Build a flash facade from an initialized FMC controller wrapper.
-    pub fn from_fmc(fmc: &'a mut FmcReady, cfg: FlashConfig) -> Self {
-        Self {
+    pub fn from_fmc(fmc: &'a mut FmcReady, cfg: FlashConfig) -> Result<Self, SmcError> {
+        Self::validate_capacity_cfg(cfg, fmc.capacity_bytes()?)?;
+        Ok(Self {
             backend: FlashBackend::Fmc(fmc),
-            cfg,
-        }
+        })
     }
 
     /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper.
-    pub fn from_spi(spi: &'a mut SpiReady, cfg: FlashConfig) -> Self {
-        Self {
+    pub fn from_spi(spi: &'a mut SpiReady, cfg: FlashConfig) -> Result<Self, SmcError> {
+        Self::validate_capacity_cfg(cfg, spi.capacity_bytes()?)?;
+        Ok(Self {
             backend: FlashBackend::Spi(spi),
-            cfg,
-        }
+        })
     }
 
-    fn capacity_from_config(cfg: FlashConfig) -> Result<usize, SmcError> {
-        flash_capacity_bytes(Some(cfg))
+    fn validate_capacity_cfg(cfg: FlashConfig, controller_capacity: usize) -> Result<(), SmcError> {
+        let cfg_capacity = flash_capacity_bytes(Some(cfg))?;
+        if cfg_capacity != controller_capacity {
+            return Err(SmcError::InvalidCapacity);
+        }
+        Ok(())
     }
 }
 
@@ -59,6 +62,9 @@ impl FlashDevice for SpiNorFlash<'_> {
     }
 
     fn capacity_bytes(&self) -> Result<usize, SmcError> {
-        Self::capacity_from_config(self.cfg)
+        match &self.backend {
+            FlashBackend::Fmc(fmc) => fmc.capacity_bytes(),
+            FlashBackend::Spi(spi) => spi.capacity_bytes(),
+        }
     }
 }

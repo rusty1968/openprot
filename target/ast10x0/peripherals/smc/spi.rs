@@ -57,6 +57,11 @@ impl SpiReady {
         self.inner.is_ready()
     }
 
+    /// Return configured flash capacity in bytes.
+    pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
+        self.inner.capacity_bytes()
+    }
+
     /// Access the underlying generic ready controller.
     pub fn as_inner(&self) -> &ReadySmc {
         &self.inner
