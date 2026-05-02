@@ -6,7 +6,7 @@
 use crate::smc::fmc::FmcReady;
 use crate::smc::helpers::flash_capacity_bytes;
 use crate::smc::spi::SpiReady;
-use crate::smc::types::{FlashConfig, SmcError};
+use crate::smc::types::{FlashConfig, SmcError, TransferMode};
 
 /// Minimal read-only flash device API.
 pub trait FlashDevice {
@@ -106,8 +106,8 @@ impl<'a> SpiNorFlash<'a> {
 
     fn issue_command(&mut self, _cmd: &[u8], _payload: &[u8]) -> Result<(), SmcError> {
         match &self.backend {
-            FlashBackend::Fmc(fmc) => fmc.transceive_user(_cmd, _payload, &mut []),
-            FlashBackend::Spi(spi) => spi.transceive_user(_cmd, _payload, &mut []),
+            FlashBackend::Fmc(fmc) => fmc.transceive_user(_cmd, _payload, &mut [], TransferMode::Mode111),
+            FlashBackend::Spi(spi) => spi.transceive_user(_cmd, _payload, &mut [], TransferMode::Mode111),
         }
     }
 
@@ -115,10 +115,10 @@ impl<'a> SpiNorFlash<'a> {
         let mut status = [0u8; 1];
         match &self.backend {
             FlashBackend::Fmc(fmc) => {
-                fmc.transceive_user(&[commands::READ_STATUS], &[], &mut status)?
+                fmc.transceive_user(&[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
             }
             FlashBackend::Spi(spi) => {
-                spi.transceive_user(&[commands::READ_STATUS], &[], &mut status)?
+                spi.transceive_user(&[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
             }
         }
         Ok(status[0])

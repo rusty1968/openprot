@@ -49,6 +49,54 @@ impl From<SmcRetryable> for nb::Error<SmcError> {
     }
 }
 
+/// SPI bus transfer mode encoding the width of each phase (cmd-addr-data).
+///
+/// Matches the mode naming convention used by JESD216 and aspeed-rust.
+/// The IO mode bits written to the CS control register per phase are derived
+/// from this value by `TransferMode::cmd_io_bits()`, `addr_io_bits()`, and
+/// `data_io_bits()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferMode {
+    /// Single-wire command, address, and data (standard SPI)
+    Mode111,
+    /// Single-wire command and address, dual-wire data
+    Mode112,
+    /// Single-wire command, dual-wire address and data
+    Mode122,
+    /// Single-wire command and address, quad-wire data
+    Mode114,
+    /// Single-wire command, quad-wire address and data
+    Mode144,
+}
+
+impl TransferMode {
+    /// IO mode bits for the command phase (bits [29:28] of CS ctrl register).
+    #[must_use]
+    pub const fn cmd_io_bits(self) -> u32 {
+        // Command phase is always single-wire across all supported modes.
+        0x0000_0000
+    }
+
+    /// IO mode bits for the address phase.
+    #[must_use]
+    pub const fn addr_io_bits(self) -> u32 {
+        match self {
+            Self::Mode111 | Self::Mode112 | Self::Mode114 => 0x0000_0000,
+            Self::Mode122 | Self::Mode144 => 0x2000_0000,
+        }
+    }
+
+    /// IO mode bits for the data phase.
+    #[must_use]
+    pub const fn data_io_bits(self) -> u32 {
+        match self {
+            Self::Mode111 => 0x0000_0000,
+            Self::Mode112 | Self::Mode122 => 0x2000_0000,
+            Self::Mode114 | Self::Mode144 => 0x4000_0000,
+        }
+    }
+}
+
 /// SMC Controller identifier
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmcController {

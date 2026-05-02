@@ -23,6 +23,9 @@ enum SmcState {
 
 const ASPEED_SPI_USER: u32 = 0x3;
 const ASPEED_SPI_USER_INACTIVE: u32 = 0x4;
+/// Mask for bits that are not IO mode or mode-type fields — preserves
+/// frequency divisor and other config bits across per-phase ctrl writes.
+const SPI_CTRL_IO_MODE_MASK: u32 = !0x7000_0000;
 
 /// Type-state marker: controller is constructed but not initialized.
 pub struct Uninitialized;
@@ -214,27 +217,52 @@ impl Smc<Ready> {
     }
 
     /// Execute a raw user-mode SPI transfer on CS0 for this controller.
-    pub fn transceive_user(&self, cmd: &[u8], tx_payload: &[u8], rx: &mut [u8]) -> Result<(), SmcError> {
+    ///
+    /// The `mode` parameter controls the IO width written to the CS control
+    /// register for each phase (cmd / addr+payload / rx), matching the
+    /// per-phase register update pattern used by aspeed-rust's
+    /// `spi_nor_transceive_user()`.
+    pub fn transceive_user(
+        &self,
+        cmd: &[u8],
+        tx_payload: &[u8],
+        rx: &mut [u8],
+        mode: TransferMode,
+    ) -> Result<(), SmcError> {
         if self.state != SmcState::Ready {
             return Err(SmcError::HardwareError);
         }
 
         let normal_ctrl = self.regs.read_cs0_ctrl();
-        let user_ctrl = (normal_ctrl & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
+        // Base user-mode value: preserve frequency bits, set user-mode type.
+        let user_base = (normal_ctrl & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
         let window = self.controller_id.flash_window_address() as *mut u32;
 
-        self.regs.write_cs0_ctrl(user_ctrl | ASPEED_SPI_USER_INACTIVE);
-        self.regs.write_cs0_ctrl(user_ctrl);
+        // Assert CS: inactive first, then active (matches aspeed-rust activate_user).
+        self.regs.write_cs0_ctrl(user_base | ASPEED_SPI_USER_INACTIVE);
+        self.regs.write_cs0_ctrl(user_base);
 
-        // SAFETY: user mode is active for this controller and the flash aperture
-        // is the hardware-defined data port for serialized SPI command traffic.
+        // SAFETY: user mode is active; the flash aperture is the hardware-defined
+        // byte-stream port for SPI command traffic while user mode is held.
         unsafe {
+            // Command phase — always single-wire.
+            let cmd_ctrl = (user_base & SPI_CTRL_IO_MODE_MASK) | mode.cmd_io_bits();
+            self.regs.write_cs0_ctrl(cmd_ctrl);
             spi_write_data(window, cmd);
+
+            // Address / TX payload phase.
+            let addr_ctrl = (user_base & SPI_CTRL_IO_MODE_MASK) | mode.addr_io_bits();
+            self.regs.write_cs0_ctrl(addr_ctrl);
             spi_write_data(window, tx_payload);
+
+            // RX data phase.
+            let data_ctrl = (user_base & SPI_CTRL_IO_MODE_MASK) | mode.data_io_bits();
+            self.regs.write_cs0_ctrl(data_ctrl);
             spi_read_data(window as *const u32, rx);
         }
 
-        self.regs.write_cs0_ctrl(user_ctrl | ASPEED_SPI_USER_INACTIVE);
+        // Deassert CS, then restore normal-read configuration.
+        self.regs.write_cs0_ctrl(user_base | ASPEED_SPI_USER_INACTIVE);
         self.regs.write_cs0_ctrl(normal_ctrl);
         Ok(())
     }

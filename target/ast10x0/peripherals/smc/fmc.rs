@@ -58,8 +58,17 @@ impl FmcReady {
     }
 
     /// Execute a raw user-mode SPI transfer on the FMC CS0 aperture.
-    pub fn transceive_user(&self, cmd: &[u8], tx_payload: &[u8], rx: &mut [u8]) -> Result<(), SmcError> {
-        self.inner.transceive_user(cmd, tx_payload, rx)
+    ///
+    /// `mode` controls the per-phase IO width written to the CS control register.
+    /// Use `TransferMode::Mode111` for standard single-wire SPI NOR commands.
+    pub fn transceive_user(
+        &self,
+        cmd: &[u8],
+        tx_payload: &[u8],
+        rx: &mut [u8],
+        mode: crate::smc::types::TransferMode,
+    ) -> Result<(), SmcError> {
+        self.inner.transceive_user(cmd, tx_payload, rx, mode)
     }
 
     /// Access the underlying generic ready controller.
