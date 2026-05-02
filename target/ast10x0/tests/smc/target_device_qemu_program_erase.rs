@@ -9,13 +9,14 @@
 //! 2. Verify programmed bytes.
 //! 3. Erase the containing sector.
 //! 4. Verify erased bytes (0xFF).
+//! 5. Verify mapped-read path remains functional after raw user-mode traffic.
 
 #![no_std]
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    FlashConfig, FlashDevice, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
-    TransferMode,
+    ChipSelect, FlashConfig, FlashDevice, FmcUninit, SmcConfig, SmcController, SmcError,
+    SpiNorFlash, TransferMode,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
@@ -41,12 +42,12 @@ const FLASH_CFG: FlashConfig = FlashConfig {
 
 fn read_status_raw(fmc: &ast10x0_peripherals::smc::FmcReady) -> Result<u8, SmcError> {
     let mut sr = [0u8; 1];
-    fmc.transceive_user(&[CMD_READ_STATUS], &[], &mut sr, TransferMode::Mode111)?;
+    fmc.transceive_user(ChipSelect::Cs0, &[CMD_READ_STATUS], &[], &mut sr, TransferMode::Mode111)?;
     Ok(sr[0])
 }
 
 fn issue_wren_raw(fmc: &ast10x0_peripherals::smc::FmcReady) -> Result<(), SmcError> {
-    fmc.transceive_user(&[CMD_WRITE_ENABLE], &[], &mut [], TransferMode::Mode111)
+    fmc.transceive_user(ChipSelect::Cs0, &[CMD_WRITE_ENABLE], &[], &mut [], TransferMode::Mode111)
 }
 
 fn issue_page_program_raw(
@@ -56,13 +57,13 @@ fn issue_page_program_raw(
 ) -> Result<(), SmcError> {
     let addr = offset.to_be_bytes();
     let cmd = [CMD_PAGE_PROGRAM, addr[1], addr[2], addr[3]];
-    fmc.transceive_user(&cmd, data, &mut [], TransferMode::Mode111)
+    fmc.transceive_user(ChipSelect::Cs0, &cmd, data, &mut [], TransferMode::Mode111)
 }
 
 fn issue_sector_erase_raw(fmc: &ast10x0_peripherals::smc::FmcReady, offset: u32) -> Result<(), SmcError> {
     let addr = offset.to_be_bytes();
     let cmd = [CMD_ERASE_SECTOR_4K, addr[1], addr[2], addr[3]];
-    fmc.transceive_user(&cmd, &[], &mut [], TransferMode::Mode111)
+    fmc.transceive_user(ChipSelect::Cs0, &cmd, &[], &mut [], TransferMode::Mode111)
 }
 
 fn wait_wip_clear_raw(fmc: &ast10x0_peripherals::smc::FmcReady, max_polls: u32) -> Result<u8, SmcError> {
@@ -133,6 +134,14 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
     issue_sector_erase_raw(&fmc, raw_test_offset)?;
     let sr_after_se = wait_wip_clear_raw(&fmc, 10_000)?;
     if (sr_after_se & STATUS_WIP_BIT) != 0 {
+        return Err(SmcError::HardwareError);
+    }
+
+    // Invariant: after raw user-mode transactions, controller must have
+    // restored normal-read mode so mapped reads still work.
+    let mut mapped_probe = [0u8; 16];
+    let read_len = fmc.read(raw_test_offset, &mut mapped_probe)?;
+    if read_len != mapped_probe.len() {
         return Err(SmcError::HardwareError);
     }
 
