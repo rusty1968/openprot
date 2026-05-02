@@ -31,6 +31,27 @@ The following externally-visible behavior is the parity spec:
 5. Device command flow: WREN, RDSR polling, program, erase, verify.
 6. Multi-CS routing: CS0/CS1 select correct ctrl register + AHB window.
 
+## Functional Matrix (aspeed-rust vs reference SMC)
+
+| Capability | aspeed-rust | reference SMC | Validation / Evidence |
+|---|---|---|---|
+| Raw user-mode transceive primitive | Supported | Supported | `ReadySmc::transceive_user` in `smc/controller.rs`; QEMU transport tests |
+| Per-phase IO mode register writes (cmd/addr/data) | Supported | Supported | `TransferMode` mapping + per-phase writes; `smc_device_qemu_multi_cs_test` |
+| Normal-read restore after user-mode transaction | Supported | Supported | Invariant asserted in `target_device_qemu_program_erase.rs`; `smc_device_qemu_program_erase_test` |
+| Address width selection (`None/3B/4B`) | Supported | Supported | `encode_addr_cmd` tests in `smc_flash_encoding_test` |
+| CS0 routing | Supported | Supported | Raw transport and device flow tests |
+| CS1 routing | Supported (controller-dependent) | Supported | `smc_device_qemu_multi_cs_test` |
+| Invalid CS guard | Supported | Supported | `SmcError::InvalidChipSelect`; `smc_device_qemu_multi_cs_test` |
+| Not-ready transport error specificity | Supported (state-gated behavior) | Supported | `SmcError::ControllerNotReady`; `smc_error_granularity_test` |
+| WREN/WIP status flow | Supported | Supported | `target_device_qemu_program_erase.rs`; `smc_device_qemu_program_erase_test` |
+| Page program / sector erase / verify path | Supported | Supported | `SpiNorFlash` integration on QEMU |
+| Multi-CS facade constructors for higher-level device selection | Supported via controller model | Supported (`from_fmc_cs` / `from_spi_cs`) | `smc/device/flash.rs` + multi-CS test |
+| Silicon timing/frequency/pin-mux realism | Supported on silicon | Not yet validated on silicon | QEMU only; hardware bring-up pending |
+
+Legend:
+- Supported: implemented and validated by tests listed in this plan.
+- Not yet validated on silicon: behavior confirmed in QEMU and code review, but not yet proven on physical target.
+
 ## Existing Coverage (Baseline)
 
 Already in tree:

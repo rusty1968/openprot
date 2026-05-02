@@ -60,8 +60,15 @@ The following tests were run and passed on QEMU (`--config=virt_ast10x0`):
 
 ## Scope Notes / Limitations
 
-1. Transport is currently CS0-oriented in practice.
-- This matches the current facade constructors and test usage.
+1. Multi-CS command routing — COMPLETED.
+- `ChipSelect` enum (`Cs0` / `Cs1`) added to `types.rs` and re-exported.
+- `transceive_user` accepts `cs: ChipSelect`; routes CS control register
+	writes and AHB window pointer through per-CS arrays stored at init time.
+- `InvalidChipSelect` returned when CS1 requested but `config.cs1` is `None`.
+- `transceive_user_cs0` convenience wrapper preserves the old CS0-only call pattern.
+- `SpiNorFlash` gains `cs` field and `from_fmc_cs` / `from_spi_cs` constructors.
+- `smc_device_qemu_multi_cs_test` (QEMU/integration) verifies CS0+CS1 dispatch
+	and `InvalidChipSelect` rejection.
 
 2. Error signaling — COMPLETED.
 - `SmcError::ControllerNotReady` variant added; returned by `transceive_user`
@@ -121,12 +128,9 @@ explicitly, matching aspeed-rust's selection pattern.
 
 ## Next Recommended Step
 
-All three aspeed-rust faithfulness gaps are resolved. Remaining transport
-gaps from the `Scope Notes / Limitations` section:
+All transport gaps from the `Scope Notes / Limitations` section are now resolved.
 
-1. **Multi-CS command routing** — transport is currently CS0-only. Once
-   multi-CS facade constructors are added, `transceive_user` will need a `cs`
-   parameter and matching CS control register selection.
+Remaining item (bring-up, not a code change):
 
-3. **Silicon validation** — QEMU confirms functional command sequencing but
-   does not model timing, frequency, or pin-mux constraints.
+- **Silicon validation** — QEMU confirms functional command sequencing but
+  does not model timing, frequency, or pin-mux constraints.
