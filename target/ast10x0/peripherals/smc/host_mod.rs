@@ -1,7 +1,8 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-#![no_std]
+#[path = "types.rs"]
+pub mod types;
 
-pub mod uart;
-pub mod smc;
+#[path = "helpers.rs"]
+pub mod helpers;

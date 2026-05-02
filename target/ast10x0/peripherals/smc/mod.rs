@@ -1,0 +1,20 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+//! Static Memory Controller (SMC) HAL
+//!
+//! Provides safe abstractions over the FMC (Firmware Memory Controller)
+//! and SPI1/SPI2 flash controllers.
+
+pub mod registers;
+pub mod types;
+mod helpers;
+pub mod controller;
+pub mod interrupts;
+
+pub use types::{SmcError, SmcController, FlashConfig, SmcConfig, SmcRetryable};
+pub use controller::{Ready, ReadySmc, Smc, UninitSmc, Uninitialized};
+pub use interrupts::{SmcInterrupt, SmcInterruptDecoder};
+
+/// Result type for SMC operations
+pub type Result<T> = core::result::Result<T, SmcError>;

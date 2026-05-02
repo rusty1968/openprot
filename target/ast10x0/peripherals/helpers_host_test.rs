@@ -1,7 +1,7 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-#![no_std]
+#[path = "smc/host_mod.rs"]
+mod smc;
 
-pub mod uart;
-pub mod smc;
+fn main() {}
