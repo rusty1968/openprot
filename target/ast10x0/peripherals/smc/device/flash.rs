@@ -74,8 +74,8 @@ pub mod commands {
 /// `chunk` bytes. `read(offset, dst)` fills `dst` with bytes at the given
 /// device-local offset. Returns `Ok(true)` on full equality, `Ok(false)` on the
 /// first mismatch, and propagates any error from `read`. Bounded scratch use:
-/// the comparison is performed in 256-byte stack-resident chunks regardless of
-/// `expected.len()`.
+/// the comparison is performed in stack-resident chunks (`chunk` bytes, capped
+/// at 256) regardless of `expected.len()`.
 fn compare_chunked<F>(
     mut read: F,
     offset: u32,
@@ -86,12 +86,23 @@ where
     F: FnMut(u32, &mut [u8]) -> Result<usize, SmcError>,
 {
     let mut scratch = [0u8; 256];
-    if expected.len() > scratch.len() || expected.len() > chunk {
+    let step = core::cmp::min(chunk, scratch.len());
+    if step == 0 {
         return Err(SmcError::InvalidCapacity);
     }
-    let n = expected.len();
-    read(offset, &mut scratch[..n])?;
-    Ok(scratch[..n] == *expected)
+    let mut cursor = 0usize;
+    while cursor < expected.len() {
+        let n = core::cmp::min(step, expected.len() - cursor);
+        let chunk_offset = offset
+            .checked_add(cursor as u32)
+            .ok_or(SmcError::InvalidCapacity)?;
+        read(chunk_offset, &mut scratch[..n])?;
+        if scratch[..n] != expected[cursor..cursor + n] {
+            return Ok(false);
+        }
+        cursor += n;
+    }
+    Ok(true)
 }
 
 enum FlashBackend<'a> {
