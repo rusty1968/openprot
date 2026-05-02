@@ -41,6 +41,10 @@ pub struct Smc<Mode> {
     controller_id: SmcController,
     config: SmcConfig,
     state: SmcState,
+    /// Pre-computed CS0 normal-read control register value stored at init time.
+    /// Restored unconditionally after every user-mode transaction, matching
+    /// aspeed-rust's `deactivate_user()` behavior.
+    normal_read_ctrl: u32,
     _mode: PhantomData<fn() -> Mode>,
 }
 
@@ -71,6 +75,7 @@ impl Smc<Uninitialized> {
             controller_id: config.controller_id,
             config,
             state: SmcState::Ready,
+            normal_read_ctrl: 0,
             _mode: PhantomData,
         })
     }
@@ -107,11 +112,16 @@ impl Smc<Uninitialized> {
             });
         }
 
+        // Snapshot the CS0 normal-read control register after all init writes.
+        // This value is restored unconditionally after every user-mode transaction.
+        let normal_read_ctrl = self.regs.read_cs0_ctrl();
+
         Ok(Smc {
             regs: self.regs,
             controller_id: self.controller_id,
             config: self.config,
             state: SmcState::Ready,
+            normal_read_ctrl,
             _mode: PhantomData,
         })
     }
@@ -233,9 +243,9 @@ impl Smc<Ready> {
             return Err(SmcError::HardwareError);
         }
 
-        let normal_ctrl = self.regs.read_cs0_ctrl();
-        // Base user-mode value: preserve frequency bits, set user-mode type.
-        let user_base = (normal_ctrl & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
+        // Derive user-mode base from the stored normal-read value: preserve
+        // frequency bits and replace mode type with ASPEED_SPI_USER.
+        let user_base = (self.normal_read_ctrl & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
         let window = self.controller_id.flash_window_address() as *mut u32;
 
         // Assert CS: inactive first, then active (matches aspeed-rust activate_user).
@@ -261,9 +271,10 @@ impl Smc<Ready> {
             spi_read_data(window as *const u32, rx);
         }
 
-        // Deassert CS, then restore normal-read configuration.
+        // Deassert CS, then restore the pre-computed normal-read configuration
+        // (matches aspeed-rust deactivate_user restoring cmd_mode[cs].normal_read).
         self.regs.write_cs0_ctrl(user_base | ASPEED_SPI_USER_INACTIVE);
-        self.regs.write_cs0_ctrl(normal_ctrl);
+        self.regs.write_cs0_ctrl(self.normal_read_ctrl);
         Ok(())
     }
 }

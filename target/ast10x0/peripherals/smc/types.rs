@@ -49,7 +49,32 @@ impl From<SmcRetryable> for nb::Error<SmcError> {
     }
 }
 
-/// SPI bus transfer mode encoding the width of each phase (cmd-addr-data).
+/// Address width used when assembling SPI NOR command byte streams.
+///
+/// Matches aspeed-rust's `AddressWidth` enum. The device layer uses this when
+/// building opcode+address slices for `transceive_user`, ensuring the correct
+/// number of address bytes is emitted rather than relying on implicit slicing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressWidth {
+    /// No address bytes (e.g. WREN, RDSR).
+    None,
+    /// 24-bit (3-byte) address — standard for ≤16 MB devices.
+    ThreeByte,
+    /// 32-bit (4-byte) address — required for >16 MB devices.
+    FourByte,
+}
+
+impl AddressWidth {
+    /// Number of address bytes this variant represents.
+    #[must_use]
+    pub const fn byte_count(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::ThreeByte => 3,
+            Self::FourByte => 4,
+        }
+    }
+}
 ///
 /// Matches the mode naming convention used by JESD216 and aspeed-rust.
 /// The IO mode bits written to the CS control register per phase are derived

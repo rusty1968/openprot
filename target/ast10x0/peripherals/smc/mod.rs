@@ -15,7 +15,7 @@ pub mod spi;
 pub mod interrupts;
 pub mod device;
 
-pub use types::{SmcError, SmcController, FlashConfig, SmcConfig, SmcRetryable, TransferMode};
+pub use types::{SmcError, SmcController, FlashConfig, SmcConfig, SmcRetryable, TransferMode, AddressWidth};
 pub use controller::{Ready, ReadySmc, Smc, UninitSmc, Uninitialized};
 pub use fmc::{FmcReady, FmcUninit};
 pub use spi::{SpiReady, SpiUninit};

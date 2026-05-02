@@ -6,7 +6,41 @@
 use crate::smc::fmc::FmcReady;
 use crate::smc::helpers::flash_capacity_bytes;
 use crate::smc::spi::SpiReady;
-use crate::smc::types::{FlashConfig, SmcError, TransferMode};
+use crate::smc::types::{AddressWidth, FlashConfig, SmcError, TransferMode};
+
+/// Build a command byte array: opcode followed by address bytes selected by
+/// `width`. Returns a fixed-size buffer and the valid length.
+///
+/// The caller slices `&buf[..len]` to get the exact command bytes.
+/// This mirrors aspeed-rust's explicit `AddressWidth` selection rather than
+/// relying on implicit `to_be_bytes()[1..]` slicing.
+fn encode_addr_cmd(opcode: u8, offset: u32, width: AddressWidth) -> ([u8; 5], usize) {
+    let be = offset.to_be_bytes();
+    match width {
+        AddressWidth::None => {
+            let mut buf = [0u8; 5];
+            buf[0] = opcode;
+            (buf, 1)
+        }
+        AddressWidth::ThreeByte => {
+            let mut buf = [0u8; 5];
+            buf[0] = opcode;
+            buf[1] = be[1];
+            buf[2] = be[2];
+            buf[3] = be[3];
+            (buf, 4)
+        }
+        AddressWidth::FourByte => {
+            let mut buf = [0u8; 5];
+            buf[0] = opcode;
+            buf[1] = be[0];
+            buf[2] = be[1];
+            buf[3] = be[2];
+            buf[4] = be[3];
+            (buf, 5)
+        }
+    }
+}
 
 /// Minimal read-only flash device API.
 pub trait FlashDevice {
@@ -156,9 +190,8 @@ impl FlashDevice for SpiNorFlash<'_> {
         self.validate_sector_erase(offset)?;
 
         self.issue_command(&[commands::WRITE_ENABLE], &[])?;
-        let addr = offset.to_be_bytes();
-        let cmd = [commands::ERASE_SECTOR_4K, addr[1], addr[2], addr[3]];
-        self.issue_command(&cmd, &[])?;
+        let (cmd, len) = encode_addr_cmd(commands::ERASE_SECTOR_4K, offset, AddressWidth::ThreeByte);
+        self.issue_command(&cmd[..len], &[])?;
         self.wait_write_complete(10_000)
     }
 
@@ -166,9 +199,8 @@ impl FlashDevice for SpiNorFlash<'_> {
         self.validate_page_program(offset, data)?;
 
         self.issue_command(&[commands::WRITE_ENABLE], &[])?;
-        let addr = offset.to_be_bytes();
-        let cmd = [commands::PAGE_PROGRAM, addr[1], addr[2], addr[3]];
-        self.issue_command(&cmd, data)?;
+        let (cmd, len) = encode_addr_cmd(commands::PAGE_PROGRAM, offset, AddressWidth::ThreeByte);
+        self.issue_command(&cmd[..len], data)?;
         self.wait_write_complete(10_000)?;
         Ok(data.len())
     }
