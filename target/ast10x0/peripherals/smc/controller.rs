@@ -21,6 +21,9 @@ enum SmcState {
     Error,
 }
 
+const ASPEED_SPI_USER: u32 = 0x3;
+const ASPEED_SPI_USER_INACTIVE: u32 = 0x4;
+
 /// Type-state marker: controller is constructed but not initialized.
 pub struct Uninitialized;
 
@@ -208,5 +211,68 @@ impl Smc<Ready> {
     /// Return configured total flash capacity for this controller in bytes.
     pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
         total_capacity_bytes(self.config.cs0, self.config.cs1)
+    }
+
+    /// Execute a raw user-mode SPI transfer on CS0 for this controller.
+    pub fn transceive_user(&self, cmd: &[u8], tx_payload: &[u8], rx: &mut [u8]) -> Result<(), SmcError> {
+        if self.state != SmcState::Ready {
+            return Err(SmcError::HardwareError);
+        }
+
+        let normal_ctrl = self.regs.read_cs0_ctrl();
+        let user_ctrl = (normal_ctrl & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_USER;
+        let window = self.controller_id.flash_window_address() as *mut u32;
+
+        self.regs.write_cs0_ctrl(user_ctrl | ASPEED_SPI_USER_INACTIVE);
+        self.regs.write_cs0_ctrl(user_ctrl);
+
+        // SAFETY: user mode is active for this controller and the flash aperture
+        // is the hardware-defined data port for serialized SPI command traffic.
+        unsafe {
+            spi_write_data(window, cmd);
+            spi_write_data(window, tx_payload);
+            spi_read_data(window as *const u32, rx);
+        }
+
+        self.regs.write_cs0_ctrl(user_ctrl | ASPEED_SPI_USER_INACTIVE);
+        self.regs.write_cs0_ctrl(normal_ctrl);
+        Ok(())
+    }
+}
+
+unsafe fn spi_read_data(ahb_addr: *const u32, read_arr: &mut [u8]) {
+    let len = read_arr.len();
+    let mut index = 0usize;
+
+    while index + 4 <= len {
+        let word = unsafe { core::ptr::read_volatile(ahb_addr.add(index / 4)) };
+        read_arr[index..index + 4].copy_from_slice(&word.to_le_bytes());
+        index += 4;
+    }
+
+    while index < len {
+        read_arr[index] = unsafe { core::ptr::read_volatile(ahb_addr.cast::<u8>().add(index)) };
+        index += 1;
+    }
+}
+
+unsafe fn spi_write_data(ahb_addr: *mut u32, write_arr: &[u8]) {
+    let len = write_arr.len();
+    let mut index = 0usize;
+
+    while index + 4 <= len {
+        let word = u32::from_le_bytes([
+            write_arr[index],
+            write_arr[index + 1],
+            write_arr[index + 2],
+            write_arr[index + 3],
+        ]);
+        unsafe { core::ptr::write_volatile(ahb_addr.add(index / 4), word) };
+        index += 4;
+    }
+
+    while index < len {
+        unsafe { core::ptr::write_volatile(ahb_addr.cast::<u8>().add(index), write_arr[index]) };
+        index += 1;
     }
 }

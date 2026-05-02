@@ -17,11 +17,12 @@
 //! 1. **Init** — construct FmcUninit, initialize, assert Ready.
 //! 2. **from_fmc** — build SpiNorFlash facade.
 //! 3. **capacity_bytes** — assert 1 MB.
-//! 4. **read via facade — erase-state** — read 8 bytes from offset 0 and
+//! 4. **status** — issue `RDSR` and assert the command path succeeds.
+//! 5. **read via facade — erase-state** — read 8 bytes from offset 0 and
 //!    assert every byte is 0xFF, confirming the full path from facade through
 //!    FmcReady → ReadySmc → flash window → m25p80 model.
-//! 5. **read via facade — bounds rejection** — assert InvalidCapacity.
-//! 6. **from_spi path** — initialize SPI1, build facade with `from_spi`, then
+//! 6. **read via facade — bounds rejection** — assert InvalidCapacity.
+//! 7. **from_spi path** — initialize SPI1, build facade with `from_spi`, then
 //!    validate capacity/read/bounds behavior for the SPI constructor path.
 
 #![no_std]
@@ -71,7 +72,10 @@ fn run_device_qemu_test() -> Result<(), SmcError> {
         return Err(SmcError::HardwareError);
     }
 
-    // --- 4. read via facade — erase-state check (QEMU-specific) ---
+    // --- 4. status ---
+    let _ = flash.status()?;
+
+    // --- 5. read via facade — erase-state check (QEMU-specific) ---
     // QEMU's volatile w25q80bl returns 0xFF on every byte before any program
     // cycle.  Confirms: facade → FmcReady → flash window (0x8000_0000) → m25p80.
     let mut buf = [0u8; 8];
@@ -85,7 +89,7 @@ fn run_device_qemu_test() -> Result<(), SmcError> {
         }
     }
 
-    // --- 5. read via facade — bounds rejection ---
+    // --- 6. read via facade — bounds rejection ---
     let mut overflow_buf = [0u8; 8];
     match flash.read(0x000F_FFFF, &mut overflow_buf) {
         Err(SmcError::InvalidCapacity) => {}
@@ -93,7 +97,7 @@ fn run_device_qemu_test() -> Result<(), SmcError> {
         Ok(_) => return Err(SmcError::HardwareError),
     }
 
-    // --- 6. from_spi path (SPI1) ---
+    // --- 7. from_spi path (SPI1) ---
     let spi_cfg = SmcConfig {
         controller_id: SmcController::Spi1,
         cs0: Some(FLASH_CFG),
@@ -114,6 +118,8 @@ fn run_device_qemu_test() -> Result<(), SmcError> {
     if spi_cap != 1 * 1024 * 1024 {
         return Err(SmcError::HardwareError);
     }
+
+    let _ = spi_flash.status()?;
 
     let mut spi_buf = [0u8; 8];
     let spi_n = spi_flash.read(0, &mut spi_buf)?;

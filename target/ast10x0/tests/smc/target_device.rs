@@ -12,9 +12,10 @@
 //! 1. **Init** — construct FmcUninit, initialize hardware, assert Ready.
 //! 2. **from_fmc** — build SpiNorFlash from FmcReady.
 //! 3. **capacity_bytes** — assert returns 1 MB (matches FlashConfig).
-//! 4. **read via facade — success path** — read 8 bytes from offset 0;
+//! 4. **status** — issue `RDSR` and assert the command path succeeds.
+//! 5. **read via facade — success path** — read 8 bytes from offset 0;
 //!    assert count is returned correctly.  Content not inspected.
-//! 5. **read via facade — bounds rejection** — assert InvalidCapacity before
+//! 6. **read via facade — bounds rejection** — assert InvalidCapacity before
 //!    any MMIO for an out-of-range read.
 
 #![no_std]
@@ -63,14 +64,17 @@ fn run_device_smoke_test() -> Result<(), SmcError> {
         return Err(SmcError::HardwareError);
     }
 
-    // --- 4. read via facade — success path ---
+    // --- 4. status ---
+    let _ = flash.status()?;
+
+    // --- 5. read via facade — success path ---
     let mut buf = [0u8; 8];
     let n = flash.read(0, &mut buf)?;
     if n != 8 {
         return Err(SmcError::HardwareError);
     }
 
-    // --- 5. read via facade — bounds rejection ---
+    // --- 6. read via facade — bounds rejection ---
     // 1 MB = 0x10_0000 bytes; offset 0x000F_FFFF + 8 bytes overflows.
     let mut overflow_buf = [0u8; 8];
     match flash.read(0x000F_FFFF, &mut overflow_buf) {

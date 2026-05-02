@@ -57,6 +57,11 @@ impl FmcReady {
         self.inner.capacity_bytes()
     }
 
+    /// Execute a raw user-mode SPI transfer on the FMC CS0 aperture.
+    pub fn transceive_user(&self, cmd: &[u8], tx_payload: &[u8], rx: &mut [u8]) -> Result<(), SmcError> {
+        self.inner.transceive_user(cmd, tx_payload, rx)
+    }
+
     /// Access the underlying generic ready controller.
     pub fn as_inner(&self) -> &ReadySmc {
         &self.inner

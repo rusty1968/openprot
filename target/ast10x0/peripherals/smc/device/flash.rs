@@ -105,14 +105,23 @@ impl<'a> SpiNorFlash<'a> {
     }
 
     fn issue_command(&mut self, _cmd: &[u8], _payload: &[u8]) -> Result<(), SmcError> {
-        // Phase 3B: wire to command transport once queue/bit-bang path is finalized.
-        Err(SmcError::DeviceNotSupported)
+        match &self.backend {
+            FlashBackend::Fmc(fmc) => fmc.transceive_user(_cmd, _payload, &mut []),
+            FlashBackend::Spi(spi) => spi.transceive_user(_cmd, _payload, &mut []),
+        }
     }
 
     fn read_status_impl(&self) -> Result<u8, SmcError> {
-        let _ = commands::READ_STATUS;
-        // Phase 3B: wire to command transport once queue/bit-bang path is finalized.
-        Err(SmcError::DeviceNotSupported)
+        let mut status = [0u8; 1];
+        match &self.backend {
+            FlashBackend::Fmc(fmc) => {
+                fmc.transceive_user(&[commands::READ_STATUS], &[], &mut status)?
+            }
+            FlashBackend::Spi(spi) => {
+                spi.transceive_user(&[commands::READ_STATUS], &[], &mut status)?
+            }
+        }
+        Ok(status[0])
     }
 
     fn wait_write_complete(&self, max_polls: u32) -> Result<(), SmcError> {
