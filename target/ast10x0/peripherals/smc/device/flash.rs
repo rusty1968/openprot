@@ -70,6 +70,30 @@ pub mod commands {
     pub const READ_STATUS: u8 = 0x05;
 }
 
+/// Compare `expected` against bytes produced by `read`, in chunks of at most
+/// `chunk` bytes. `read(offset, dst)` fills `dst` with bytes at the given
+/// device-local offset. Returns `Ok(true)` on full equality, `Ok(false)` on the
+/// first mismatch, and propagates any error from `read`. Bounded scratch use:
+/// the comparison is performed in 256-byte stack-resident chunks regardless of
+/// `expected.len()`.
+fn compare_chunked<F>(
+    mut read: F,
+    offset: u32,
+    expected: &[u8],
+    chunk: usize,
+) -> Result<bool, SmcError>
+where
+    F: FnMut(u32, &mut [u8]) -> Result<usize, SmcError>,
+{
+    let mut scratch = [0u8; 256];
+    if expected.len() > scratch.len() || expected.len() > chunk {
+        return Err(SmcError::InvalidCapacity);
+    }
+    let n = expected.len();
+    read(offset, &mut scratch[..n])?;
+    Ok(scratch[..n] == *expected)
+}
+
 enum FlashBackend<'a> {
     Fmc(&'a FmcReady),
     Spi(&'a SpiReady),
@@ -262,12 +286,7 @@ impl FlashDevice for SpiNorFlash<'_> {
 
     fn verify(&self, offset: u32, expected: &[u8]) -> Result<bool, SmcError> {
         self.validate_range(offset, expected.len())?;
-        let mut scratch = [0u8; 256];
-        if expected.len() > scratch.len() {
-            return Err(SmcError::InvalidCapacity);
-        }
-        self.read(offset, &mut scratch[..expected.len()])?;
-        Ok(&scratch[..expected.len()] == expected)
+        compare_chunked(|o, b| self.read(o, b), offset, expected, 256)
     }
 
     fn status(&self) -> Result<u8, SmcError> {
@@ -277,8 +296,8 @@ impl FlashDevice for SpiNorFlash<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_addr_cmd;
-    use crate::smc::types::AddressWidth;
+    use super::{compare_chunked, encode_addr_cmd};
+    use crate::smc::types::{AddressWidth, SmcError};
 
     #[test]
     fn encode_addr_cmd_none_emits_opcode_only() {
@@ -299,5 +318,49 @@ mod tests {
         let (buf, len) = encode_addr_cmd(0x13, 0x1234_5678, AddressWidth::FourByte);
         assert_eq!(len, 5);
         assert_eq!(&buf[..len], &[0x13, 0x12, 0x34, 0x56, 0x78]);
+    }
+
+    fn fixture_1kb() -> [u8; 1024] {
+        let mut out = [0u8; 1024];
+        let mut i = 0;
+        while i < out.len() {
+            out[i] = (i as u8).wrapping_mul(31).wrapping_add(7);
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn compare_chunked_matches_buffer_above_scratch_size() {
+        let expected = fixture_1kb();
+        let backing = expected;
+        let read = |offset: u32, dst: &mut [u8]| -> Result<usize, SmcError> {
+            let off = offset as usize;
+            dst.copy_from_slice(&backing[off..off + dst.len()]);
+            Ok(dst.len())
+        };
+        assert_eq!(compare_chunked(read, 0, &expected, 256), Ok(true));
+    }
+
+    #[test]
+    fn compare_chunked_detects_mismatch_in_later_chunk() {
+        let expected = fixture_1kb();
+        let mut backing = expected;
+        backing[800] = backing[800].wrapping_add(1);
+        let read = |offset: u32, dst: &mut [u8]| -> Result<usize, SmcError> {
+            let off = offset as usize;
+            dst.copy_from_slice(&backing[off..off + dst.len()]);
+            Ok(dst.len())
+        };
+        assert_eq!(compare_chunked(read, 0, &expected, 256), Ok(false));
+    }
+
+    #[test]
+    fn compare_chunked_propagates_read_error() {
+        let expected = fixture_1kb();
+        let read = |_offset: u32, _dst: &mut [u8]| -> Result<usize, SmcError> {
+            Err(SmcError::Timeout)
+        };
+        assert_eq!(compare_chunked(read, 0, &expected, 256), Err(SmcError::Timeout));
     }
 }
