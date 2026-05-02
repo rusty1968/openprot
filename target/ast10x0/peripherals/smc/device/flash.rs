@@ -4,7 +4,6 @@
 //! SPI NOR facade with Phase 3A read support and Phase 3B API scaffolding.
 
 use crate::smc::fmc::FmcReady;
-use crate::smc::helpers::flash_capacity_bytes;
 use crate::smc::spi::SpiReady;
 use crate::smc::types::{AddressWidth, ChipSelect, FlashConfig, SmcError, TransferMode};
 
@@ -93,7 +92,7 @@ impl<'a> SpiNorFlash<'a> {
 
     /// Build a flash facade from an initialized FMC controller wrapper with explicit CS.
     pub fn from_fmc_cs(fmc: &'a mut FmcReady, cfg: FlashConfig, cs: ChipSelect) -> Result<Self, SmcError> {
-        Self::validate_capacity_cfg(cfg, fmc.capacity_bytes()?)?;
+        Self::validate_capacity_cfg(cfg, fmc.cs_config(cs)?)?;
         Ok(Self {
             backend: FlashBackend::Fmc(fmc),
             cfg,
@@ -108,7 +107,7 @@ impl<'a> SpiNorFlash<'a> {
 
     /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper with explicit CS.
     pub fn from_spi_cs(spi: &'a mut SpiReady, cfg: FlashConfig, cs: ChipSelect) -> Result<Self, SmcError> {
-        Self::validate_capacity_cfg(cfg, spi.capacity_bytes()?)?;
+        Self::validate_capacity_cfg(cfg, spi.cs_config(cs)?)?;
         Ok(Self {
             backend: FlashBackend::Spi(spi),
             cfg,
@@ -116,9 +115,8 @@ impl<'a> SpiNorFlash<'a> {
         })
     }
 
-    fn validate_capacity_cfg(cfg: FlashConfig, controller_capacity: usize) -> Result<(), SmcError> {
-        let cfg_capacity = flash_capacity_bytes(Some(cfg))?;
-        if cfg_capacity != controller_capacity {
+    fn validate_capacity_cfg(cfg: FlashConfig, expected: FlashConfig) -> Result<(), SmcError> {
+        if cfg != expected {
             return Err(SmcError::InvalidCapacity);
         }
         Ok(())

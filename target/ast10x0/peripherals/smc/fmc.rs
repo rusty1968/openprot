@@ -4,7 +4,7 @@
 //! FMC-specialized wrapper around the generic SMC controller.
 
 use crate::smc::controller::{ReadySmc, UninitSmc};
-use crate::smc::types::{ChipSelect, SmcConfig, SmcController, SmcError, TransferMode};
+use crate::smc::types::{ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, TransferMode};
 
 /// FMC handle before hardware initialization.
 pub struct FmcUninit {
@@ -55,6 +55,11 @@ impl FmcReady {
     /// Return configured flash capacity in bytes.
     pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
         self.inner.capacity_bytes()
+    }
+
+    /// Return the configured `FlashConfig` for the requested chip select.
+    pub fn cs_config(&self, cs: ChipSelect) -> Result<FlashConfig, SmcError> {
+        self.inner.cs_config(cs)
     }
 
     /// Execute a raw user-mode SPI transfer on the selected FMC chip select.

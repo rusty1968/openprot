@@ -8,13 +8,17 @@ pub mod types;
 pub mod helpers;
 
 pub mod fmc {
-    use crate::smc::types::{ChipSelect, SmcError, TransferMode};
+    use crate::smc::types::{ChipSelect, FlashConfig, SmcError, TransferMode};
 
     pub struct FmcReady;
 
     impl FmcReady {
         pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
             Ok(1024 * 1024)
+        }
+
+        pub fn cs_config(&self, _cs: ChipSelect) -> Result<FlashConfig, SmcError> {
+            Ok(FlashConfig::winbond_w25q64())
         }
 
         pub fn read(&self, _offset: u32, _buf: &mut [u8]) -> Result<usize, SmcError> {
@@ -35,13 +39,17 @@ pub mod fmc {
 }
 
 pub mod spi {
-    use crate::smc::types::{ChipSelect, SmcError, TransferMode};
+    use crate::smc::types::{ChipSelect, FlashConfig, SmcError, TransferMode};
 
     pub struct SpiReady;
 
     impl SpiReady {
         pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
             Ok(1024 * 1024)
+        }
+
+        pub fn cs_config(&self, _cs: ChipSelect) -> Result<FlashConfig, SmcError> {
+            Ok(FlashConfig::winbond_w25q64())
         }
 
         pub fn read(&self, _offset: u32, _buf: &mut [u8]) -> Result<usize, SmcError> {

@@ -177,7 +177,7 @@ impl SmcController {
 }
 
 /// Configuration for a single flash device
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlashConfig {
     /// Device capacity in MB
     pub capacity_mb: u32,
