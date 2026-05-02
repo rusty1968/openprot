@@ -4,6 +4,7 @@
 //! FMC-specialized wrapper around the generic SMC controller.
 
 use crate::smc::controller::{ReadySmc, UninitSmc};
+use crate::smc::interrupts::SmcInterrupt;
 use crate::smc::types::{ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, TransferMode};
 
 /// FMC handle before hardware initialization.
@@ -45,6 +46,21 @@ impl FmcReady {
     /// Initiate a DMA read operation.
     pub fn dma_read(&mut self, flash_offset: u32, dram_addr: usize, len: u32) -> Result<(), SmcError> {
         self.inner.dma_read(flash_offset, dram_addr, len)
+    }
+
+    /// Read raw DMA/interrupt status bits from FMC008.
+    pub fn dma_status(&self) -> u32 {
+        self.inner.dma_status()
+    }
+
+    /// Clear DMA-related status bits in FMC008 (write-1-to-clear).
+    pub fn clear_dma_status(&self, clear_mask: u32) {
+        self.inner.clear_dma_status(clear_mask)
+    }
+
+    /// Handle DMA completion/error from IRQ status and finalize controller state.
+    pub fn handle_dma_irq(&mut self) -> Result<SmcInterrupt, SmcError> {
+        self.inner.handle_dma_irq()
     }
 
     /// Check if FMC is ready for operations.

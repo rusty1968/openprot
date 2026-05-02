@@ -86,6 +86,16 @@ impl SmcRegisters {
         self.regs().fmc008().read().bits()
     }
 
+    /// FMC008: DMA status (write-1-to-clear status bits)
+    pub fn write_dma_status(&self, value: u32) {
+        self.regs().fmc008().write(|w| unsafe { w.bits(value) });
+    }
+
+    /// Clear DMA-related status bits in FMC008 using a write-1-to-clear mask.
+    pub fn clear_dma_status(&self, clear_mask: u32) {
+        self.write_dma_status(clear_mask);
+    }
+
     /// FMC010: CS0 control register
     pub fn read_cs0_ctrl(&self) -> u32 {
         self.regs().fmc010().read().bits()

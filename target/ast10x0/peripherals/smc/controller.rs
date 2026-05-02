@@ -9,6 +9,7 @@ use crate::smc::helpers::{
     SPI_CTRL_FREQ_MASK, encode_segment, flash_capacity_bytes, spi_freq_div, total_capacity_bytes,
     validate_dma_read, validate_mapped_range,
 };
+use crate::smc::interrupts::{SmcInterrupt, SmcInterruptDecoder};
 use crate::smc::registers::SmcRegisters;
 use crate::smc::types::*;
 
@@ -23,6 +24,7 @@ enum SmcState {
 
 const ASPEED_SPI_USER: u32 = 0x3;
 const ASPEED_SPI_USER_INACTIVE: u32 = 0x4;
+const DMA_STATUS_RELEVANT_BITS: u32 = (1 << 11) | (1 << 10) | (1 << 9);
 /// Mask for bits that are not IO mode or mode-type fields — preserves
 /// frequency divisor and other config bits across per-phase ctrl writes.
 const SPI_CTRL_IO_MODE_MASK: u32 = !0x7000_0000;
@@ -221,6 +223,56 @@ impl Smc<Ready> {
 
         self.state = SmcState::DmaInFlight;
         Ok(())
+    }
+
+    /// Read raw DMA/interrupt status register bits (FMC008).
+    pub fn dma_status(&self) -> u32 {
+        self.regs.read_dma_status()
+    }
+
+    /// Clear DMA-related status bits in the status register (FMC008).
+    ///
+    /// `clear_mask` is write-1-to-clear and should contain only relevant bits.
+    pub fn clear_dma_status(&self, clear_mask: u32) {
+        self.regs.clear_dma_status(clear_mask & DMA_STATUS_RELEVANT_BITS);
+    }
+
+    /// Decode and complete an in-flight DMA operation from an IRQ event.
+    ///
+    /// Returns the decoded interrupt cause when a completion/error event was
+    /// observed and processed. If no relevant status bits are set, returns
+    /// `SmcError::ControllerNotReady` to indicate no completion work was found.
+    pub fn handle_dma_irq(&mut self) -> Result<SmcInterrupt, SmcError> {
+        let status = self.dma_status();
+        let relevant = status & DMA_STATUS_RELEVANT_BITS;
+        if relevant == 0 {
+            return Err(SmcError::ControllerNotReady);
+        }
+
+        let dma_in_flight = self.state == SmcState::DmaInFlight;
+        let decoded = SmcInterruptDecoder::decode_with_context(status, dma_in_flight);
+
+        self.clear_dma_status(relevant);
+
+        match decoded {
+            SmcInterrupt::DmaComplete => {
+                self.state = SmcState::Ready;
+                Ok(decoded)
+            }
+            SmcInterrupt::DmaError => {
+                self.state = SmcState::Ready;
+                Err(SmcError::DmaAborted)
+            }
+            SmcInterrupt::CommandAbort => {
+                self.state = SmcState::Error;
+                Err(SmcError::HardwareError)
+            }
+            SmcInterrupt::WriteProtected => {
+                self.state = SmcState::Error;
+                Err(SmcError::WriteProtected)
+            }
+            SmcInterrupt::Unknown => Err(SmcError::HardwareError),
+        }
     }
 
     /// Check if controller is ready for operations.
