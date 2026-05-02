@@ -1,0 +1,77 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 userspace SMC listener scaffold.
+// Mirrors the UART-listener style: one app owns a channel handler and another
+// app owns an interrupt object + channel initiator.
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 2048,
+    },
+    kernel: {
+        flash_start_address: 0x00000800,
+        flash_size_bytes: 129024,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "test_smc",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "smc_process",
+                    ram_size_bytes: 32768,
+                    objects: [
+                        {
+                            name: "ipc",
+                            type: "channel_handler",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "smc_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "test_smc_listener",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "smc_listener",
+                    ram_size_bytes: 32768,
+                    objects: [
+                        {
+                            name: "smc_interrupts",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "fmc_irq",
+                                    number: 39,
+                                },
+                            ],
+                        },
+                        {
+                            name: "ipc",
+                            type: "channel_initiator",
+                            handler_process: "smc_process",
+                            handler_object_name: "ipc",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "smc_listener_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}

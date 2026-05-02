@@ -60,6 +60,9 @@ pub trait FlashDevice {
 
     /// Read status register.
     fn status(&self) -> Result<u8, SmcError>;
+
+    /// Read JEDEC ID bytes (manufacturer + 2-byte device ID).
+    fn jedec_id(&self) -> Result<[u8; 3], SmcError>;
 }
 
 /// Standard SPI NOR opcodes used by Phase 3B operations.
@@ -68,6 +71,7 @@ pub mod commands {
     pub const ERASE_SECTOR_4K: u8 = 0x20;
     pub const PAGE_PROGRAM: u8 = 0x02;
     pub const READ_STATUS: u8 = 0x05;
+    pub const READ_ID: u8 = 0x9F;
 }
 
 /// Compare `expected` against bytes produced by `read`, in chunks of at most
@@ -117,6 +121,9 @@ pub struct SpiNorFlash<'a> {
     cfg: FlashConfig,
     /// Chip select this flash device sits on.
     cs: ChipSelect,
+    /// IO mode used for all SPI command transactions (WREN, RDSR, PP, SE).
+    /// Defaults to `Mode111` (single-wire cmd/addr/data).
+    cmd_mode: TransferMode,
 }
 
 impl<'a> SpiNorFlash<'a> {
@@ -132,6 +139,7 @@ impl<'a> SpiNorFlash<'a> {
             backend: FlashBackend::Fmc(fmc),
             cfg,
             cs,
+            cmd_mode: TransferMode::Mode111,
         })
     }
 
@@ -147,7 +155,18 @@ impl<'a> SpiNorFlash<'a> {
             backend: FlashBackend::Spi(spi),
             cfg,
             cs,
+            cmd_mode: TransferMode::Mode111,
         })
+    }
+
+    /// Override the IO mode used for all SPI command transactions.
+    ///
+    /// Applies to WREN, RDSR, PAGE_PROGRAM, and SECTOR_ERASE paths.
+    /// The memory-mapped read path always uses the segment-routed AHB window
+    /// and is unaffected by this setting.
+    pub fn with_cmd_mode(mut self, mode: TransferMode) -> Self {
+        self.cmd_mode = mode;
+        self
     }
 
     fn validate_capacity_cfg(cfg: FlashConfig, expected: FlashConfig) -> Result<(), SmcError> {
@@ -224,24 +243,41 @@ impl<'a> SpiNorFlash<'a> {
 
     fn issue_command(&mut self, _cmd: &[u8], _payload: &[u8]) -> Result<(), SmcError> {
         let cs = self.cs;
+        let mode = self.cmd_mode;
         match &self.backend {
-            FlashBackend::Fmc(fmc) => fmc.transceive_user(cs, _cmd, _payload, &mut [], TransferMode::Mode111),
-            FlashBackend::Spi(spi) => spi.transceive_user(cs, _cmd, _payload, &mut [], TransferMode::Mode111),
+            FlashBackend::Fmc(fmc) => fmc.transceive_user(cs, _cmd, _payload, &mut [], mode),
+            FlashBackend::Spi(spi) => spi.transceive_user(cs, _cmd, _payload, &mut [], mode),
         }
     }
 
     fn read_status_impl(&self) -> Result<u8, SmcError> {
         let cs = self.cs;
+        let mode = self.cmd_mode;
         let mut status = [0u8; 1];
         match &self.backend {
             FlashBackend::Fmc(fmc) => {
-                fmc.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
+                fmc.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, mode)?
             }
             FlashBackend::Spi(spi) => {
-                spi.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, TransferMode::Mode111)?
+                spi.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, mode)?
             }
         }
         Ok(status[0])
+    }
+
+    fn read_jedec_id_impl(&self) -> Result<[u8; 3], SmcError> {
+        let cs = self.cs;
+        let mode = self.cmd_mode;
+        let mut id = [0u8; 3];
+        match &self.backend {
+            FlashBackend::Fmc(fmc) => {
+                fmc.transceive_user(cs, &[commands::READ_ID], &[], &mut id, mode)?
+            }
+            FlashBackend::Spi(spi) => {
+                spi.transceive_user(cs, &[commands::READ_ID], &[], &mut id, mode)?
+            }
+        }
+        Ok(id)
     }
 
     fn wait_write_complete(&self, max_polls: u32) -> Result<(), SmcError> {
@@ -302,6 +338,10 @@ impl FlashDevice for SpiNorFlash<'_> {
 
     fn status(&self) -> Result<u8, SmcError> {
         self.read_status_impl()
+    }
+
+    fn jedec_id(&self) -> Result<[u8; 3], SmcError> {
+        self.read_jedec_id_impl()
     }
 }
 

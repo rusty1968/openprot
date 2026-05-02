@@ -147,6 +147,13 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
 
     let mut flash = SpiNorFlash::from_fmc(&mut fmc, FLASH_CFG)?;
 
+    // JEDEC preflight: QEMU flash model should respond to READ_ID (0x9F)
+    // with a non-trivial manufacturer/device tuple.
+    let jedec = flash.jedec_id()?;
+    if jedec == [0x00, 0x00, 0x00] || jedec == [0xFF, 0xFF, 0xFF] {
+        return Err(SmcError::HardwareError);
+    }
+
     let written = flash.program_page(test_offset, &page)?;
     if written != page.len() {
         return Err(SmcError::HardwareError);
