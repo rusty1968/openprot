@@ -17,6 +17,10 @@ pub mod fmc {
             Ok(1024 * 1024)
         }
 
+        pub fn cs_capacity_bytes(&self, _cs: ChipSelect) -> Result<usize, SmcError> {
+            Ok(1024 * 1024)
+        }
+
         pub fn cs_config(&self, _cs: ChipSelect) -> Result<FlashConfig, SmcError> {
             Ok(FlashConfig::winbond_w25q64())
         }
@@ -45,6 +49,10 @@ pub mod spi {
 
     impl SpiReady {
         pub fn capacity_bytes(&self) -> Result<usize, SmcError> {
+            Ok(1024 * 1024)
+        }
+
+        pub fn cs_capacity_bytes(&self, _cs: ChipSelect) -> Result<usize, SmcError> {
             Ok(1024 * 1024)
         }
 

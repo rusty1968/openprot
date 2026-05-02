@@ -62,6 +62,11 @@ impl SpiReady {
         self.inner.capacity_bytes()
     }
 
+    /// Return configured flash capacity in bytes for the given chip select.
+    pub fn cs_capacity_bytes(&self, cs: ChipSelect) -> Result<usize, SmcError> {
+        self.inner.cs_capacity_bytes(cs)
+    }
+
     /// Return the configured `FlashConfig` for the requested chip select.
     pub fn cs_config(&self, cs: ChipSelect) -> Result<FlashConfig, SmcError> {
         self.inner.cs_config(cs)

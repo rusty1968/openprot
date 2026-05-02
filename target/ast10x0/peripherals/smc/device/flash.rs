@@ -122,6 +122,43 @@ impl<'a> SpiNorFlash<'a> {
         Ok(())
     }
 
+    fn cs_config_for(&self, cs: ChipSelect) -> Result<FlashConfig, SmcError> {
+        match &self.backend {
+            FlashBackend::Fmc(fmc) => fmc.cs_config(cs),
+            FlashBackend::Spi(spi) => spi.cs_config(cs),
+        }
+    }
+
+    /// Translate a device-local offset into the controller-window address that
+    /// the segment-routed read path expects.
+    ///
+    /// Read traffic flows through the AHB flash window; the controller's
+    /// segment registers map `[CS0_BASE, CS0_BASE+CS0_SIZE)` to CS0 and
+    /// `[CS0_BASE+CS0_SIZE, CS0_BASE+TOTAL)` to CS1. The user-mode command
+    /// path (`transceive_user`) is *not* segment-routed — its on-wire address
+    /// bytes are already device-local from the chip's perspective — so this
+    /// translation is read-only.
+    fn device_to_controller_offset(&self, device_offset: u32) -> Result<u32, SmcError> {
+        let cs_cap = self.capacity_bytes()?;
+        if (device_offset as usize) >= cs_cap {
+            return Err(SmcError::InvalidCapacity);
+        }
+        let base: u32 = match self.cs {
+            ChipSelect::Cs0 => 0,
+            ChipSelect::Cs1 => match self.cs_config_for(ChipSelect::Cs0) {
+                Ok(cfg) => u32::try_from(
+                    (cfg.capacity_mb as usize)
+                        .checked_mul(1024 * 1024)
+                        .ok_or(SmcError::InvalidCapacity)?,
+                )
+                .map_err(|_| SmcError::InvalidCapacity)?,
+                Err(SmcError::InvalidChipSelect) => 0,
+                Err(e) => return Err(e),
+            },
+        };
+        base.checked_add(device_offset).ok_or(SmcError::InvalidCapacity)
+    }
+
     fn validate_range(&self, offset: u32, len: usize) -> Result<(), SmcError> {
         let start = offset as usize;
         let end = start.checked_add(len).ok_or(SmcError::InvalidCapacity)?;
@@ -187,16 +224,20 @@ impl<'a> SpiNorFlash<'a> {
 
 impl FlashDevice for SpiNorFlash<'_> {
     fn read(&self, offset: u32, buf: &mut [u8]) -> Result<usize, SmcError> {
+        // Bounds-check against the selected CS's capacity, then translate to
+        // the controller-window address before issuing the segment-routed read.
+        self.validate_range(offset, buf.len())?;
+        let translated = self.device_to_controller_offset(offset)?;
         match &self.backend {
-            FlashBackend::Fmc(fmc) => fmc.read(offset, buf),
-            FlashBackend::Spi(spi) => spi.read(offset, buf),
+            FlashBackend::Fmc(fmc) => fmc.read(translated, buf),
+            FlashBackend::Spi(spi) => spi.read(translated, buf),
         }
     }
 
     fn capacity_bytes(&self) -> Result<usize, SmcError> {
         match &self.backend {
-            FlashBackend::Fmc(fmc) => fmc.capacity_bytes(),
-            FlashBackend::Spi(spi) => spi.capacity_bytes(),
+            FlashBackend::Fmc(fmc) => fmc.cs_capacity_bytes(self.cs),
+            FlashBackend::Spi(spi) => spi.cs_capacity_bytes(self.cs),
         }
     }
 
