@@ -22,12 +22,15 @@
 //! 5. **`dma_read` args-validation bypass check** — confirm invalid args
 //!    also return `ControllerNotReady` (not any args-error) when not-ready,
 //!    since state is checked before arg validation.
+//! 6. **error precedence check** — with controller non-ready and invalid CS
+//!    (`Cs1` while `cs1: None`), assert `ControllerNotReady` wins over
+//!    `InvalidChipSelect`.
 
 #![no_std]
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, TransferMode,
+    ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, TransferMode,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
@@ -82,7 +85,7 @@ fn run_error_granularity_test() -> Result<(), SmcError> {
     // --- 3. transceive_user while not-ready → ControllerNotReady ---
     let cmd = [0x05u8]; // RDSR — arbitrary; we expect rejection before execution
     let mut rx = [0u8; 1];
-    match fmc.transceive_user(&cmd, &[], &mut rx, TransferMode::Mode111) {
+    match fmc.transceive_user(ChipSelect::Cs0, &cmd, &[], &mut rx, TransferMode::Mode111) {
         Err(SmcError::ControllerNotReady) => {}
         other => {
             let _ = other;
@@ -104,6 +107,25 @@ fn run_error_granularity_test() -> Result<(), SmcError> {
     // State is checked before arg validation, so even a bad DRAM address
     // should yield ControllerNotReady, not InvalidCapacity.
     match fmc.dma_read(0, 0x1000_0000 /* outside DMA mask */, 256) {
+        Err(SmcError::ControllerNotReady) => {}
+        other => {
+            let _ = other;
+            return Err(SmcError::HardwareError);
+        }
+    }
+
+    // --- 6. precedence: not-ready beats invalid chip-select ---
+    //
+    // This controller was configured with cs1: None, so Cs1 is invalid.
+    // However, because state is checked first, non-ready must return
+    // ControllerNotReady (not InvalidChipSelect).
+    match fmc.transceive_user(
+        ChipSelect::Cs1,
+        &[0x05],
+        &[],
+        &mut [0u8; 1],
+        TransferMode::Mode111,
+    ) {
         Err(SmcError::ControllerNotReady) => {}
         other => {
             let _ = other;
