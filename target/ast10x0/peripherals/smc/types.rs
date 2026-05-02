@@ -26,6 +26,8 @@ pub enum SmcError {
     WriteProtected,
     /// Write operation in progress
     WriteInProgress,
+    /// Controller is not in the Ready state; call was made at wrong lifecycle stage
+    ControllerNotReady,
 }
 
 impl NorFlashError for SmcError {

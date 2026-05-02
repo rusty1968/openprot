@@ -193,7 +193,7 @@ impl Smc<Ready> {
     /// Initiate a DMA read operation (non-blocking).
     pub fn dma_read(&mut self, flash_offset: u32, dram_addr: usize, len: u32) -> Result<(), SmcError> {
         if self.state != SmcState::Ready {
-            return Err(SmcError::HardwareError);
+            return Err(SmcError::ControllerNotReady);
         }
 
         let capacity_bytes = total_capacity_bytes(self.config.cs0, self.config.cs1)?;
@@ -240,7 +240,7 @@ impl Smc<Ready> {
         mode: TransferMode,
     ) -> Result<(), SmcError> {
         if self.state != SmcState::Ready {
-            return Err(SmcError::HardwareError);
+            return Err(SmcError::ControllerNotReady);
         }
 
         // Derive user-mode base from the stored normal-read value: preserve
