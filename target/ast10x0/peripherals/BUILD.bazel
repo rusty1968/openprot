@@ -19,6 +19,8 @@ rust_library(
         "smc/fmc.rs",
         "smc/spi.rs",
         "smc/interrupts.rs",
+        "smc/device/mod.rs",
+        "smc/device/flash.rs",
     ],
     crate_name = "ast10x0_peripherals",
     crate_root = "lib.rs",
