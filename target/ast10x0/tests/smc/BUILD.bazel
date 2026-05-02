@@ -417,3 +417,55 @@ system_image_test(
     ],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
 )
+
+# ── Error IRQ scaffold ────────────────────────────────────────────────────────
+# Tier 1 (QEMU-reachable): init with enable_interrupts=true, spurious-fire
+# guard (handle_dma_irq with no bits set → ControllerNotReady), and
+# assert state remains Ready after spurious fire.
+#
+# Tier 2 (hardware-only, marked TODO in source): write-protect (bit 9),
+# DMA-abort (bit 10 in-flight), command-abort (bit 10 idle), DMA-complete
+# (bit 11).  FMC IRQ number: 39 (ast1060_pac::Interrupt::fmc).
+#
+# Invoke explicitly:
+#   bazelisk test --config=virt_ast10x0 --test_tag_filters= \
+#     //target/ast10x0/tests/smc:smc_error_irq_test
+
+rust_binary(
+    name = "target_error_irq",
+    srcs = ["target_error_irq.rs"],
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        ":linker_script",
+        "//target/ast10x0:entry",
+        "//target/ast10x0/peripherals",
+        "@pigweed//pw_kernel/arch/arm_cortex_m:arch_arm_cortex_m",
+        "@pigweed//pw_kernel/kernel",
+        "@pigweed//pw_kernel/subsys/console:console_backend",
+        "@pigweed//pw_kernel/target:target_common",
+        "@pigweed//pw_log/rust:pw_log",
+        "@rust_crates//:cortex-m-semihosting",
+    ],
+)
+
+system_image(
+    name = "smc_error_irq",
+    kernel = ":target_error_irq",
+    platform = "//target/ast10x0",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    userspace = False,
+)
+
+system_image_test(
+    name = "smc_error_irq_test",
+    image = ":smc_error_irq",
+    tags = [
+        "kernel",
+        "integration",  # excluded by k_common; QEMU-only
+    ],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+)

@@ -86,14 +86,23 @@ impl SmcRegisters {
         self.regs().fmc008().read().bits()
     }
 
-    /// FMC008: DMA status (write-1-to-clear status bits)
-    pub fn write_dma_status(&self, value: u32) {
-        self.regs().fmc008().write(|w| unsafe { w.bits(value) });
+    /// FMC008: Clear DMA status bits (write-1-to-clear).
+    pub fn clear_dma_status(&self, clear_mask: u32) {
+        self.regs().fmc008().write(|w| unsafe { w.bits(clear_mask) });
     }
 
-    /// Clear DMA-related status bits in FMC008 using a write-1-to-clear mask.
-    pub fn clear_dma_status(&self, clear_mask: u32) {
-        self.write_dma_status(clear_mask);
+    /// FMC008: Enable DMA interrupt (bit 3, `dmaintenbl`).
+    ///
+    /// Call at end of each DMA launch, not at init time.
+    pub fn enable_dma_irq(&self) {
+        self.regs().fmc008().modify(|_, w| w.dmaintenbl().set_bit());
+    }
+
+    /// FMC008: Disable DMA interrupt (bit 3, `dmaintenbl`).
+    ///
+    /// Call at the top of the IRQ handler before processing status bits.
+    pub fn disable_dma_irq(&self) {
+        self.regs().fmc008().modify(|_, w| w.dmaintenbl().clear_bit());
     }
 
     /// FMC010: CS0 control register

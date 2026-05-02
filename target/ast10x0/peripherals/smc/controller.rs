@@ -112,13 +112,6 @@ impl Smc<Uninitialized> {
         // 3. Set up segment addresses (memory mapping)
         Self::setup_segments(&self)?;
 
-        // 4. Enable interrupts if requested
-        if self.config.enable_interrupts {
-            self.regs.modify_spi_mode(|mode| {
-                *mode |= 1 << 3; // DMA_EN
-            });
-        }
-
         // Snapshot per-CS normal-read control register values after all init writes.
         // CS1 value is captured even if cs1 is None (safe: register read is harmless).
         let cs0_normal_read = self.regs.read_cs0_ctrl();
@@ -221,6 +214,10 @@ impl Smc<Ready> {
 
         self.regs.write_dma_ctrl(0x1); // DMA_CTRL_REQUEST
 
+        if self.config.enable_interrupts {
+            self.regs.enable_dma_irq();
+        }
+
         self.state = SmcState::DmaInFlight;
         Ok(())
     }
@@ -243,6 +240,8 @@ impl Smc<Ready> {
     /// observed and processed. If no relevant status bits are set, returns
     /// `SmcError::ControllerNotReady` to indicate no completion work was found.
     pub fn handle_dma_irq(&mut self) -> Result<SmcInterrupt, SmcError> {
+        self.regs.disable_dma_irq();
+
         let status = self.dma_status();
         let relevant = status & DMA_STATUS_RELEVANT_BITS;
         if relevant == 0 {
