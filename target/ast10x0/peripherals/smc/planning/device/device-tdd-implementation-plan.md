@@ -249,6 +249,66 @@ Use this section as an append-only log.
     the `host_flash_mod` stubs.
   - Status: PASS.
 
+---
+
+- Date: 2026-05-02
+- Req ID(s): DEV-PAR-004
+- RED test added: three host unit tests in
+  `target/ast10x0/peripherals/smc/device/flash.rs` (`mod tests`)
+  exercising the new free helper `compare_chunked`:
+  - `compare_chunked_matches_buffer_above_scratch_size` (1 KB match,
+    chunk 256),
+  - `compare_chunked_detects_mismatch_in_later_chunk` (1 KB with a
+    single tampered byte at offset 800),
+  - `compare_chunked_propagates_read_error` (closure returns
+    `SmcError::Timeout`, helper must surface it).
+  All three run under `//target/ast10x0/peripherals:smc_flash_encoding_test`.
+- Commit hashes:
+  - RED: `c538e15` — `test(smc/device): RED for DEV-PAR-004 large-buffer verify`
+  - GREEN: `9a3cf8f` — `feat(smc/device): chunked verify for arbitrary lengths (DEV-PAR-004)`
+  - REFACTOR: skipped — `compare_chunked` has exactly one caller
+    (`SpiNorFlash::verify`); the plan's "reuse chunk helper for future
+    read/compare paths" trigger has no concrete second caller, so
+    extraction beyond what GREEN already does would be speculative and
+    out of scope per §0.
+- Build command + result:
+  - `bazelisk build --platforms=//target/ast10x0 //target/ast10x0/tests/smc:smc`
+    → `Build completed successfully` (post-RED and post-GREEN).
+- Test command + result:
+  - Pre-GREEN run on RED commit (`c538e15`):
+    `bazelisk test //target/ast10x0/peripherals:smc_flash_encoding_test`
+    → `FAILED in 0.0s`. Failure detail: 17 prior tests pass; the three
+    new `compare_chunked_*` tests panic with
+    `assertion left == right failed: left: Err(InvalidCapacity)` —
+    expected `Ok(true)` / `Ok(false)` / `Err(Timeout)` respectively. The
+    bugged stub rejects whenever `expected.len() > chunk`, which is the
+    pre-fix `verify` behavior the audit was opened against.
+  - Post-GREEN host gate:
+    `bazelisk test //target/ast10x0/peripherals:smc_flash_encoding_test`
+    → PASS (20 tests pass).
+  - Post-GREEN QEMU gate:
+    `bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/tests/smc:smc_device_qemu_program_erase_test //target/ast10x0/tests/smc:smc_device_test`
+    → both PASS in ≤1.0s each.
+- Notes/risk:
+  - **Tactic deviation from §3.10 GREEN.** The plan's GREEN snippet
+    inlines the chunk loop into `verify`. The actual GREEN extracts the
+    loop into the free function `compare_chunked` (Option A) so the
+    behavior is host-testable in isolation; `verify` is a one-line
+    delegator. Functional behavior matches the inlined version.
+  - **`compare_chunked` was introduced in the RED commit** rather than
+    GREEN. The kernel `peripherals` library is built with
+    `-D warnings`; an unused free function would have failed the build.
+    Wiring `verify` to delegate immediately keeps the helper live without
+    altering observable `verify` behavior — the RED stub matches the
+    pre-fix `verify` (`Err(InvalidCapacity)` for `expected.len() > 256`),
+    which is exactly the bug under audit.
+  - **Chunk parameter clamping.** `compare_chunked` clamps `chunk` to
+    its 256-byte scratch (`step = min(chunk, scratch.len())`). Callers
+    cannot accidentally smuggle a larger comparison window in, so the
+    "remains bounded and deterministic" acceptance criterion holds for
+    any caller value, not just the one `verify` happens to pass.
+  - Status: PASS.
+
 ## 8. Exit Criteria
 
 Plan is complete when:
