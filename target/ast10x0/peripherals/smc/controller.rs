@@ -238,6 +238,20 @@ impl Smc<Ready> {
         total_capacity_bytes(self.config.cs0, self.config.cs1)
     }
 
+    /// Return the configured `FlashConfig` for the requested chip select.
+    ///
+    /// Returns `SmcError::InvalidChipSelect` if the slot was not populated at
+    /// construction time. Used by device-facade constructors to validate the
+    /// caller-supplied `FlashConfig` against the per-CS configuration the
+    /// controller was actually initialized with.
+    pub fn cs_config(&self, cs: ChipSelect) -> Result<FlashConfig, SmcError> {
+        let slot = match cs {
+            ChipSelect::Cs0 => self.config.cs0,
+            ChipSelect::Cs1 => self.config.cs1,
+        };
+        slot.ok_or(SmcError::InvalidChipSelect)
+    }
+
     /// Execute a raw user-mode SPI transfer on CS0 for this controller.
     ///
     /// The `mode` parameter controls the IO width written to the CS control
