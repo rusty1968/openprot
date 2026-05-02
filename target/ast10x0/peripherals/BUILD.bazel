@@ -16,6 +16,8 @@ rust_library(
         "smc/types.rs",
         "smc/helpers.rs",
         "smc/controller.rs",
+        "smc/fmc.rs",
+        "smc/spi.rs",
         "smc/interrupts.rs",
     ],
     crate_name = "ast10x0_peripherals",

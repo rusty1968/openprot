@@ -10,10 +10,14 @@ pub mod registers;
 pub mod types;
 mod helpers;
 pub mod controller;
+pub mod fmc;
+pub mod spi;
 pub mod interrupts;
 
 pub use types::{SmcError, SmcController, FlashConfig, SmcConfig, SmcRetryable};
 pub use controller::{Ready, ReadySmc, Smc, UninitSmc, Uninitialized};
+pub use fmc::{FmcReady, FmcUninit};
+pub use spi::{SpiReady, SpiUninit};
 pub use interrupts::{SmcInterrupt, SmcInterruptDecoder};
 
 /// Result type for SMC operations
