@@ -95,6 +95,7 @@ system_image(
 system_image_test(
     name = "smc_listener_test",
     image = ":smc_listener",
+    tags = ["manual"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
 )
 

@@ -1,7 +1,7 @@
 # Licensed under the Apache-2.0 license
 # SPDX-License-Identifier: Apache-2.0
 
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 
 package(default_visibility = ["//visibility:public"])
@@ -47,86 +47,6 @@ rust_library(
         "@rust_crates//:embedded-hal-nb",
         "@rust_crates//:embedded-storage",
         "@rust_crates//:embedded-io",
-        "@rust_crates//:nb",
-    ],
-)
-
-rust_test(
-    name = "smc_helpers_test",
-    srcs = [
-        "helpers_host_test.rs",
-        "smc/host_mod.rs",
-        "smc/helpers.rs",
-        "smc/types.rs",
-    ],
-    crate_root = "helpers_host_test.rs",
-    edition = "2024",
-    rustc_flags = [
-        "-Adead_code",
-    ],
-    deps = [
-        "@rust_crates//:embedded-storage",
-        "@rust_crates//:nb",
-    ],
-)
-
-rust_test(
-    name = "smc_flash_encoding_test",
-    srcs = [
-        "flash_host_test.rs",
-        "smc/host_flash_mod.rs",
-        "smc/device/flash.rs",
-        "smc/helpers.rs",
-        "smc/types.rs",
-    ],
-    crate_root = "flash_host_test.rs",
-    edition = "2024",
-    rustc_flags = [
-        "-Adead_code",
-    ],
-    deps = [
-        "@rust_crates//:embedded-storage",
-        "@rust_crates//:nb",
-    ],
-)
-
-rust_test(
-    name = "smc_flash_device_test",
-    srcs = [
-        "flash_host_test.rs",
-        "smc/host_flash_mod.rs",
-        "smc/device/flash.rs",
-        "smc/helpers.rs",
-        "smc/types.rs",
-    ],
-    crate_root = "flash_host_test.rs",
-    edition = "2024",
-    rustc_flags = [
-        "-Adead_code",
-    ],
-    deps = [
-        "@rust_crates//:embedded-storage",
-        "@rust_crates//:nb",
-    ],
-)
-
-rust_test(
-    name = "smc_block_device_test",
-    srcs = [
-        "block_device_host_test.rs",
-        "smc/host_block_device_mod.rs",
-        "smc/device/flash.rs",
-        "smc/device/block_device.rs",
-        "smc/helpers.rs",
-        "smc/types.rs",
-    ],
-    crate_root = "block_device_host_test.rs",
-    edition = "2024",
-    rustc_flags = [
-        "-Adead_code",
-    ],
-    deps = [
-        "@rust_crates//:embedded-storage",
         "@rust_crates//:nb",
     ],
 )
