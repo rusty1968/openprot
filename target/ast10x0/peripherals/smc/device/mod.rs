@@ -5,4 +5,4 @@
 
 mod flash;
 
-pub use flash::{FlashDevice, SpiNorFlash};
+pub use flash::{FlashDevice, JedecId, SpiNorFlash};

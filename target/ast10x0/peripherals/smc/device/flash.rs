@@ -3,6 +3,10 @@
 
 //! SPI NOR facade with Phase 3A read support and Phase 3B API scaffolding.
 
+use core::ops::FnMut;
+use core::result::Result;
+use core::result::Result::{Err, Ok};
+
 use crate::smc::fmc::FmcReady;
 use crate::smc::spi::SpiReady;
 use crate::smc::types::{AddressWidth, ChipSelect, FlashConfig, SmcError, TransferMode};
@@ -114,6 +118,37 @@ enum FlashBackend<'a> {
     Spi(&'a SpiReady),
 }
 
+/// Decoded JEDEC identifier returned by `READ_ID` (`0x9F`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JedecId {
+    pub manufacturer: u8,
+    pub memory_type: u8,
+    pub capacity_code: u8,
+}
+
+impl JedecId {
+    #[must_use]
+    pub const fn from_bytes(raw: [u8; 3]) -> Self {
+        Self {
+            manufacturer: raw[0],
+            memory_type: raw[1],
+            capacity_code: raw[2],
+        }
+    }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 3] {
+        [self.manufacturer, self.memory_type, self.capacity_code]
+    }
+}
+
+fn expect_jedec_match(actual: JedecId, expected: JedecId) -> Result<JedecId, SmcError> {
+    if actual != expected {
+        return Err(SmcError::HardwareError);
+    }
+    Ok(actual)
+}
+
 /// Wrapper-aware SPI NOR flash facade.
 pub struct SpiNorFlash<'a> {
     backend: FlashBackend<'a>,
@@ -167,6 +202,16 @@ impl<'a> SpiNorFlash<'a> {
     pub fn with_cmd_mode(mut self, mode: TransferMode) -> Self {
         self.cmd_mode = mode;
         self
+    }
+
+    /// Read and decode the three-byte JEDEC ID tuple.
+    pub fn jedec(&self) -> Result<JedecId, SmcError> {
+        Ok(JedecId::from_bytes(self.read_jedec_id_impl()?))
+    }
+
+    /// Read JEDEC ID and require an exact match.
+    pub fn expect_jedec(&self, expected: JedecId) -> Result<JedecId, SmcError> {
+        expect_jedec_match(self.jedec()?, expected)
     }
 
     /// Program an arbitrary-length buffer by issuing page-sized writes.
@@ -428,7 +473,7 @@ impl FlashDevice for SpiNorFlash<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_chunked, encode_addr_cmd};
+    use super::{compare_chunked, encode_addr_cmd, expect_jedec_match, JedecId};
     use crate::smc::types::{AddressWidth, SmcError};
 
     #[test]
@@ -494,5 +539,18 @@ mod tests {
             Err(SmcError::Timeout)
         };
         assert_eq!(compare_chunked(read, 0, &expected, 256), Err(SmcError::Timeout));
+    }
+
+    #[test]
+    fn expect_jedec_match_returns_actual_on_exact_match() {
+        let jedec = JedecId::from_bytes([0xEF, 0x40, 0x18]);
+        assert_eq!(expect_jedec_match(jedec, jedec), Ok(jedec));
+    }
+
+    #[test]
+    fn expect_jedec_match_rejects_mismatch() {
+        let expected = JedecId::from_bytes([0xEF, 0x40, 0x18]);
+        let actual = JedecId::from_bytes([0xC2, 0x20, 0x19]);
+        assert_eq!(expect_jedec_match(actual, expected), Err(SmcError::HardwareError));
     }
 }
