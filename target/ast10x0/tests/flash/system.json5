@@ -6,21 +6,21 @@
     arch: {
         type: "armv7m",
         vector_table_start_address: 0x00000000,
-        vector_table_size_bytes: 1344,
+        vector_table_size_bytes: 2048,
     },
     kernel: {
-        flash_start_address: 0x00000540,
-        flash_size_bytes: 129728,
+        flash_start_address: 0x00000800,
+        flash_size_bytes: 129024,
         ram_start_address: 0x00060000,
         ram_size_bytes: 131072,
     },
     apps: [
         {
-            name: "flash_server_bin",
-            flash_size_bytes: 131072,
+            name: "flash_server_fmc_bin",
+            flash_size_bytes: 65536,
             processes: [
                 {
-                    name: "flash_server_process",
+                    name: "flash_server_fmc_process",
                     ram_size_bytes: 65536,
                     objects: [
                         {
@@ -44,14 +44,12 @@
                     ],
                     memory_mappings: [
                         {
-                            // FMC controller register block
                             name: "fmc_regs",
                             type: "device",
                             start_address: 0x7e620000,
                             size_bytes: 0x1000,
                         },
                         {
-                            // FMC CS0 AHB flash window
                             name: "fmc_flash_window",
                             type: "device",
                             start_address: 0x80000000,
@@ -60,7 +58,107 @@
                     ],
                     threads: [
                         {
-                            name: "flash_server_thread",
+                            name: "flash_server_fmc_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "flash_server_spi1_bin",
+            flash_size_bytes: 65536,
+            processes: [
+                {
+                    name: "flash_server_spi1_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "flash",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "spi1_irq",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "spi1",
+                                    number: 65,
+                                },
+                            ],
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            name: "spi1_regs",
+                            type: "device",
+                            start_address: 0x7e630000,
+                            size_bytes: 0x1000,
+                        },
+                        {
+                            name: "spi1_flash_window",
+                            type: "device",
+                            start_address: 0x90000000,
+                            size_bytes: 0x100000,
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "flash_server_spi1_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "flash_server_spi2_bin",
+            flash_size_bytes: 65536,
+            processes: [
+                {
+                    name: "flash_server_spi2_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "flash",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "spi2_irq",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "spi2",
+                                    number: 66,
+                                },
+                            ],
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            name: "spi2_regs",
+                            type: "device",
+                            start_address: 0x7e640000,
+                            size_bytes: 0x1000,
+                        },
+                        {
+                            name: "spi2_flash_window",
+                            type: "device",
+                            start_address: 0xb0000000,
+                            size_bytes: 0x100000,
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "flash_server_spi2_thread",
                             kernel_stack_size_bytes: 4096,
                         },
                     ],
@@ -69,16 +167,28 @@
         },
         {
             name: "flash_client_app",
-            flash_size_bytes: 65536,
+            flash_size_bytes: 32768,
             processes: [
                 {
                     name: "flash_client_process",
                     ram_size_bytes: 32768,
                     objects: [
                         {
-                            name: "flash",
+                            name: "flash_fmc",
                             type: "channel_initiator",
-                            handler_process: "flash_server_process",
+                            handler_process: "flash_server_fmc_process",
+                            handler_object_name: "flash",
+                        },
+                        {
+                            name: "flash_spi1",
+                            type: "channel_initiator",
+                            handler_process: "flash_server_spi1_process",
+                            handler_object_name: "flash",
+                        },
+                        {
+                            name: "flash_spi2",
+                            type: "channel_initiator",
+                            handler_process: "flash_server_spi2_process",
                             handler_object_name: "flash",
                         },
                     ],

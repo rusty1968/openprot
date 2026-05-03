@@ -5,6 +5,7 @@
 
 use ast10x0_peripherals::smc::{
     FlashConfig, FlashDevice, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    SpiReady, SpiUninit,
 };
 use flash_api::backend::{BackendError, FlashBackend, FlashInfo, IrqMask};
 
@@ -31,32 +32,92 @@ fn smc_to_backend_error(err: SmcError) -> BackendError {
 }
 
 pub struct Ast10x0FlashBackend {
-    fmc: FmcReady,
+    controller: ControllerBackend,
     cfg: FlashConfig,
+}
+
+enum ControllerBackend {
+    Fmc(FmcReady),
+    Spi(SpiReady),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Ast10x0Controller {
+    Fmc,
+    Spi1,
+    Spi2,
 }
 
 impl Ast10x0FlashBackend {
     pub fn new() -> Self {
+        Self::new_for_controller(Ast10x0Controller::Fmc)
+    }
+
+    pub fn new_fmc() -> Self {
+        Self::new_for_controller(Ast10x0Controller::Fmc)
+    }
+
+    pub fn new_spi1() -> Self {
+        Self::new_for_controller(Ast10x0Controller::Spi1)
+    }
+
+    pub fn new_spi2() -> Self {
+        Self::new_for_controller(Ast10x0Controller::Spi2)
+    }
+
+    pub fn new_for_controller(controller: Ast10x0Controller) -> Self {
+        Self::new_with_cfg(controller, FLASH_CFG)
+    }
+
+    pub fn new_with_cfg(controller: Ast10x0Controller, cfg: FlashConfig) -> Self {
         let config = SmcConfig {
-            controller_id: SmcController::Fmc,
-            cs0: Some(FLASH_CFG),
+            controller_id: match controller {
+                Ast10x0Controller::Fmc => SmcController::Fmc,
+                Ast10x0Controller::Spi1 => SmcController::Spi1,
+                Ast10x0Controller::Spi2 => SmcController::Spi2,
+            },
+            cs0: Some(cfg),
             cs1: None,
             dma_enabled: false,
             enable_interrupts: false,
         };
 
-        // SAFETY: This backend owns the FMC controller for the process lifetime.
-        let uninit = unsafe { FmcUninit::new(config) }.expect("failed to construct FMC backend");
-        let fmc = uninit.init().expect("failed to initialize FMC backend");
+        let controller = match controller {
+            Ast10x0Controller::Fmc => {
+                // SAFETY: This backend owns the FMC controller for the process lifetime.
+                let uninit =
+                    unsafe { FmcUninit::new(config) }.expect("failed to construct FMC backend");
+                let fmc = uninit.init().expect("failed to initialize FMC backend");
+                ControllerBackend::Fmc(fmc)
+            }
+            Ast10x0Controller::Spi1 => {
+                // SAFETY: This backend owns SPI1 for the process lifetime.
+                let uninit = unsafe { SpiUninit::new(SmcController::Spi1, config) }
+                    .expect("failed to construct SPI1 backend");
+                let spi = uninit.init().expect("failed to initialize SPI1 backend");
+                ControllerBackend::Spi(spi)
+            }
+            Ast10x0Controller::Spi2 => {
+                // SAFETY: This backend owns SPI2 for the process lifetime.
+                let uninit = unsafe { SpiUninit::new(SmcController::Spi2, config) }
+                    .expect("failed to construct SPI2 backend");
+                let spi = uninit.init().expect("failed to initialize SPI2 backend");
+                ControllerBackend::Spi(spi)
+            }
+        };
 
-        Self { fmc, cfg: FLASH_CFG }
+        Self { controller, cfg }
     }
 
     fn with_flash<R>(
         &mut self,
         f: impl FnOnce(&mut SpiNorFlash<'_>) -> Result<R, SmcError>,
     ) -> Result<R, BackendError> {
-        let mut flash = SpiNorFlash::from_fmc(&mut self.fmc, self.cfg).map_err(smc_to_backend_error)?;
+        let mut flash = match &mut self.controller {
+            ControllerBackend::Fmc(fmc) => SpiNorFlash::from_fmc(fmc, self.cfg),
+            ControllerBackend::Spi(spi) => SpiNorFlash::from_spi(spi, self.cfg),
+        }
+        .map_err(smc_to_backend_error)?;
         f(&mut flash).map_err(smc_to_backend_error)
     }
 }

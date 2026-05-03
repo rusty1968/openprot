@@ -51,9 +51,39 @@ rust_binary(
 )
 
 rust_app(
-    name = "flash_server_bin",
+    name = "flash_server_fmc_bin",
     srcs = ["server_main.rs"],
-    codegen_crate_name = "app_flash_server",
+    codegen_crate_name = "app_flash_server_fmc",
+    edition = "2024",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        "//drivers/flash/server:flash_server",
+        "//target/ast10x0/backend/flash:flash_backend_ast10x0",
+        "@pigweed//pw_kernel/userspace",
+    ],
+)
+
+rust_app(
+    name = "flash_server_spi1_bin",
+    srcs = ["server_main_spi1.rs"],
+    codegen_crate_name = "app_flash_server_spi1",
+    edition = "2024",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        "//drivers/flash/server:flash_server",
+        "//target/ast10x0/backend/flash:flash_backend_ast10x0",
+        "@pigweed//pw_kernel/userspace",
+    ],
+)
+
+rust_app(
+    name = "flash_server_spi2_bin",
+    srcs = ["server_main_spi2.rs"],
+    codegen_crate_name = "app_flash_server_spi2",
     edition = "2024",
     system_config = ":system_config",
     tags = ["kernel"],
@@ -84,7 +114,9 @@ rust_app(
 system_image(
     name = "flash",
     apps = [
-        ":flash_server_bin",
+        ":flash_server_fmc_bin",
+        ":flash_server_spi1_bin",
+        ":flash_server_spi2_bin",
         ":flash_client_app",
     ],
     kernel = ":target",
