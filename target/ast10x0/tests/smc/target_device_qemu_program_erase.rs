@@ -15,8 +15,8 @@
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, FlashDevice, FmcUninit, SmcConfig, SmcController, SmcError,
-    SpiNorFlash, TransferMode,
+    AddressWidth, ChipSelect, FlashAddressingPolicy, FlashConfig, FlashDevice, FmcUninit,
+    SmcConfig, SmcController, SmcError, SpiNorFlash, TransferMode,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
@@ -143,6 +143,22 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
     let read_len = fmc.read(raw_test_offset, &mut mapped_probe)?;
     if read_len != mapped_probe.len() {
         return Err(SmcError::HardwareError);
+    }
+
+    // Integration-level extension-point check: allow explicit 4-byte policy
+    // selection even when this QEMU model uses a small-capacity device.
+    // We assert policy/opcode dispatch configuration here, while preserving
+    // known-good 3-byte execution for the actual program/erase flow below.
+    {
+        let flash_4b = SpiNorFlash::from_fmc(&mut fmc, FLASH_CFG)?
+            .with_addressing_policy(FlashAddressingPolicy::FourByteCommands);
+        if flash_4b.addr_width() != AddressWidth::FourByte {
+            return Err(SmcError::HardwareError);
+        }
+        let profile = flash_4b.command_profile();
+        if profile.page_program != 0x12 || profile.erase_sector_4k != 0x21 {
+            return Err(SmcError::HardwareError);
+        }
     }
 
     let mut flash = SpiNorFlash::from_fmc(&mut fmc, FLASH_CFG)?;
