@@ -33,6 +33,7 @@ rust_library(
         "smc/spi.rs",
         "smc/interrupts.rs",
         "smc/device/mod.rs",
+        "smc/device/block_device.rs",
         "smc/device/flash.rs",
     ],
     crate_name = "ast10x0_peripherals",
@@ -99,6 +100,27 @@ rust_test(
         "smc/types.rs",
     ],
     crate_root = "flash_host_test.rs",
+    edition = "2024",
+    rustc_flags = [
+        "-Adead_code",
+    ],
+    deps = [
+        "@rust_crates//:embedded-storage",
+        "@rust_crates//:nb",
+    ],
+)
+
+rust_test(
+    name = "smc_block_device_test",
+    srcs = [
+        "block_device_host_test.rs",
+        "smc/host_block_device_mod.rs",
+        "smc/device/flash.rs",
+        "smc/device/block_device.rs",
+        "smc/helpers.rs",
+        "smc/types.rs",
+    ],
+    crate_root = "block_device_host_test.rs",
     edition = "2024",
     rustc_flags = [
         "-Adead_code",
