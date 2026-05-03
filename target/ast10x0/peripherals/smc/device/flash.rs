@@ -45,8 +45,8 @@ fn encode_addr_cmd(opcode: u8, offset: u32, width: AddressWidth) -> ([u8; 5], us
     }
 }
 
-/// Minimal read-only flash device API.
-pub trait FlashDevice {
+/// Minimal SPI NOR flash device API.
+pub trait SpiNorFlashDevice {
     /// Read bytes from flash at `offset` into `buf`.
     fn read(&self, offset: u32, buf: &mut [u8]) -> Result<usize, SmcError>;
 
@@ -453,12 +453,12 @@ impl<'a> SpiNorFlash<'a> {
         self.validate_range(offset, data.len())
     }
 
-    fn issue_command(&mut self, _cmd: &[u8], _payload: &[u8]) -> Result<(), SmcError> {
+    fn issue_command(&mut self, cmd: &[u8], payload: &[u8]) -> Result<(), SmcError> {
         let cs = self.cs;
         let mode = self.cmd_mode;
         match &self.backend {
-            FlashBackend::Fmc(fmc) => fmc.transceive_user(cs, _cmd, _payload, &mut [], mode),
-            FlashBackend::Spi(spi) => spi.transceive_user(cs, _cmd, _payload, &mut [], mode),
+            FlashBackend::Fmc(fmc) => fmc.transceive_user(cs, cmd, payload, &mut [], mode),
+            FlashBackend::Spi(spi) => spi.transceive_user(cs, cmd, payload, &mut [], mode),
         }
     }
 
@@ -506,7 +506,7 @@ impl<'a> SpiNorFlash<'a> {
     }
 }
 
-impl FlashDevice for SpiNorFlash<'_> {
+impl SpiNorFlashDevice for SpiNorFlash<'_> {
     fn read(&self, offset: u32, buf: &mut [u8]) -> Result<usize, SmcError> {
         // Bounds-check against the selected CS's capacity, then translate to
         // the controller-window address before issuing the segment-routed read.

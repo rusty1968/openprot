@@ -29,7 +29,7 @@
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    FlashConfig, FlashDevice, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    FlashConfig, SpiNorFlashDevice, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
     SpiUninit,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};

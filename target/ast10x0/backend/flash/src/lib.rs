@@ -4,7 +4,7 @@
 #![no_std]
 
 use ast10x0_peripherals::smc::{
-    FlashConfig, FlashDevice, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    FlashConfig, SpiNorFlashDevice, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
     SpiReady, SpiUninit,
 };
 use flash_api::backend::{BackendError, FlashBackend, FlashInfo, IrqMask};

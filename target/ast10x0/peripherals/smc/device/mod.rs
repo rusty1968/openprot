@@ -5,4 +5,4 @@
 
 mod flash;
 
-pub use flash::{FlashAddressingPolicy, FlashCommandProfile, FlashDevice, JedecId, SpiNorFlash};
+pub use flash::{FlashAddressingPolicy, FlashCommandProfile, SpiNorFlashDevice, JedecId, SpiNorFlash};
