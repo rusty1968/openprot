@@ -49,6 +49,19 @@ minimal-TCB goals.
 - Any future "update mode" must be an explicit, authenticated state machine,
   not ad-hoc writes to locked policy tables.
 
+Said differently: the intended operational model is static configuration after
+bring-up. The SPI monitor should be programmed during trusted initialization,
+verified, and then treated as read-only policy state for the remainder of the
+session. This applies both to policy tables and to SCU-backed routing or
+passthrough choices associated with the monitor.
+
+The current repository scaffold is not yet the full enforcement point for that
+rule. The typestate API already models `Configured` and `Locked` as distinct
+states, but some raw register access remains exposed while register coverage and
+precise lock semantics are still being finished. That gap should be treated as
+an implementation TODO, not as permission to rely on dynamic post-lock
+reconfiguration.
+
 ### Test implications
 
 - Unit tests: verify invalid transitions fail deterministically.
@@ -70,6 +83,8 @@ minimal-TCB goals.
   - lock
   - read back status
 - Validate transitions and lock semantics.
+- Tighten raw register exposure so post-lock APIs become observational rather
+  than mutating.
 
 ## Phase 3: Policy Model
 

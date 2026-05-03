@@ -60,6 +60,19 @@ A monitor enables enforcing different policies across lifecycle states:
 This supports a minimal-TCB posture by making policy hardware-enforced rather
 than purely convention-based.
 
+In practical terms, this means SPI monitor configuration is expected to be
+static after trusted setup. Boot or provisioning code may program command
+tables, address filters, passthrough settings, and related route controls, but
+steady-state runtime should treat that configuration as fixed. The monitor is
+meant to act as a hardware guardrail that is established once, verified, and
+then left in place for the rest of the boot session.
+
+This is an intentional design choice, not just a convenience. If runtime code
+could freely rewrite monitor policy, the monitor would stop being a reliable
+enforcement boundary and would instead become another mutable software-owned
+configuration surface. The desired posture is therefore: configure early,
+validate, lock, and operate under that locked policy.
+
 ### 3) Operational Safety and Debugging
 
 Even when full blocking is not enabled, monitor routing and status are valuable
@@ -195,6 +208,11 @@ target/ast10x0/peripherals/spimonitor/
 4. Runtime operation
 - Monitor remains active as hardware guardrail.
 - No dynamic policy edits in steady state.
+
+The only expected exception is a future authenticated update or recovery flow.
+If such a mode is supported, it should be modeled as an explicit lifecycle
+transition owned by trusted code, not as ad-hoc runtime reconfiguration from
+normal operation.
 
 ## Phased Implementation Plan
 
