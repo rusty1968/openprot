@@ -3,6 +3,7 @@
 
 #![no_std]
 
+pub mod scu;
 pub mod uart;
 pub mod smc;
 pub mod spimonitor;
