@@ -10,8 +10,16 @@ use ast10x0_peripherals::smc::{
 };
 use flash_api::backend::{BackendError, FlashBackend, FlashInfo, IrqMask};
 
-const FLASH_CFG: FlashConfig = FlashConfig {
+const FMC_FLASH_CFG: FlashConfig = FlashConfig {
     capacity_mb: 1,
+    page_size: 256,
+    sector_size: 4096,
+    block_size: 65536,
+    spi_clock_mhz: 25,
+};
+
+const SPI_FLASH_CFG: FlashConfig = FlashConfig {
+    capacity_mb: 32,
     page_size: 256,
     sector_size: 4096,
     block_size: 65536,
@@ -67,8 +75,13 @@ impl Ast10x0FlashBackend {
     }
 
     pub fn new_for_controller(controller: Ast10x0Controller) -> Self {
-        // Use internal helper for default path - safe because FLASH_CFG is static and known.
-        Self::build_controller(controller, FLASH_CFG)
+        let cfg = match controller {
+            Ast10x0Controller::Fmc => FMC_FLASH_CFG,
+            Ast10x0Controller::Spi1 | Ast10x0Controller::Spi2 => SPI_FLASH_CFG,
+        };
+
+        // Use internal helper for default path - safe because default cfg is static and known.
+        Self::build_controller(controller, cfg)
     }
 
     /// Construct backend from a board descriptor skeleton.
