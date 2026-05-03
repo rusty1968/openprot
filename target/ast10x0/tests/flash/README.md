@@ -63,3 +63,40 @@ When the path is healthy, streamed output should include lines similar to:
 - `flash_server: ipc rx ch=... req_len=... op=0x01`
 - `flash_server: ipc tx ch=... resp_len=...`
 - `flash exists check passed`
+
+## Design Note: Per-Controller Process Isolation
+
+Each SMC controller (FMC, SPI1, SPI2) runs as a separate pigweed kernel process with its
+own MPU domain. This is an intentional minimal-TCB design choice, not an artifact of the
+test structure.
+
+**Why not one process for all three controllers (Zephyr style)?**
+
+Zephyr's `aspeed_flash` driver uses a single kernel-mode driver that owns all three
+controllers and their shared `.ram_nc` DMA region. This is efficient — one contiguous
+non-cacheable SRAM allocation, one allocator, easy buffer reuse across controllers — but
+it means a bug in any controller path can corrupt the state of the others.
+
+In the reference architecture, process isolation is the security primitive:
+
+- FMC holds the RoT boot image. A defect in SPI1/SPI2 handling cannot corrupt FMC state.
+- Each process is granted only the hardware resources (register block, flash window, IRQ,
+  DMA buffer) it needs. The MPU enforces this at runtime, not by convention.
+- A compromised or faulting SPI1 server is contained. The kernel can restart it without
+  touching FMC or SPI2.
+
+**DMA buffer allocation in the per-process model**
+
+Each server process will be granted its own 4 KB slice of non-cacheable SRAM
+(`0xA0000`–`0xBFFFF`, the 128 KB NC window above the 640 KB cached region) via a
+`memory_mapping` entry in `system.json5` with `type: "device"`. This maps to MPU
+attributes TEX=000, C=0, B=1 — identical to the `#[link_section = ".ram_nc"]`
+placement used in `aspeed-rust`'s bare-metal test.
+
+The codegen emits `mapping::FOO_DMA_BUF_START_ADDRESS` for each mapping, giving the
+server the physical address to pass as the DMA destination. Reads larger than the
+128-byte DMA minimum use the NC buffer; smaller reads use PIO directly from the
+memory-mapped flash window.
+
+The static 4 KB per-controller allocation is the tradeoff for isolation: no cross-process
+pool, no dynamic allocation, but also no cross-process corruption risk.
