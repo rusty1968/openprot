@@ -1,0 +1,95 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 Flash Service Configuration (QEMU userspace test)
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 1344,
+    },
+    kernel: {
+        flash_start_address: 0x00000540,
+        flash_size_bytes: 129728,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "flash_server_bin",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "flash_server_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "flash",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "fmc_irq",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "fmc",
+                                    number: 39,
+                                },
+                            ],
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            // FMC controller register block
+                            name: "fmc_regs",
+                            type: "device",
+                            start_address: 0x7e620000,
+                            size_bytes: 0x1000,
+                        },
+                        {
+                            // FMC CS0 AHB flash window
+                            name: "fmc_flash_window",
+                            type: "device",
+                            start_address: 0x80000000,
+                            size_bytes: 0x100000,
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "flash_server_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "flash_client_app",
+            flash_size_bytes: 65536,
+            processes: [
+                {
+                    name: "flash_client_process",
+                    ram_size_bytes: 32768,
+                    objects: [
+                        {
+                            name: "flash",
+                            type: "channel_initiator",
+                            handler_process: "flash_server_process",
+                            handler_object_name: "flash",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "flash_client_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}
