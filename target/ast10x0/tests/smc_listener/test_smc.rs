@@ -14,6 +14,7 @@ const PAYLOAD_VERSION: u8 = 1;
 const EXPECT_DMA_COMPLETE_BIT: u8 = 11;
 const EXPECT_DMA_ERROR_BIT: u8 = 10;
 const EXPECT_WRITE_PROTECT_BIT: u8 = 9;
+const OBSERVED_FMC_IRQ_SEEN: u8 = 1 << 0;
 
 fn run() -> Result<()> {
     let wait_return = syscall::object_wait(handle::IPC, Signals::READABLE, Instant::MAX)?;
@@ -32,6 +33,10 @@ fn run() -> Result<()> {
         || rx[2] != EXPECT_DMA_ERROR_BIT
         || rx[3] != EXPECT_WRITE_PROTECT_BIT
     {
+        return Err(Error::FailedPrecondition);
+    }
+
+    if (rx[4] & OBSERVED_FMC_IRQ_SEEN) == 0 {
         return Err(Error::FailedPrecondition);
     }
 

@@ -27,17 +27,18 @@ const OBSERVED_FMC_IRQ_SEEN: u8 = 1 << 0;
 fn run() -> Result<()> {
     // Mimic UART-listener pattern: wait on interrupt object, ack if observed,
     // then report a payload to the server process over IPC.
-    let mut observed = 0u8;
-    if let Ok(wait_return) = syscall::object_wait(
+    let wait_return = syscall::object_wait(
         handle::SMC_INTERRUPTS,
         signals::FMC_IRQ,
         Instant::from_ticks(1_000),
-    ) {
-        if wait_return.pending_signals.contains(signals::FMC_IRQ) && wait_return.user_data == 0 {
-            observed |= OBSERVED_FMC_IRQ_SEEN;
-            let _ = syscall::interrupt_ack(handle::SMC_INTERRUPTS, wait_return.pending_signals);
-        }
+    )?;
+
+    if !wait_return.pending_signals.contains(signals::FMC_IRQ) || wait_return.user_data != 0 {
+        return Err(pw_status::Error::FailedPrecondition);
     }
+
+    let observed = OBSERVED_FMC_IRQ_SEEN;
+    let _ = syscall::interrupt_ack(handle::SMC_INTERRUPTS, wait_return.pending_signals);
 
     const RECV_LEN: usize = 0;
     let send_buf = [

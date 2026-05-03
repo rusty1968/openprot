@@ -96,8 +96,8 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
 
     let test_offset = 0x0000_1000u32;
     let raw_test_offset = 0x0000_2000u32;
-    let mut page = [0u8; 256];
-    for (i, byte) in page.iter_mut().enumerate() {
+    let mut image = [0u8; 512];
+    for (i, byte) in image.iter_mut().enumerate() {
         *byte = (i as u8) ^ 0xA5;
     }
 
@@ -116,7 +116,7 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
         return Err(SmcError::HardwareError);
     }
 
-    issue_page_program_raw(&fmc, raw_test_offset, &page)?;
+    issue_page_program_raw(&fmc, raw_test_offset, &image[..256])?;
     let sr_after_pp = wait_wip_clear_raw(&fmc, 10_000)?;
     if (sr_after_pp & STATUS_WIP_BIT) != 0 {
         return Err(SmcError::HardwareError);
@@ -154,18 +154,14 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
         return Err(SmcError::HardwareError);
     }
 
-    let written = flash.program_page(test_offset, &page)?;
-    if written != page.len() {
+    let written = flash.update_region(test_offset, &image)?;
+    if written != image.len() {
         return Err(SmcError::HardwareError);
     }
 
-    if !flash.verify(test_offset, &page)? {
-        return Err(SmcError::HardwareError);
-    }
+    flash.erase_range(test_offset, image.len())?;
 
-    flash.erase_sector(test_offset)?;
-
-    let erased = [0xFFu8; 256];
+    let erased = [0xFFu8; 512];
     if !flash.verify(test_offset, &erased)? {
         return Err(SmcError::HardwareError);
     }

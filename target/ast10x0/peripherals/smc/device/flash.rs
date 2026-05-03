@@ -169,6 +169,87 @@ impl<'a> SpiNorFlash<'a> {
         self
     }
 
+    /// Program an arbitrary-length buffer by issuing page-sized writes.
+    ///
+    /// The starting `offset` must be page-aligned. The final chunk may be
+    /// shorter than a full page.
+    pub fn program(&mut self, offset: u32, data: &[u8]) -> Result<usize, SmcError> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        let page_size = self.cfg.page_size as usize;
+        if page_size == 0 || (offset as usize) % page_size != 0 {
+            return Err(SmcError::InvalidCapacity);
+        }
+        self.validate_range(offset, data.len())?;
+
+        let mut written = 0usize;
+        while written < data.len() {
+            let chunk_len = core::cmp::min(page_size, data.len() - written);
+            let chunk_offset = offset
+                .checked_add(written as u32)
+                .ok_or(SmcError::InvalidCapacity)?;
+            self.program_page(chunk_offset, &data[written..written + chunk_len])?;
+            written += chunk_len;
+        }
+
+        Ok(written)
+    }
+
+    /// Erase all sectors intersecting the requested byte range.
+    ///
+    /// The erased interval is rounded outward to sector boundaries.
+    pub fn erase_range(&mut self, offset: u32, len: usize) -> Result<(), SmcError> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        self.validate_range(offset, len)?;
+
+        let sector_size = self.cfg.sector_size as usize;
+        if sector_size == 0 {
+            return Err(SmcError::InvalidCapacity);
+        }
+
+        let start = (offset as usize / sector_size) * sector_size;
+        let end = (offset as usize)
+            .checked_add(len)
+            .ok_or(SmcError::InvalidCapacity)?;
+        let end_aligned = end
+            .checked_add(sector_size - 1)
+            .ok_or(SmcError::InvalidCapacity)?
+            / sector_size
+            * sector_size;
+
+        let mut current = start;
+        while current < end_aligned {
+            self.erase_sector(current as u32)?;
+            current += sector_size;
+        }
+
+        Ok(())
+    }
+
+    /// Perform a correctness-first flash update of the requested region.
+    ///
+    /// This helper erases all sectors intersecting the target range, programs
+    /// the supplied bytes page-by-page, then verifies the written contents.
+    /// Returns the number of bytes programmed on success.
+    pub fn update_region(&mut self, offset: u32, data: &[u8]) -> Result<usize, SmcError> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        self.erase_range(offset, data.len())?;
+        let written = self.program(offset, data)?;
+        if !self.verify(offset, data)? {
+            return Err(SmcError::HardwareError);
+        }
+
+        Ok(written)
+    }
+
     fn validate_capacity_cfg(cfg: FlashConfig, expected: FlashConfig) -> Result<(), SmcError> {
         if cfg != expected {
             return Err(SmcError::InvalidCapacity);
