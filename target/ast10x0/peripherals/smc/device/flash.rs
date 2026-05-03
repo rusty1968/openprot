@@ -73,9 +73,62 @@ pub trait FlashDevice {
 pub mod commands {
     pub const WRITE_ENABLE: u8 = 0x06;
     pub const ERASE_SECTOR_4K: u8 = 0x20;
+    pub const ERASE_SECTOR_4K_4B: u8 = 0x21;
     pub const PAGE_PROGRAM: u8 = 0x02;
+    pub const PAGE_PROGRAM_4B: u8 = 0x12;
+    pub const READ_FAST: u8 = 0x0B;
+    pub const READ_FAST_4B: u8 = 0x0C;
     pub const READ_STATUS: u8 = 0x05;
     pub const READ_ID: u8 = 0x9F;
+}
+
+/// Addressing policy for SPI NOR command transactions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashAddressingPolicy {
+    /// Use 3-byte addressing command set.
+    ThreeByteOnly,
+    /// Use 4-byte addressing command set.
+    FourByteCommands,
+}
+
+impl FlashAddressingPolicy {
+    pub const fn addr_width(self) -> AddressWidth {
+        match self {
+            Self::ThreeByteOnly => AddressWidth::ThreeByte,
+            Self::FourByteCommands => AddressWidth::FourByte,
+        }
+    }
+}
+
+/// SPI NOR opcode profile selected by addressing policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlashCommandProfile {
+    pub read_fast: u8,
+    pub page_program: u8,
+    pub erase_sector_4k: u8,
+    pub read_status: u8,
+    pub write_enable: u8,
+}
+
+impl FlashCommandProfile {
+    const fn for_addressing(policy: FlashAddressingPolicy) -> Self {
+        match policy {
+            FlashAddressingPolicy::ThreeByteOnly => Self {
+                read_fast: commands::READ_FAST,
+                page_program: commands::PAGE_PROGRAM,
+                erase_sector_4k: commands::ERASE_SECTOR_4K,
+                read_status: commands::READ_STATUS,
+                write_enable: commands::WRITE_ENABLE,
+            },
+            FlashAddressingPolicy::FourByteCommands => Self {
+                read_fast: commands::READ_FAST_4B,
+                page_program: commands::PAGE_PROGRAM_4B,
+                erase_sector_4k: commands::ERASE_SECTOR_4K_4B,
+                read_status: commands::READ_STATUS,
+                write_enable: commands::WRITE_ENABLE,
+            },
+        }
+    }
 }
 
 /// Compare `expected` against bytes produced by `read`, in chunks of at most
@@ -159,6 +212,10 @@ pub struct SpiNorFlash<'a> {
     /// IO mode used for all SPI command transactions (WREN, RDSR, PP, SE).
     /// Defaults to `Mode111` (single-wire cmd/addr/data).
     cmd_mode: TransferMode,
+    /// Addressing policy selected for SPI NOR command construction.
+    addressing_policy: FlashAddressingPolicy,
+    /// Opcodes selected for the current addressing policy.
+    command_profile: FlashCommandProfile,
 }
 
 impl<'a> SpiNorFlash<'a> {
@@ -169,12 +226,15 @@ impl<'a> SpiNorFlash<'a> {
 
     /// Build a flash facade from an initialized FMC controller wrapper with explicit CS.
     pub fn from_fmc_cs(fmc: &'a mut FmcReady, cfg: FlashConfig, cs: ChipSelect) -> Result<Self, SmcError> {
+        let addressing_policy = Self::default_addressing_for_cfg(cfg);
         Self::validate_capacity_cfg(cfg, fmc.cs_config(cs)?)?;
         Ok(Self {
             backend: FlashBackend::Fmc(fmc),
             cfg,
             cs,
             cmd_mode: TransferMode::Mode111,
+            addressing_policy,
+            command_profile: FlashCommandProfile::for_addressing(addressing_policy),
         })
     }
 
@@ -185,12 +245,15 @@ impl<'a> SpiNorFlash<'a> {
 
     /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper with explicit CS.
     pub fn from_spi_cs(spi: &'a mut SpiReady, cfg: FlashConfig, cs: ChipSelect) -> Result<Self, SmcError> {
+        let addressing_policy = Self::default_addressing_for_cfg(cfg);
         Self::validate_capacity_cfg(cfg, spi.cs_config(cs)?)?;
         Ok(Self {
             backend: FlashBackend::Spi(spi),
             cfg,
             cs,
             cmd_mode: TransferMode::Mode111,
+            addressing_policy,
+            command_profile: FlashCommandProfile::for_addressing(addressing_policy),
         })
     }
 
@@ -201,6 +264,13 @@ impl<'a> SpiNorFlash<'a> {
     /// and is unaffected by this setting.
     pub fn with_cmd_mode(mut self, mode: TransferMode) -> Self {
         self.cmd_mode = mode;
+        self
+    }
+
+    /// Override the addressing policy used for command-profile selection.
+    pub fn with_addressing_policy(mut self, policy: FlashAddressingPolicy) -> Self {
+        self.addressing_policy = policy;
+        self.command_profile = FlashCommandProfile::for_addressing(policy);
         self
     }
 
@@ -300,6 +370,22 @@ impl<'a> SpiNorFlash<'a> {
             return Err(SmcError::InvalidCapacity);
         }
         Ok(())
+    }
+
+    fn default_addressing_for_cfg(cfg: FlashConfig) -> FlashAddressingPolicy {
+        if cfg.capacity_mb > 16 {
+            FlashAddressingPolicy::FourByteCommands
+        } else {
+            FlashAddressingPolicy::ThreeByteOnly
+        }
+    }
+
+    pub fn addr_width(&self) -> AddressWidth {
+        self.addressing_policy.addr_width()
+    }
+
+    pub fn command_profile(&self) -> FlashCommandProfile {
+        self.command_profile
     }
 
     fn cs_config_for(&self, cs: ChipSelect) -> Result<FlashConfig, SmcError> {
@@ -473,8 +559,11 @@ impl FlashDevice for SpiNorFlash<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_chunked, encode_addr_cmd, expect_jedec_match, JedecId};
-    use crate::smc::types::{AddressWidth, SmcError};
+    use super::{
+        commands, compare_chunked, encode_addr_cmd, expect_jedec_match, FlashAddressingPolicy,
+        FlashCommandProfile, JedecId, SpiNorFlash,
+    };
+    use crate::smc::types::{AddressWidth, FlashConfig, SmcError};
 
     #[test]
     fn encode_addr_cmd_none_emits_opcode_only() {
@@ -495,6 +584,51 @@ mod tests {
         let (buf, len) = encode_addr_cmd(0x13, 0x1234_5678, AddressWidth::FourByte);
         assert_eq!(len, 5);
         assert_eq!(&buf[..len], &[0x13, 0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn command_profile_three_byte_uses_legacy_opcodes() {
+        let profile = FlashCommandProfile::for_addressing(FlashAddressingPolicy::ThreeByteOnly);
+        assert_eq!(profile.read_fast, commands::READ_FAST);
+        assert_eq!(profile.page_program, commands::PAGE_PROGRAM);
+        assert_eq!(profile.erase_sector_4k, commands::ERASE_SECTOR_4K);
+        assert_eq!(profile.read_status, commands::READ_STATUS);
+        assert_eq!(profile.write_enable, commands::WRITE_ENABLE);
+    }
+
+    #[test]
+    fn command_profile_four_byte_uses_4b_opcodes() {
+        let profile = FlashCommandProfile::for_addressing(FlashAddressingPolicy::FourByteCommands);
+        assert_eq!(profile.read_fast, commands::READ_FAST_4B);
+        assert_eq!(profile.page_program, commands::PAGE_PROGRAM_4B);
+        assert_eq!(profile.erase_sector_4k, commands::ERASE_SECTOR_4K_4B);
+        assert_eq!(profile.read_status, commands::READ_STATUS);
+        assert_eq!(profile.write_enable, commands::WRITE_ENABLE);
+    }
+
+    #[test]
+    fn default_addressing_policy_derives_from_capacity() {
+        assert_eq!(
+            SpiNorFlash::default_addressing_for_cfg(FlashConfig {
+                capacity_mb: 8,
+                page_size: 256,
+                sector_size: 4096,
+                block_size: 65536,
+                spi_clock_mhz: 25,
+            }),
+            FlashAddressingPolicy::ThreeByteOnly
+        );
+
+        assert_eq!(
+            SpiNorFlash::default_addressing_for_cfg(FlashConfig {
+                capacity_mb: 32,
+                page_size: 256,
+                sector_size: 4096,
+                block_size: 65536,
+                spi_clock_mhz: 25,
+            }),
+            FlashAddressingPolicy::FourByteCommands
+        );
     }
 
     fn fixture_1kb() -> [u8; 1024] {
