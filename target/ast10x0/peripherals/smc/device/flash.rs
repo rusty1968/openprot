@@ -465,13 +465,14 @@ impl<'a> SpiNorFlash<'a> {
     fn read_status_impl(&self) -> Result<u8, SmcError> {
         let cs = self.cs;
         let mode = self.cmd_mode;
+        let opcode = self.command_profile().read_status;
         let mut status = [0u8; 1];
         match &self.backend {
             FlashBackend::Fmc(fmc) => {
-                fmc.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, mode)?
+                fmc.transceive_user(cs, &[opcode], &[], &mut status, mode)?
             }
             FlashBackend::Spi(spi) => {
-                spi.transceive_user(cs, &[commands::READ_STATUS], &[], &mut status, mode)?
+                spi.transceive_user(cs, &[opcode], &[], &mut status, mode)?
             }
         }
         Ok(status[0])
@@ -527,8 +528,10 @@ impl FlashDevice for SpiNorFlash<'_> {
     fn erase_sector(&mut self, offset: u32) -> Result<(), SmcError> {
         self.validate_sector_erase(offset)?;
 
-        self.issue_command(&[commands::WRITE_ENABLE], &[])?;
-        let (cmd, len) = encode_addr_cmd(commands::ERASE_SECTOR_4K, offset, AddressWidth::ThreeByte);
+        let profile = self.command_profile();
+        let width = self.addr_width();
+        self.issue_command(&[profile.write_enable], &[])?;
+        let (cmd, len) = encode_addr_cmd(profile.erase_sector_4k, offset, width);
         self.issue_command(&cmd[..len], &[])?;
         self.wait_write_complete(10_000)
     }
@@ -536,8 +539,10 @@ impl FlashDevice for SpiNorFlash<'_> {
     fn program_page(&mut self, offset: u32, data: &[u8]) -> Result<usize, SmcError> {
         self.validate_page_program(offset, data)?;
 
-        self.issue_command(&[commands::WRITE_ENABLE], &[])?;
-        let (cmd, len) = encode_addr_cmd(commands::PAGE_PROGRAM, offset, AddressWidth::ThreeByte);
+        let profile = self.command_profile();
+        let width = self.addr_width();
+        self.issue_command(&[profile.write_enable], &[])?;
+        let (cmd, len) = encode_addr_cmd(profile.page_program, offset, width);
         self.issue_command(&cmd[..len], data)?;
         self.wait_write_complete(10_000)?;
         Ok(data.len())
