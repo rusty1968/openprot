@@ -2,29 +2,52 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![no_std]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
-use ast10x0_board_descriptors::Ast10x0BoardDescriptor;
+use ast10x0_board_descriptors::{apply_spim_wiring, Ast10x0BoardDescriptor, SpimWiringError};
+use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::{
-    FlashConfig, SpiNorFlashDevice, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
-    SpiReady, SpiUninit,
+    FlashConfig, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    SpiNorFlashDevice, SpiReady, SpiUninit,
 };
+use ast10x0_peripherals::spimonitor::LockedSpiMonitor;
 use flash_api::backend::{BackendError, FlashBackend, FlashInfo, IrqMask};
 
-const FMC_FLASH_CFG: FlashConfig = FlashConfig {
-    capacity_mb: 1,
-    page_size: 256,
-    sector_size: 4096,
-    block_size: 65536,
-    spi_clock_mhz: 25,
-};
+/// Errors raised while constructing the flash backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackendInitError {
+    /// Descriptor did not provide a CS0 flash configuration.
+    MissingCs0Config,
+    /// Descriptor specified a CS1 device, which the current backend does not support.
+    Cs1NotSupported,
+    /// FMC controller cannot have SPIM wiring; descriptor must set `spim_wiring: None`.
+    FmcWithSpimWiring,
+    /// SPI controller requires SPIM wiring; descriptor must set `spim_wiring: Some(_)`.
+    SpiWithoutSpimWiring,
+    /// Applying SCU/SPIPF wiring failed.
+    SpimWiring(SpimWiringError),
+    /// SMC controller construction or init failed.
+    Smc(SmcError),
+}
 
-const SPI_FLASH_CFG: FlashConfig = FlashConfig {
-    capacity_mb: 32,
-    page_size: 256,
-    sector_size: 4096,
-    block_size: 65536,
-    spi_clock_mhz: 25,
-};
+impl From<SpimWiringError> for BackendInitError {
+    fn from(value: SpimWiringError) -> Self {
+        Self::SpimWiring(value)
+    }
+}
+
+impl From<SmcError> for BackendInitError {
+    fn from(value: SmcError) -> Self {
+        Self::Smc(value)
+    }
+}
 
 fn smc_to_backend_error(err: SmcError) -> BackendError {
     match err {
@@ -43,6 +66,10 @@ fn smc_to_backend_error(err: SmcError) -> BackendError {
 pub struct Ast10x0FlashBackend {
     controller: ControllerBackend,
     cfg: FlashConfig,
+    /// SPIPF lock witness held for the lifetime of the backend. `None` for
+    /// FMC; `Some(_)` for SPI controllers. Dropping does not unlock — the
+    /// SPIPF lock is one-way per silicon spec.
+    _monitor: Option<LockedSpiMonitor>,
 }
 
 enum ControllerBackend {
@@ -58,131 +85,130 @@ pub enum Ast10x0Controller {
 }
 
 impl Ast10x0FlashBackend {
-    pub fn new() -> Self {
+    /// Construct backend for the FMC controller with the default flash config.
+    pub fn new() -> Result<Self, BackendInitError> {
         Self::new_for_controller(Ast10x0Controller::Fmc)
     }
 
-    pub fn new_fmc() -> Self {
+    /// Construct an FMC-backed backend.
+    pub fn new_fmc() -> Result<Self, BackendInitError> {
         Self::new_for_controller(Ast10x0Controller::Fmc)
     }
 
-    pub fn new_spi1() -> Self {
-        Self::new_for_controller(Ast10x0Controller::Spi1)
+    /// Construct an SPI1-backed backend with default SPIM0 wiring and the
+    /// BMC default opcode allow-list policy.
+    pub fn new_spi1() -> Result<Self, BackendInitError> {
+        Self::new_with_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default_spi1())
     }
 
-    pub fn new_spi2() -> Self {
-        Self::new_for_controller(Ast10x0Controller::Spi2)
+    /// Construct an SPI2-backed backend with default SPIM2 wiring and the
+    /// BMC default opcode allow-list policy.
+    pub fn new_spi2() -> Result<Self, BackendInitError> {
+        Self::new_with_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default_spi2())
     }
 
-    pub fn new_for_controller(controller: Ast10x0Controller) -> Self {
-        let cfg = match controller {
-            Ast10x0Controller::Fmc => FMC_FLASH_CFG,
-            Ast10x0Controller::Spi1 | Ast10x0Controller::Spi2 => SPI_FLASH_CFG,
-        };
-
-        // Use internal helper for default path - safe because default cfg is static and known.
-        Self::build_controller(controller, cfg)
+    /// Construct a backend for the requested controller using a built-in
+    /// default descriptor. SPI controllers route through their default SPIM
+    /// instance with `presets::bmc_default_policy()`.
+    pub fn new_for_controller(
+        controller: Ast10x0Controller,
+    ) -> Result<Self, BackendInitError> {
+        match controller {
+            Ast10x0Controller::Fmc => {
+                Self::new_with_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default())
+            }
+            Ast10x0Controller::Spi1 => {
+                Self::new_with_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default_spi1())
+            }
+            Ast10x0Controller::Spi2 => {
+                Self::new_with_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default_spi2())
+            }
+        }
     }
 
-    /// Construct backend from a board descriptor skeleton.
+    /// Construct a backend from a board descriptor.
     ///
-    /// Current backend path only supports a single CS0 flash profile.
-    /// Returns error if descriptor is missing CS0 or specifies unsupported CS1.
-    pub fn new_with_descriptor(descriptor: Ast10x0BoardDescriptor) -> Result<Self, &'static str> {
-        let cfg = descriptor
-            .cs0
-            .ok_or("board descriptor must provide CS0 flash configuration")?;
-        
+    /// For SPI controllers, applies SCU mux + SPIPF policy + SPIPF lock
+    /// before initializing the SMC controller. For FMC, no SPIM step runs.
+    /// The SPIPF lock is one-way; choose the policy carefully.
+    pub fn new_with_descriptor(
+        descriptor: Ast10x0BoardDescriptor,
+    ) -> Result<Self, BackendInitError> {
+        let cfg = descriptor.cs0.ok_or(BackendInitError::MissingCs0Config)?;
         if descriptor.cs1.is_some() {
-            return Err("descriptor CS1 is not yet supported by this flash backend");
+            return Err(BackendInitError::Cs1NotSupported);
         }
 
-        let controller = match descriptor.controller {
-            SmcController::Fmc => Ast10x0Controller::Fmc,
-            SmcController::Spi1 => Ast10x0Controller::Spi1,
-            SmcController::Spi2 => Ast10x0Controller::Spi2,
+        let monitor = match (descriptor.controller, descriptor.spim_wiring.as_ref()) {
+            (SmcController::Fmc, None) => None,
+            (SmcController::Fmc, Some(_)) => {
+                return Err(BackendInitError::FmcWithSpimWiring);
+            }
+            (SmcController::Spi1, None) | (SmcController::Spi2, None) => {
+                return Err(BackendInitError::SpiWithoutSpimWiring);
+            }
+            (controller_id, Some(wiring)) => {
+                // SAFETY: the backend takes exclusive ownership of the SCU
+                // block and the routed SPIPF block for its lifetime; one
+                // backend instance exists per server process.
+                let scu = unsafe { ScuRegisters::new_global() };
+                let locked = unsafe {
+                    apply_spim_wiring(&scu, controller_id, *wiring, &descriptor.monitor_policy)
+                }?;
+                Some(locked)
+            }
         };
 
-        Self::new_with_cfg_internal(controller, cfg).map_err(|_| "failed to initialize flash backend from descriptor")
+        let controller = build_smc_controller(descriptor.controller, cfg)?;
+        Ok(Self {
+            controller,
+            cfg,
+            _monitor: monitor,
+        })
     }
 
-    /// Internal helper: build controller without exposing Result to public API paths.
-    fn build_controller(controller: Ast10x0Controller, cfg: FlashConfig) -> Self {
-        let config = SmcConfig {
-            controller_id: match controller {
-                Ast10x0Controller::Fmc => SmcController::Fmc,
-                Ast10x0Controller::Spi1 => SmcController::Spi1,
-                Ast10x0Controller::Spi2 => SmcController::Spi2,
-            },
-            cs0: Some(cfg),
-            cs1: None,
-            dma_enabled: false,
-            enable_interrupts: false,
-        };
+    /// Construct a backend assuming SPIM wiring + SPIPF policy + SPIPF
+    /// lock have already been programmed by trusted setup code (typically
+    /// the kernel target's `main` before `codegen::start()`). Does not
+    /// touch SCU or SPIPF blocks.
+    ///
+    /// Lets the SPI server processes run without MMIO access to SCU or
+    /// SPIPF, preserving per-process isolation.
+    pub fn new_with_pre_wired_descriptor(
+        descriptor: Ast10x0BoardDescriptor,
+    ) -> Result<Self, BackendInitError> {
+        let cfg = descriptor.cs0.ok_or(BackendInitError::MissingCs0Config)?;
+        if descriptor.cs1.is_some() {
+            return Err(BackendInitError::Cs1NotSupported);
+        }
 
-        let backend = match controller {
-            Ast10x0Controller::Fmc => {
-                // SAFETY: This backend owns the FMC controller for the process lifetime.
-                match (unsafe { FmcUninit::new(config) }).and_then(|u| u.init()) {
-                    Ok(fmc) => ControllerBackend::Fmc(fmc),
-                    Err(_) => loop {}, // Hang: FMC init failed with default config
-                }
+        match (descriptor.controller, descriptor.spim_wiring.as_ref()) {
+            (SmcController::Fmc, None) => {}
+            (SmcController::Fmc, Some(_)) => {
+                return Err(BackendInitError::FmcWithSpimWiring);
             }
-            Ast10x0Controller::Spi1 => {
-                // SAFETY: This backend owns SPI1 for the process lifetime.
-                match (unsafe { SpiUninit::new(SmcController::Spi1, config) }).and_then(|u| u.init()) {
-                    Ok(spi) => ControllerBackend::Spi(spi),
-                    Err(_) => loop {}, // Hang: SPI1 init failed with default config
-                }
+            (SmcController::Spi1, None) | (SmcController::Spi2, None) => {
+                return Err(BackendInitError::SpiWithoutSpimWiring);
             }
-            Ast10x0Controller::Spi2 => {
-                // SAFETY: This backend owns SPI2 for the process lifetime.
-                match (unsafe { SpiUninit::new(SmcController::Spi2, config) }).and_then(|u| u.init()) {
-                    Ok(spi) => ControllerBackend::Spi(spi),
-                    Err(_) => loop {}, // Hang: SPI2 init failed with default config
-                }
-            }
-        };
+            (_, Some(_)) => {}
+        }
 
-        Self { controller: backend, cfg }
+        let controller = build_smc_controller(descriptor.controller, cfg)?;
+        Ok(Self {
+            controller,
+            cfg,
+            _monitor: None,
+        })
     }
 
-    /// Internal cfg constructor that returns Result for error handling during init.
-    fn new_with_cfg_internal(controller: Ast10x0Controller, cfg: FlashConfig) -> Result<Self, ()> {
-        let config = SmcConfig {
-            controller_id: match controller {
-                Ast10x0Controller::Fmc => SmcController::Fmc,
-                Ast10x0Controller::Spi1 => SmcController::Spi1,
-                Ast10x0Controller::Spi2 => SmcController::Spi2,
-            },
-            cs0: Some(cfg),
-            cs1: None,
-            dma_enabled: false,
-            enable_interrupts: false,
-        };
+    /// SPI1-backed backend assuming kernel-side pre-wiring.
+    pub fn new_spi1_pre_wired() -> Result<Self, BackendInitError> {
+        Self::new_with_pre_wired_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default_spi1())
+    }
 
-        let controller = match controller {
-            Ast10x0Controller::Fmc => {
-                // SAFETY: This backend owns the FMC controller for the process lifetime.
-                let uninit = unsafe { FmcUninit::new(config) }.map_err(|_| ())?;
-                let fmc = uninit.init().map_err(|_| ())?;
-                ControllerBackend::Fmc(fmc)
-            }
-            Ast10x0Controller::Spi1 => {
-                // SAFETY: This backend owns SPI1 for the process lifetime.
-                let uninit = unsafe { SpiUninit::new(SmcController::Spi1, config) }.map_err(|_| ())?;
-                let spi = uninit.init().map_err(|_| ())?;
-                ControllerBackend::Spi(spi)
-            }
-            Ast10x0Controller::Spi2 => {
-                // SAFETY: This backend owns SPI2 for the process lifetime.
-                let uninit = unsafe { SpiUninit::new(SmcController::Spi2, config) }.map_err(|_| ())?;
-                let spi = uninit.init().map_err(|_| ())?;
-                ControllerBackend::Spi(spi)
-            }
-        };
-
-        Ok(Self { controller, cfg })
+    /// SPI2-backed backend assuming kernel-side pre-wiring.
+    pub fn new_spi2_pre_wired() -> Result<Self, BackendInitError> {
+        Self::new_with_pre_wired_descriptor(Ast10x0BoardDescriptor::ast10x0_qemu_default_spi2())
     }
 
     fn with_flash<R>(
@@ -198,9 +224,31 @@ impl Ast10x0FlashBackend {
     }
 }
 
-impl Default for Ast10x0FlashBackend {
-    fn default() -> Self {
-        Self::new()
+fn build_smc_controller(
+    controller: SmcController,
+    cfg: FlashConfig,
+) -> Result<ControllerBackend, SmcError> {
+    let config = SmcConfig {
+        controller_id: controller,
+        cs0: Some(cfg),
+        cs1: None,
+        dma_enabled: false,
+        enable_interrupts: false,
+    };
+
+    match controller {
+        SmcController::Fmc => {
+            // SAFETY: backend owns the FMC controller for the process lifetime.
+            let uninit = unsafe { FmcUninit::new(config) }?;
+            let fmc = uninit.init()?;
+            Ok(ControllerBackend::Fmc(fmc))
+        }
+        SmcController::Spi1 | SmcController::Spi2 => {
+            // SAFETY: backend owns the SPI controller for the process lifetime.
+            let uninit = unsafe { SpiUninit::new(controller, config) }?;
+            let spi = uninit.init()?;
+            Ok(ControllerBackend::Spi(spi))
+        }
     }
 }
 

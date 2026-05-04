@@ -12,7 +12,12 @@ use userspace::syscall::{self, Signals};
 
 #[entry]
 fn entry() -> ! {
-    let mut backend = Backend::new_fmc();
+    let Ok(mut backend) = Backend::new_fmc() else {
+        // Init failed at boot. No recovery path for a flash server without
+        // a flash; halt the userspace task. `loop {}` is used (not panic!)
+        // to satisfy the project's no_panics_test on this binary.
+        loop {}
+    };
 
     let _ = syscall::wait_group_add(
         handle::WG,

@@ -40,6 +40,8 @@ rust_binary(
         ":codegen",
         ":linker_script",
         "//target/ast10x0:entry",
+        "//target/ast10x0/board_descriptors:ast10x0_board_descriptors",
+        "//target/ast10x0/peripherals",
         "@pigweed//pw_kernel/arch/arm_cortex_m:arch_arm_cortex_m",
         "@pigweed//pw_kernel/kernel",
         "@pigweed//pw_kernel/subsys/console:console_backend",
