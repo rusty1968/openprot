@@ -65,6 +65,22 @@ fn smc_to_backend_error(err: SmcError) -> BackendError {
     }
 }
 
+/// Minimum read length to take the DMA path; below this, fall through to
+/// the PIO window read. Mirrors aspeed-rust's `SPI_DMA_TRIGGER_LEN`
+/// eligibility (`spicontroller.rs:596`).
+///
+/// Currently set above `flash_api::protocol::MAX_PAYLOAD_SIZE` (256) so
+/// IPC-driven reads always take the PIO path on QEMU. QEMU's re-entrancy
+/// guard (`system/memory.c:545-552`) blocks DMA from reading the SMC's
+/// `aspeed.smc.flash` MemoryRegion while an MMIO write to the same
+/// device's register region (the DMA kick) is still being processed —
+/// the warning surfaces as `Blocked re-entrant IO on MemoryRegion:
+/// aspeed.smc.flash`. The DMA path is correct on silicon and will exercise
+/// once QEMU sets `disable_reentrancy_guard = true` on `s->mmio_flash`
+/// (one-line patch in `qemu/hw/ssi/aspeed_smc.c`); lower this threshold
+/// then.
+const DMA_THRESHOLD: usize = 257;
+
 pub struct Ast10x0FlashBackend {
     controller: ControllerBackend,
     cs0_cfg: FlashConfig,
@@ -73,6 +89,14 @@ pub struct Ast10x0FlashBackend {
     /// FMC; `Some(_)` for SPI controllers. Dropping does not unlock — the
     /// SPIPF lock is one-way per silicon spec.
     _monitor: Option<LockedSpiMonitor>,
+    /// Length of the byte slice targeted by an in-flight DMA, set when
+    /// `dma_read` is kicked and cleared on retry. `Some` while hardware is
+    /// busy; mid-flight calls from other channels see this and return Busy.
+    dma_in_flight_len: Option<usize>,
+    /// Outcome posted by `disable_interrupts` from the IRQ wake. The retry
+    /// `read` call drains this; `Ok(len)` means the DMA bytes are already
+    /// in the caller's buffer.
+    dma_result: Option<Result<usize, BackendError>>,
 }
 
 enum ControllerBackend {
@@ -193,6 +217,8 @@ impl Ast10x0FlashBackend {
             cs0_cfg,
             cs1_cfg,
             _monitor: monitor,
+            dma_in_flight_len: None,
+            dma_result: None,
         })
     }
 
@@ -226,6 +252,8 @@ impl Ast10x0FlashBackend {
             cs0_cfg,
             cs1_cfg,
             _monitor: None,
+            dma_in_flight_len: None,
+            dma_result: None,
         })
     }
 
@@ -274,7 +302,9 @@ fn build_smc_controller(
         cs0: Some(cs0_cfg),
         cs1: cs1_cfg,
         dma_enabled: false,
-        enable_interrupts: false,
+        // Gates `enable_dma_irq()` inside `Smc::dma_read` (controller.rs:217).
+        // Required for the IRQ-driven park/retry path in the runtime.
+        enable_interrupts: true,
     };
 
     match controller {
@@ -330,7 +360,50 @@ impl FlashBackend for Ast10x0FlashBackend {
         address: u32,
         out: &mut [u8],
     ) -> Result<usize, BackendError> {
-        self.with_flash(key, |flash| flash.read(address, out))
+        // Retry path: the IRQ wake finalized a previously-kicked DMA. The
+        // hardware wrote into the same `out` slice this call holds (the
+        // runtime's `response_buf` is its `run_routed_inner` stack-local,
+        // and `PendingRequest::take_into` re-issues the same request bytes
+        // so the slice resolves to the same address).
+        if let Some(result) = self.dma_result.take() {
+            self.dma_in_flight_len = None;
+            return result;
+        }
+        // Mid-flight call from a different channel — refuse without
+        // touching hardware. The original parked request resumes on its
+        // IRQ wake.
+        if self.dma_in_flight_len.is_some() {
+            return Err(BackendError::Busy);
+        }
+
+        // Eligibility: matches `aspeed-rust::read_dma` constraints
+        // (alignment of address, length, and DRAM pointer; non-trivial
+        // length). CS1 falls through because the HAL hardcodes the CS0
+        // segment register inside `Smc::dma_read`.
+        let dma_eligible = key == ChipSelect::Cs0
+            && out.len() >= DMA_THRESHOLD
+            && address.is_multiple_of(4)
+            && out.len().is_multiple_of(4)
+            && (out.as_ptr() as usize).is_multiple_of(4);
+
+        if !dma_eligible {
+            return self.with_flash(key, |flash| flash.read(address, out));
+        }
+
+        let dram_addr = out.as_ptr() as usize;
+        let len_u32 = match u32::try_from(out.len()) {
+            Ok(v) => v,
+            Err(_) => return Err(BackendError::InvalidLength),
+        };
+
+        let r = match &mut self.controller {
+            ControllerBackend::Fmc(fmc) => fmc.dma_read(address, dram_addr, len_u32),
+            ControllerBackend::Spi(spi) => spi.dma_read(address, dram_addr, len_u32),
+        };
+        r.map_err(smc_to_backend_error)?;
+
+        self.dma_in_flight_len = Some(out.len());
+        Err(BackendError::WouldBlock)
     }
 
     fn write(
@@ -372,10 +445,32 @@ impl FlashBackend for Ast10x0FlashBackend {
     }
 
     fn enable_interrupts(&mut self, _mask: IrqMask) -> Result<(), BackendError> {
+        // `Smc::dma_read` enables the IRQ register-side itself when
+        // `SmcConfig::enable_interrupts` is set (controller.rs:217). This
+        // hook exists to satisfy the runtime contract and is a hook point
+        // for future controller-wide arming.
         Ok(())
     }
 
-    fn disable_interrupts(&mut self, _mask: IrqMask) -> Result<(), BackendError> {
+    fn disable_interrupts(&mut self, mask: IrqMask) -> Result<(), BackendError> {
+        if !mask.contains(IrqMask::OPERATION_COMPLETE) {
+            return Ok(());
+        }
+        // The runtime's IRQ branch calls this before re-dispatch
+        // (runtime.rs:162). Drain status, clear bits, transition the
+        // controller back to Ready, and stash the outcome for the retry.
+        let len = match self.dma_in_flight_len {
+            Some(len) => len,
+            None => return Ok(()),
+        };
+        let r = match &mut self.controller {
+            ControllerBackend::Fmc(fmc) => fmc.handle_dma_irq(),
+            ControllerBackend::Spi(spi) => spi.handle_dma_irq(),
+        };
+        self.dma_result = Some(match r {
+            Ok(_) => Ok(len),
+            Err(e) => Err(smc_to_backend_error(e)),
+        });
         Ok(())
     }
 }
