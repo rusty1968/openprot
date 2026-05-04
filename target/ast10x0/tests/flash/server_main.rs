@@ -5,8 +5,8 @@
 #![no_std]
 
 use app_flash_server_fmc::{handle, signals};
-use flash_backend::Backend;
-use flash_server::runtime;
+use flash_backend::{Backend, Cs as ChipSelect};
+use flash_server::runtime::{self, ChannelBinding};
 use userspace::entry;
 use userspace::syscall::{self, Signals};
 
@@ -32,7 +32,17 @@ fn entry() -> ! {
         handle::FMC_IRQ as usize,
     );
 
-    runtime::run(&mut backend, handle::WG, handle::FMC_IRQ, signals::FMC);
+    let channels = [ChannelBinding {
+        handle: handle::FLASH,
+        key: ChipSelect::Cs0,
+    }];
+    runtime::run_routed(
+        &mut backend,
+        handle::WG,
+        &channels,
+        handle::FMC_IRQ,
+        signals::FMC,
+    );
 }
 
 #[panic_handler]

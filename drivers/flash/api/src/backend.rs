@@ -74,31 +74,57 @@ pub struct FlashInfo {
 }
 
 pub trait FlashBackend {
-    /// Static layout/capability of this backend.
-    fn info(&self) -> FlashInfo;
+    /// Per-call routing key. Single-CS backends set this to `()`; multi-CS
+    /// backends set it to a CS index (e.g. `ChipSelect`) so the server
+    /// runtime can dispatch each channel to the right device on a shared
+    /// controller.
+    type RouteKey: Copy;
 
-    /// Probe whether the flash device is present and responsive.
+    /// Static layout/capability of the device selected by `key`.
+    fn info(&self, key: Self::RouteKey) -> FlashInfo;
+
+    /// Probe whether the flash device selected by `key` is present and
+    /// responsive.
     ///
     /// Default implementation assumes presence so existing backends remain
     /// source-compatible until they opt into a hardware-backed probe.
-    fn exists(&mut self) -> Result<bool, BackendError> {
+    fn exists(&mut self, _key: Self::RouteKey) -> Result<bool, BackendError> {
         Ok(true)
     }
 
-    /// Read up to `out.len()` bytes starting at `address` into `out`.
-    /// Returns the number of bytes actually read.
-    fn read(&mut self, address: u32, out: &mut [u8]) -> Result<usize, BackendError>;
+    /// Read up to `out.len()` bytes from the device selected by `key`,
+    /// starting at the device-relative `address`, into `out`. Returns the
+    /// number of bytes actually read.
+    fn read(
+        &mut self,
+        key: Self::RouteKey,
+        address: u32,
+        out: &mut [u8],
+    ) -> Result<usize, BackendError>;
 
-    /// Write `data` starting at `address`. Returns the number of bytes
-    /// actually written.
-    fn write(&mut self, address: u32, data: &[u8]) -> Result<usize, BackendError>;
+    /// Write `data` to the device selected by `key`, starting at the
+    /// device-relative `address`. Returns the number of bytes actually
+    /// written.
+    fn write(
+        &mut self,
+        key: Self::RouteKey,
+        address: u32,
+        data: &[u8],
+    ) -> Result<usize, BackendError>;
 
-    /// Erase `length` bytes starting at `address`. Both must be multiples
-    /// of `FlashInfo::erase_size`.
-    fn erase(&mut self, address: u32, length: u32) -> Result<(), BackendError>;
+    /// Erase `length` bytes on the device selected by `key`, starting at
+    /// the device-relative `address`. Both must be multiples of
+    /// `FlashInfo::erase_size`.
+    fn erase(
+        &mut self,
+        key: Self::RouteKey,
+        address: u32,
+        length: u32,
+    ) -> Result<(), BackendError>;
 
     /// Enable backend-side interrupt sources. Default: no-op for
-    /// fully-synchronous backends.
+    /// fully-synchronous backends. Interrupts are controller-wide, not
+    /// per-CS, so this method does not take a `RouteKey`.
     fn enable_interrupts(&mut self, _mask: IrqMask) -> Result<(), BackendError> {
         Ok(())
     }
