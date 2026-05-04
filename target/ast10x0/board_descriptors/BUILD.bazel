@@ -6,7 +6,10 @@ load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 
 rust_library(
     name = "ast10x0_board_descriptors",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/lib.rs",
+        "src/spim_wiring.rs",
+    ],
     crate_name = "ast10x0_board_descriptors",
     edition = "2024",
     target_compatible_with = TARGET_COMPATIBLE_WITH,
