@@ -4,7 +4,7 @@
 #![no_main]
 #![no_std]
 
-use app_flash_server_spi2::{handle, signals};
+use app_flash_server_fmc_dual_cs::{handle, signals};
 use flash_backend::{Backend, Cs as ChipSelect};
 use flash_server::runtime::{self, ChannelBinding};
 use userspace::entry;
@@ -12,7 +12,7 @@ use userspace::syscall::{self, Signals};
 
 #[entry]
 fn entry() -> ! {
-    let Ok(mut backend) = Backend::new_spi2_pre_wired() else {
+    let Ok(mut backend) = Backend::new_fmc_dual_cs() else {
         // Init failed at boot. No recovery path for a flash server without
         // a flash; halt the userspace task. `loop {}` is used (not panic!)
         // to satisfy the project's no_panics_test on this binary.
@@ -21,27 +21,40 @@ fn entry() -> ! {
 
     let _ = syscall::wait_group_add(
         handle::WG,
-        handle::FLASH,
+        handle::FLASH_CS0,
         Signals::READABLE,
-        handle::FLASH as usize,
+        handle::FLASH_CS0 as usize,
     );
     let _ = syscall::wait_group_add(
         handle::WG,
-        handle::SPI2_IRQ,
-        signals::SPI2,
-        handle::SPI2_IRQ as usize,
+        handle::FLASH_CS1,
+        Signals::READABLE,
+        handle::FLASH_CS1 as usize,
+    );
+    let _ = syscall::wait_group_add(
+        handle::WG,
+        handle::FMC_IRQ,
+        signals::FMC,
+        handle::FMC_IRQ as usize,
     );
 
-    let channels = [ChannelBinding {
-        handle: handle::FLASH,
-        key: ChipSelect::Cs0,
-    }];
+    let channels = [
+        ChannelBinding {
+            handle: handle::FLASH_CS0,
+            key: ChipSelect::Cs0,
+        },
+        ChannelBinding {
+            handle: handle::FLASH_CS1,
+            key: ChipSelect::Cs1,
+        },
+    ];
+
     runtime::run_routed(
         &mut backend,
         handle::WG,
         &channels,
-        handle::SPI2_IRQ,
-        signals::SPI2,
+        handle::FMC_IRQ,
+        signals::FMC,
     );
 }
 

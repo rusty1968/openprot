@@ -1,0 +1,118 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 Flash Service — Dual-CS variant.
+//
+// Hosts a single FMC server process exposing CS0 and CS1 through their own
+// IPC channels (`flash_cs0`, `flash_cs1`). Each channel maps to one chip
+// select inside the server runtime; clients see two independent flashes.
+//
+// Single-CS FMC server is intentionally absent here to avoid double-claiming
+// the FMC IRQ.
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 2048,
+    },
+    kernel: {
+        flash_start_address: 0x00000800,
+        flash_size_bytes: 129024,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "flash_server_fmc_dual_cs_bin",
+            flash_size_bytes: 65536,
+            processes: [
+                {
+                    name: "flash_server_fmc_dual_cs_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "flash_cs0",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "flash_cs1",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "fmc_irq",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "fmc",
+                                    number: 39,
+                                },
+                            ],
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            name: "fmc_regs",
+                            type: "device",
+                            start_address: 0x7e620000,
+                            size_bytes: 0x1000,
+                        },
+                        {
+                            // Covers both CS0 and CS1 AHB segments. CS0 is
+                            // 1 MiB at 0x80000000; CS1's segment base is
+                            // CS0_BASE + CS0_SIZE = 0x80100000. The user-
+                            // mode SPI command path issues byte-stream
+                            // writes to `flash_window_base[cs]`, so the
+                            // process needs MMIO access to the CS1 window
+                            // even though there is no AHB read traffic on
+                            // it.
+                            name: "fmc_flash_window",
+                            type: "device",
+                            start_address: 0x80000000,
+                            size_bytes: 0x200000,
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "flash_server_fmc_dual_cs_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            name: "flash_client_dual_cs_app",
+            flash_size_bytes: 32768,
+            processes: [
+                {
+                    name: "flash_client_dual_cs_process",
+                    ram_size_bytes: 32768,
+                    objects: [
+                        {
+                            name: "flash_cs0",
+                            type: "channel_initiator",
+                            handler_process: "flash_server_fmc_dual_cs_process",
+                            handler_object_name: "flash_cs0",
+                        },
+                        {
+                            name: "flash_cs1",
+                            type: "channel_initiator",
+                            handler_process: "flash_server_fmc_dual_cs_process",
+                            handler_object_name: "flash_cs1",
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "flash_client_dual_cs_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}

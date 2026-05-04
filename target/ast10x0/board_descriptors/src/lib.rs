@@ -103,4 +103,52 @@ impl Ast10x0BoardDescriptor {
             monitor_policy: presets::bmc_default_policy(),
         }
     }
+
+    /// Dual-CS variant of the FMC default. CS1 mirrors CS0's geometry; on
+    /// QEMU CS1 is unconnected so JEDEC reads return `0xFF` and writes
+    /// surface as `IoError`. The descriptor itself is environment-agnostic
+    /// — clients keyed off CS1 see a coherent device whose physical state
+    /// depends on the board.
+    pub fn ast10x0_qemu_default_dual_cs() -> Self {
+        let cs0 = FlashConfig {
+            capacity_mb: 1,
+            page_size: 256,
+            sector_size: 4096,
+            block_size: 65536,
+            spi_clock_mhz: 25,
+        };
+        Self {
+            controller: SmcController::Fmc,
+            cs0: Some(cs0),
+            cs1: Some(cs0),
+            unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
+            spim_wiring: None,
+            monitor_policy: MonitorPolicy::empty(),
+        }
+    }
+
+    /// Dual-CS variant of the SPI1 default. Both CSes use the W25Q256
+    /// geometry; the SPIPF policy and lock are unchanged.
+    pub fn ast10x0_qemu_default_spi1_dual_cs() -> Self {
+        Self {
+            controller: SmcController::Spi1,
+            cs0: Some(FlashConfig::winbond_w25q256()),
+            cs1: Some(FlashConfig::winbond_w25q256()),
+            unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
+            spim_wiring: Some(SpimWiring::default_spi1_via_spim0()),
+            monitor_policy: presets::bmc_default_policy(),
+        }
+    }
+
+    /// Dual-CS variant of the SPI2 default.
+    pub fn ast10x0_qemu_default_spi2_dual_cs() -> Self {
+        Self {
+            controller: SmcController::Spi2,
+            cs0: Some(FlashConfig::winbond_w25q256()),
+            cs1: Some(FlashConfig::winbond_w25q256()),
+            unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
+            spim_wiring: Some(SpimWiring::default_spi2_via_spim2()),
+            monitor_policy: presets::bmc_default_policy(),
+        }
+    }
 }
