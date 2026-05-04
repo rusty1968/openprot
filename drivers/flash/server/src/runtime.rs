@@ -42,6 +42,11 @@ impl<K: Copy> PendingRequest<K> {
         true
     }
 
+    /// True when a request is currently parked awaiting an IRQ.
+    pub fn is_pending(&self) -> bool {
+        self.channel.is_some()
+    }
+
     pub fn take_into(&mut self, out: &mut [u8]) -> Option<(u32, K, usize)> {
         let channel = self.channel.take()?;
         let key = match self.key.take() {
@@ -144,6 +149,32 @@ fn run_routed_inner<B: FlashBackend>(
     let wait_mask = Signals::READABLE | irq_signals;
 
     loop {
+        // While a request is parked, the kernel keeps the channel handler's
+        // READABLE signal asserted (`channel_respond` is the only path that
+        // clears it, per pw_kernel/kernel/object/channel.rs:105-107) — so a
+        // wait_group wait would return the parked channel's READABLE
+        // immediately, ahead of the still-pending IRQ. Wait directly on the
+        // IRQ object in that state to avoid a busy-loop and let the retry
+        // path complete the transaction.
+        if pending.is_pending() {
+            let Ok(wait_return) = syscall::object_wait(irq, irq_signals, Instant::MAX) else {
+                continue;
+            };
+            if !wait_return.pending_signals.contains(irq_signals) {
+                continue;
+            }
+            let acked = wait_return.pending_signals & irq_signals;
+            handle_irq_wake(
+                backend,
+                irq,
+                acked,
+                &mut pending,
+                &mut request_buf,
+                &mut response_buf,
+            );
+            continue;
+        }
+
         let Ok(wait_return) = syscall::object_wait(wg, wait_mask, Instant::MAX) else {
             continue;
         };
@@ -152,41 +183,14 @@ fn run_routed_inner<B: FlashBackend>(
             && wait_return.pending_signals.contains(irq_signals)
         {
             let acked = wait_return.pending_signals & irq_signals;
-            if let Some((channel, key, req_len)) = pending.take_into(&mut request_buf) {
-                pw_log::info!(
-                    "flash_server: irq wake, retry ch={} req_len={} op=0x{:02x}",
-                    channel as u32,
-                    req_len as u32,
-                    request_buf[0] as u32
-                );
-                let _ = backend.disable_interrupts(IrqMask::OPERATION_COMPLETE);
-                let _ = syscall::interrupt_ack(irq, acked);
-
-                match dispatch_request(
-                    backend,
-                    key,
-                    &mut pending,
-                    channel,
-                    &request_buf[..req_len],
-                    &mut response_buf,
-                ) {
-                    DispatchOutcome::Respond(resp_len) => {
-                        pw_log::info!(
-                            "flash_server: irq tx ch={} resp_len={}",
-                            channel as u32,
-                            resp_len as u32
-                        );
-                        let _ = syscall::channel_respond(channel, &response_buf[..resp_len]);
-                    }
-                    DispatchOutcome::Queued => {
-                        pw_log::info!("flash_server: irq retry re-queued ch={}", channel as u32);
-                        // Still not ready; request was re-parked by dispatch.
-                    }
-                }
-            } else {
-                pw_log::info!("flash_server: irq wake with no pending request");
-                let _ = syscall::interrupt_ack(irq, acked);
-            }
+            handle_irq_wake(
+                backend,
+                irq,
+                acked,
+                &mut pending,
+                &mut request_buf,
+                &mut response_buf,
+            );
             continue;
         }
 
@@ -246,6 +250,51 @@ fn run_routed_inner<B: FlashBackend>(
                 // Response will be sent from the IRQ completion path.
             }
         }
+    }
+}
+
+fn handle_irq_wake<B: FlashBackend>(
+    backend: &mut B,
+    irq: u32,
+    acked: Signals,
+    pending: &mut PendingRequest<B::RouteKey>,
+    request_buf: &mut [u8; MAX_REQUEST_SIZE],
+    response_buf: &mut [u8; MAX_RESPONSE_SIZE],
+) {
+    if let Some((channel, key, req_len)) = pending.take_into(request_buf) {
+        pw_log::info!(
+            "flash_server: irq wake, retry ch={} req_len={} op=0x{:02x}",
+            channel as u32,
+            req_len as u32,
+            request_buf[0] as u32
+        );
+        let _ = backend.disable_interrupts(IrqMask::OPERATION_COMPLETE);
+        let _ = syscall::interrupt_ack(irq, acked);
+
+        match dispatch_request(
+            backend,
+            key,
+            pending,
+            channel,
+            &request_buf[..req_len],
+            response_buf,
+        ) {
+            DispatchOutcome::Respond(resp_len) => {
+                pw_log::info!(
+                    "flash_server: irq tx ch={} resp_len={}",
+                    channel as u32,
+                    resp_len as u32
+                );
+                let _ = syscall::channel_respond(channel, &response_buf[..resp_len]);
+            }
+            DispatchOutcome::Queued => {
+                pw_log::info!("flash_server: irq retry re-queued ch={}", channel as u32);
+                // Still not ready; request was re-parked by dispatch.
+            }
+        }
+    } else {
+        pw_log::info!("flash_server: irq wake with no pending request");
+        let _ = syscall::interrupt_ack(irq, acked);
     }
 }
 

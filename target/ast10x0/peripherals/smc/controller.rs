@@ -212,11 +212,17 @@ impl Smc<Ready> {
         let seg = encode_segment(validated.flash_start, validated.flash_end)?;
         self.regs.write_cs0_segment(seg);
 
-        self.regs.write_dma_ctrl(0x1); // DMA_CTRL_REQUEST
-
+        // Enable the completion IRQ before kicking DMA. QEMU evaluates
+        // INTR_CTRL_DMA_EN exactly once at DMA-done time
+        // (`aspeed_smc_dma_done` in qemu/hw/ssi/aspeed_smc.c) and won't
+        // re-fire the IRQ if the bit is set after the fact; aspeed-rust
+        // arms the IRQ before starting DMA for the same reason
+        // (`spicontroller.rs::read_dma`).
         if self.config.enable_interrupts {
             self.regs.enable_dma_irq();
         }
+
+        self.regs.write_dma_ctrl(0x1); // DMA_CTRL_REQUEST
 
         self.state = SmcState::DmaInFlight;
         Ok(())
