@@ -24,7 +24,7 @@ Device-level coverage (`SpiNorFlash` facade):
 Build only:
 
 ```console
-bazelisk build //target/ast10x0/tests/smc:smc
+bazelisk build --config=virt_ast10x0 //target/ast10x0/tests/smc:smc
 ```
 
 Run baseline controller smoke test under QEMU:
