@@ -10,7 +10,7 @@ use flash_api::{
 };
 pub use flash_api::MAX_PAYLOAD_SIZE;
 use userspace::syscall;
-use userspace::time::{Duration as KDuration, Instant, SystemClock};
+use userspace::time::{Clock, Duration as KDuration, Instant, SystemClock};
 use zerocopy::FromBytes;
 
 /// Minimum buffer size required for Flash protocol messages.

@@ -144,15 +144,11 @@ pub enum ClientError {
 | `BufferTooSmall` | Server-side buffer constraint |
 | `Busy` | Backend busy |
 | `Timeout` | Operation timed out |
-| `WouldBlock` | Operation could not be completed immediately |
 | `IoError` | Media-level failure |
 | `NotPermitted` | Blocked by backend policy/protection |
 | `InternalError` | Unclassified server fault |
 
-### `Busy` vs `WouldBlock`
-
-- **`Busy`**: The backend is actively performing another operation and cannot accept new requests. Retry the entire call after waiting.
-- **`WouldBlock`**: This specific operation could not be completed immediately due to resource constraints or contention, but is not blocked by global device activity. Callers can implement smarter retry logic or adjust request parameters.
+Client policy should treat `Busy` as the retryable contention signal.
 
 ## Constraints
 

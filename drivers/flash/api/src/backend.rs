@@ -6,7 +6,8 @@
 //! The shape mirrors the `FlashStorage` HIL from caliptra-mcu-sw but is
 //! synchronous and buffer-borrowing rather than callback-based: the
 //! server runtime drives concurrency, so backends only need to expose
-//! a blocking-or-`WouldBlock` surface.
+//! a blocking-or-`WouldBlock` surface. `WouldBlock` is backend-internal
+//! and is not encoded on the wire.
 
 use crate::protocol::{FlashError, FlashGeometry};
 
@@ -18,8 +19,11 @@ pub enum BackendError {
     BufferTooSmall,
     Busy,
     Timeout,
-    /// Backend cannot complete synchronously at this time; the server
-    /// runtime should retry after `OPERATION_COMPLETE` fires.
+    /// Operation cannot complete synchronously now.
+    ///
+    /// This is an internal backend/server scheduling signal. The server
+    /// runtime should defer and retry after a progress signal, typically
+    /// a completion interrupt, rather than exposing it directly on the wire.
     WouldBlock,
     /// Media-level failure (program/erase verify fail, ECC uncorrectable, …).
     IoError,
@@ -37,7 +41,7 @@ impl From<BackendError> for FlashError {
             BackendError::BufferTooSmall => FlashError::BufferTooSmall,
             BackendError::Busy => FlashError::Busy,
             BackendError::Timeout => FlashError::Timeout,
-            BackendError::WouldBlock => FlashError::WouldBlock,
+            BackendError::WouldBlock => FlashError::Busy,
             BackendError::IoError => FlashError::IoError,
             BackendError::NotPermitted => FlashError::NotPermitted,
             BackendError::InternalError => FlashError::InternalError,

@@ -66,14 +66,11 @@ pub enum FlashError {
     BufferTooSmall = 0x04,
     Busy = 0x05,
     Timeout = 0x06,
-    /// Operation cannot complete right now; the server/runtime may defer
-    /// completion until the backend signals progress via interrupt.
-    WouldBlock = 0x07,
     /// Underlying media reported an I/O error (e.g. flash program failure).
-    IoError = 0x08,
+    IoError = 0x07,
     /// Address/length straddles a region the backend refuses to touch
     /// (e.g. write-protected partition).
-    NotPermitted = 0x09,
+    NotPermitted = 0x08,
     InternalError = 0xFF,
 }
 
@@ -87,9 +84,8 @@ impl From<u8> for FlashError {
             0x04 => Self::BufferTooSmall,
             0x05 => Self::Busy,
             0x06 => Self::Timeout,
-            0x07 => Self::WouldBlock,
-            0x08 => Self::IoError,
-            0x09 => Self::NotPermitted,
+            0x07 => Self::IoError,
+            0x08 => Self::NotPermitted,
             _ => Self::InternalError,
         }
     }
@@ -297,9 +293,8 @@ mod tests {
             (0x04, FlashError::BufferTooSmall),
             (0x05, FlashError::Busy),
             (0x06, FlashError::Timeout),
-            (0x07, FlashError::WouldBlock),
-            (0x08, FlashError::IoError),
-            (0x09, FlashError::NotPermitted),
+            (0x07, FlashError::IoError),
+            (0x08, FlashError::NotPermitted),
             (0xFF, FlashError::InternalError),
         ];
         for (byte, err) in cases {
@@ -313,6 +308,7 @@ mod tests {
         for byte in [0x0Au8, 0x10, 0x42, 0x80, 0xFE] {
             assert_eq!(FlashError::from(byte), FlashError::InternalError);
         }
+        assert_eq!(FlashError::from(0x09), FlashError::InternalError);
     }
 
     #[test]
@@ -416,7 +412,6 @@ mod tests {
         for err in [
             FlashError::Success,
             FlashError::InvalidAddress,
-            FlashError::WouldBlock,
             FlashError::NotPermitted,
             FlashError::InternalError,
         ] {

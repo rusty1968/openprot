@@ -192,14 +192,15 @@ maps channel → backend → `RouteKey`.
 | `BufferTooSmall` | 0x04 | Server-side buffer constraint |
 | `Busy` | 0x05 | Backend busy |
 | `Timeout` | 0x06 | Operation timed out |
-| `WouldBlock` | 0x07 | Could not complete synchronously; retry after IRQ |
-| `IoError` | 0x08 | Media-level failure |
-| `NotPermitted` | 0x09 | Blocked by backend policy/protection |
+| `IoError` | 0x07 | Media-level failure |
+| `NotPermitted` | 0x08 | Blocked by backend policy/protection |
 | `InternalError` | 0xFF | Unclassified server fault |
 
 `BackendError` is the trait-level error backends produce; an `impl
 From<BackendError> for FlashError` provides the canonical mapping for
-the server's response-encoding path.
+the server's response-encoding path. `BackendError::WouldBlock` is
+treated as backend-internal and maps to `FlashError::Busy` at the wire
+boundary.
 
 ## Tests
 
