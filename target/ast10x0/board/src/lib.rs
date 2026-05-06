@@ -13,12 +13,16 @@
 
 use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController};
 use ast10x0_peripherals::spimonitor::MonitorPolicy;
+use ast10x0_peripherals::scu::registers::ScuRegisters;
+use ast10x0_peripherals::spimonitor::registers::{SpiMonitorController, SpiMonitorRegisters};
 
 pub mod spim_wiring;
+pub mod monitor;
 
 pub use spim_wiring::{
     apply_spim_wiring, presets, SpimWiring, SpimWiringError,
 };
+pub use monitor::Ast1060Monitor;
 
 /// Policy for handling unknown JEDEC IDs at board-integration level.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -273,5 +277,69 @@ impl Ast10x0BoardDescriptor {
             spim_wiring: Some(SpimWiring::default_spi2_via_spim2()),
             monitor_policy: presets::bmc_default_policy(),
         }
+    }
+}
+
+/// Runtime board hardware owner and orchestrator.
+///
+/// Owns all hardware register blocks (SCU, SPIPF, etc.) and provides
+/// orchestration interfaces (Monitor, etc.) to boot code and tests.
+///
+/// Tracks region counts in memory (following aspeed-rust pattern):
+/// - `read_blocked_region_count`: number of configured read-blocked regions
+/// - `write_blocked_region_count`: number of configured write-blocked regions
+///
+/// # Example
+///
+/// ```ignore
+/// let mut board = unsafe { Ast1060Board::init() };
+/// let mut monitor = board.monitor();
+/// monitor.set_mux(MonitorInstance::Spim0, MuxSelect::RotControl)?;
+/// ```
+pub struct Ast1060Board {
+    scu: ScuRegisters,
+    spipf: [SpiMonitorRegisters; 4],
+    read_blocked_region_count: u8,
+    write_blocked_region_count: u8,
+}
+
+impl Ast1060Board {
+    /// Initialize the board with exclusive access to all hardware blocks.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - This is called only once during boot (or once per test phase)
+    /// - No other code holds references to any hardware register blocks
+    /// - This instance maintains exclusive ownership until dropped
+    #[allow(unsafe_op_in_unsafe_fn)]
+    pub unsafe fn init() -> Self {
+        Self {
+            scu: ScuRegisters::new_global(),
+            spipf: [
+                SpiMonitorRegisters::new_for_controller(SpiMonitorController::Spim0),
+                SpiMonitorRegisters::new_for_controller(SpiMonitorController::Spim1),
+                SpiMonitorRegisters::new_for_controller(SpiMonitorController::Spim2),
+                SpiMonitorRegisters::new_for_controller(SpiMonitorController::Spim3),
+            ],
+            read_blocked_region_count: 0,
+            write_blocked_region_count: 0,
+        }
+    }
+
+    /// Get a Monitor orchestrator for SPI security operations.
+    ///
+    /// The Monitor provides a unified interface to:
+    /// - Control external mux (via SCU routing)
+    /// - Manage address privilege filters (via SPIPF)
+    /// - Lock and verify policies
+    /// - Perform resets
+    pub fn monitor(&mut self) -> Ast1060Monitor<'_> {
+        Ast1060Monitor::new(
+            &mut self.scu,
+            &mut self.spipf,
+            self.read_blocked_region_count,
+            self.write_blocked_region_count,
+        )
     }
 }
