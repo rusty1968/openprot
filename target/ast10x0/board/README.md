@@ -43,12 +43,41 @@ bazel build //target/ast10x0/board_descriptors:ast10x0_board_descriptors
 
 ## Design notes
 
-- FMC descriptors must have `spim_wiring == None`; Spi1/Spi2 descriptors
-  must have `spim_wiring == Some(_)`. `apply_spim_wiring` returns
-  `SpimWiringError::InvalidController` on FMC and `RouteMismatch` if the
-  wiring source disagrees with the controller being initialized.
-- `Ast10x0BoardDescriptor` is not `Eq`/`PartialEq` because the embedded
-  `MonitorPolicy` is not (yet) — compare individual fields if needed.
-- The SPIM wiring path is "configure early, validate, lock, and operate
-  under that locked policy." Per-transaction reroutes are out of scope; see
-  `peripherals/spimonitor/planning/overview-and-usage-model.md`.
+### SPIM Wiring Requirements by Controller Type
+
+- **FMC (Flash Memory Controller)**: Does NOT route through SPIPF monitor. Requires
+  `spim_wiring == None`. The FMC connects directly to flash without any SPI-monitor
+  interception. If you attempt to call `apply_spim_wiring()` on an FMC descriptor,
+  it will return `SpimWiringError::InvalidController` because monitoring is not
+  supported on FMC paths.
+
+- **SPI1 / SPI2 (Application SPI Controllers)**: Route through SPIPF monitor (SPIM0–3).
+  Require `spim_wiring == Some(_)`. The `SpimWiring` struct defines which SPIM instance
+  and mux configuration applies. If the wiring source disagrees with the controller
+  (e.g., you pass Spi1 with wiring configured for Spi2), `apply_spim_wiring()` returns
+  `SpimWiringError::RouteMismatch`.
+
+### MonitorPolicy Equality
+
+`Ast10x0BoardDescriptor` is not `Eq`/`PartialEq` because the embedded `MonitorPolicy`
+is not yet comparable (its allowlist and region tables require custom equality logic).
+For now, compare individual fields (`controller`, `cs0`, `cs1`, `spim_wiring`, etc.)
+if descriptor equality is needed.
+
+### SPIM Wiring & Locking Semantics
+
+The SPIM wiring path follows a strict "configure early, validate, lock, and operate"
+model:
+
+1. **Configure**: Set up SCU0F0 routing fields (mux source, passthrough mode, external
+   mux select, MISO multi-func pin).
+2. **Validate**: Ensure the route is legal and consistent with the flash descriptor.
+3. **Lock**: Call `lock_policy()` on the monitor to set the SPIPF write-disable bit.
+   Once locked, the policy is immutable until reset.
+4. **Operate**: All subsequent SPI transactions must comply with the locked policy.
+
+**Per-transaction reroutes are out of scope.** The design does not support changing the
+mux, passthrough mode, or policy between transactions. Such dynamic reconfiguration would
+require pausing the monitor, reprogramming registers, and revalidating—significantly
+increasing complexity and risk. For details on this design rationale, see
+`peripherals/spimonitor/planning/overview-and-usage-model.md`.
