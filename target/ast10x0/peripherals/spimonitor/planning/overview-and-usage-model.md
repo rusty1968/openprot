@@ -1,5 +1,9 @@
 # AST10x0 SPI Monitor: Overview and Usage Model
 
+> **Status (2026-05-06):** API design complete. Phases 1–3 implemented and compiling.
+> See [Implementation Status](#implementation-status) for details. Semantic gaps
+> vs. Zephyr driver have been closed; see `review-against-aspeed-zephyr.md`.
+
 ## Purpose
 
 The AST10x0 SPI monitor blocks (SPIPF1..SPIPF4) are policy and observability
@@ -107,29 +111,67 @@ The intended model mirrors other peripheral modules in this repository:
 - optional test helpers for host/QEMU where monitor behavior is partially
   modeled
 
-## Recommended Initial API Shape
+## Implemented API Surface
 
-- instance selection by enum: Spim0..Spim3
-- create accessor from PAC pointer via instance mapping
-- command table operations:
-  - find slot
-  - add/replace command
-  - lock command or table
-- address privilege operations:
-  - configure read/write blocked regions
-  - lock privilege tables
-- finalization:
-  - lock global control and table writes
-  - expose readback verification methods
+The following operations are available on `SpiMonitor<Configured>` and `SpiMonitor<Locked>`:
+
+### Core lifecycle
+- `SpiMonitor<Uninitialized>::new(controller)` → construct
+- `SpiMonitor<Uninitialized>::apply_policy(policy)` → `SpiMonitor<Configured>` (programs command table and address filters)
+- `SpiMonitor<Configured>::lock()` → `SpiMonitor<Locked>` (one-way transition)
+
+### Monitor control (Configured state)
+- `enable()` / `disable()` — global monitor enable bit
+- `set_ext_mux(ExtMuxSel)` — route SPI path (Sel0 vs Sel1)
+- `set_passthrough(PassthroughMode)` — bypass filter or enforce policy
+- `drain_log(&mut [ViolationLogEntry])` — read violation log for diagnostics
+
+### Monitor control (Locked state)
+- `set_ext_mux(ExtMuxSel)` — mux switching available in locked state for boot transitions
+- `set_passthrough(PassthroughMode)` — passthrough available in locked state for boot transitions
+- `drain_log(&mut [ViolationLogEntry])` — read violation log
+
+### Policy model
+- `MonitorPolicy` struct with command allow-list and address regions
+- `RegionPolicy` with direction (Read/Write), operation (Enable/Disable), start address, length
+- `profile.rs` built-in: `runtime_read_only()`, `firmware_update_window()`
+- `PrivilegeOp::Enable` / `Disable` for region policies
+- `PassthroughMode::Enabled` / `Disabled` for filter bypass
+- `ExtMuxSel::Sel0` / `Sel1` for mux routing
+
+## Design Rationale
+
+### Why passthrough and mux control are available in Locked state
+
+Both `set_passthrough()` and `set_ext_mux()` are callable on `SpiMonitor<Locked>`. This is intentional:
+
+- Boot-hold and boot-release sequences in platform code require mux switching
+  and filter bypass *after* policy is locked.
+- Locking policy (command table, address regions) prevents policy *edits* but
+  not transient control of the SPI path ownership.
+- In process-isolation designs, these routing operations may be separate from
+  policy management and need to be available post-lock.
+
+### Why violation log drain is available in Configured state
+
+`drain_log()` is available on both `Configured` and `Locked` for diagnostics
+during bring-up and runtime attestation. The crate provides only the synchronous
+data-plane (reading log words from MMIO and decoding them). Interrupt
+registration, workqueue deferral, and log-pointer reset are platform
+responsibilities.
 
 ## Constraints and Reality Checks
 
 - QEMU coverage for SPI monitor functionality may be incomplete; policy logic
   must still be tested via unit/host tests and silicon validation.
-- Register lock semantics are one-way in many flows; APIs should make this
-  explicit and difficult to misuse.
-- This module should stay focused on monitor policy. Flash transport and DMA
-  remain in SMC/SPI controller modules.
+- Register lock semantics are one-way in many flows; APIs make this explicit
+  through typestate (`Configured` → `Locked`).
+- This module stays focused on monitor policy. Flash transport and DMA remain
+  in SMC/SPI controller modules.
+- Register bit positions and offsets (control, passthrough, mux, lock) are
+  currently placeholders and require AST10x0 datasheet confirmation.
+- The Zephyr driver surface is covered except for `aspeed_spi_monitor_sw_rst`
+  (software reset), which remains an open gap.
 
 ## Relationship To Zephyr-Style Systems
 
@@ -194,48 +236,93 @@ target/ast10x0/peripherals/spimonitor/
 
 ## Usage Model By Layer
 
-1. Policy construction (`policy.rs`, `profile.rs`)
-- Build or select a policy profile in trusted setup code.
+1. **Policy construction** (`policy.rs`, `profile.rs`)
+   - Build or select a policy profile (e.g., `runtime_read_only()`) in trusted setup code.
+   - Add region entries via `add_region()` if provisioned policy is available.
+   - `MonitorPolicy` is a pure-data struct, testable on the host without hardware.
 
-2. Hardware apply (`controller.rs` + `registers.rs`)
-- Translate policy into command table and address filter entries.
-- Read back and verify programmed state.
+2. **Hardware apply** (`controller.rs` + `registers.rs`)
+   - `SpiMonitor::new(controller)` acquires ownership of the SPIPF register block.
+   - `apply_policy(policy)` programs both command table and address filter slots.
+   - Returns `SpiMonitor<Configured>`, now in a mutable but not-yet-locked state.
 
-3. Policy lock
-- Assert write-disable bits for command/address/control registers.
-- Expose read-only status methods for runtime attestation.
+3. **Pre-lock diagnostics** (optional)
+   - Call `enable()` to arm the monitor.
+   - Optionally `drain_log()` to verify no spurious violations are logged.
+   - Set mux and passthrough to initial state if needed.
 
-4. Runtime operation
-- Monitor remains active as hardware guardrail.
-- No dynamic policy edits in steady state.
+4. **Policy lock**
+   - Call `lock()` on `Configured` to transition to `Locked`.
+   - Write-disable bits are asserted in the hardware (bit position TBD).
+   - No further changes to policy tables are possible (enforced by SPIPF hardware).
 
-The only expected exception is a future authenticated update or recovery flow.
-If such a mode is supported, it should be modeled as an explicit lifecycle
-transition owned by trusted code, not as ad-hoc runtime reconfiguration from
-normal operation.
+5. **Runtime operation**
+   - Monitor remains active as hardware guardrail.
+   - No dynamic policy edits are possible.
+   - Mux and passthrough *can* be changed (for boot transitions).
+   - Log drain is available for diagnostics and attestation.
+   - If a future authenticated update or recovery mode is needed, it must be an
+     explicit lifecycle transition owned by trusted code — not ad-hoc
+     reconfiguration from a locked state.
 
-## Phased Implementation Plan
+## Relationship to Zephyr SPIM Driver
 
-### Phase 1: Register and Type Foundation
+This crate implements the full data-plane of the Zephyr `spi_monitor_aspeed`
+driver at the Rust/PAC level. The mapping is:
 
-- complete `registers.rs` coverage for currently needed SPIPF registers
-- add `types.rs` enums/errors/flags
-- add host tests for bitfield conversions and table-index bounds
+| Zephyr function | Rust equivalent |
+|---|---|
+| `spim_monitor_enable(dev, bool)` | `enable()` / `disable()` |
+| `spim_passthrough_config(dev, 0, bool)` | `set_passthrough(PassthroughMode)` |
+| `spim_ext_mux_config(dev, sel)` | `set_ext_mux(ExtMuxSel)` |
+| `spim_address_privilege_config(dev, rw, op, addr, len)` | Region in `MonitorPolicy`, applied via `apply_policy` |
+| `spim_get_log_info` + drain loop | `drain_log(&mut buf)` |
+| `spim_isr_callback_install` | Out of scope — platform layer |
+| `aspeed_spi_monitor_sw_rst` | Open gap — to be implemented |
 
-### Phase 2: Controller Semantics
+The crate does not replace the Zephyr driver; it provides an equivalent interface
+for non-Zephyr (e.g., `reference`/`openprot`) Rust firmware.
 
-- add `controller.rs` with typed lifecycle and safe mutation APIs
-- support allow-command table operations (add/remove/find/lock)
-- support address privilege table operations (read/write direction)
+## Implementation Status
 
-### Phase 3: Policy and Profiles
+### Phase 1: Register and Type Foundation ✅ COMPLETE
 
-- add `policy.rs` declarative policy structs
-- add `profile.rs` built-in profiles for boot/runtime/update modes
-- add policy validator tests (overlap, out-of-range, illegal transitions)
+- [x] `registers.rs` covers SPIPF control, lock, command table, address filter, and log registers
+- [x] `types.rs` defines `PrivilegeDirection`, `PrivilegeOp`, `PassthroughMode`, `ExtMuxSel`, `ViolationLogEntry`
+- [x] `types.rs` includes `parse_log_word` for violation log decoding
 
-### Phase 4: Integration and Verification
+### Phase 2: Controller Semantics ✅ COMPLETE
 
-- wire monitor setup into trusted platform bring-up path
-- add QEMU smoke tests for register programming/readback
-- define silicon-only validation checklist for lock permanence and routing
+- [x] `controller.rs` implements typestate lifecycle: `Uninitialized` → `Configured` → `Locked`
+- [x] `enable()` / `disable()` for monitor control
+- [x] `set_passthrough()` available on both `Configured` and `Locked`
+- [x] `set_ext_mux()` available on both `Configured` and `Locked`
+- [x] `drain_log()` available on both states for diagnostics
+- [x] `lock()` transition enforces one-way policy lockdown
+
+### Phase 3: Policy and Profiles ✅ COMPLETE
+
+- [x] `policy.rs` defines `MonitorPolicy` with command table and region array
+- [x] `policy.rs` includes `add_region()` helper for region management
+- [x] `profile.rs` provides `runtime_read_only()` and `firmware_update_window()`
+- [x] Region encoding function in `controller.rs` converts policy to hardware word format
+
+### Phase 4: Integration and Verification ⏳ IN PROGRESS
+
+- [ ] Wire monitor setup into reference platform bring-up path
+- [ ] Add host-side policy tests (region overlap, bounds checking)
+- [ ] Add QEMU register readback tests
+- [ ] Silicon validation checklist for lock permanence, routing behavior
+
+### Open Gaps
+
+- ⚠️ `aspeed_spi_monitor_sw_rst` equivalent not yet implemented (software reset)
+  - Requires: `registers.rs` helper to trigger reset bit, `controller.rs` method
+  - Used in: boot-release sequence when transferring monitor to host
+  - Severity: Medium — needed for boot sequencing
+
+- ⚠️ Register bit/offset placeholders require datasheet confirmation
+  - Control bits (enable, passthrough, mux, lock): currently bits 0–2, 31
+  - Log register offsets (index, size, RAM addr): currently 0x080, 0x084, 0x088
+  - Address filter slot encoding: direction/op/address/length packing (TBD)
+  - Severity: High — functionality depends on correct values

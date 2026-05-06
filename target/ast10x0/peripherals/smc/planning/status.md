@@ -2,6 +2,44 @@
 
 Date: 2026-05-02
 
+## FMC/SPI Backend Split Migration Status
+
+Date: 2026-05-05
+
+### Phase 0 - Baseline Lock (Completed)
+
+Changes completed:
+
+1. Added baseline unit tests in `target/ast10x0/peripherals/smc/types.rs`:
+   - `smc_controller_mappings_match_ast10x0_addresses`
+   - `transfer_mode_io_bits_are_stable`
+   - `address_width_byte_counts_are_stable`
+2. Established runnable SMC integration baseline using:
+   - `bazelisk test --config=virt_ast10x0` over all `*_test` rules under
+     `target/ast10x0/tests/smc` and `target/ast10x0/tests/smc_listener`,
+     excluding `*no_panics_test` targets (incompatible on this config).
+
+Observed baseline results:
+
+1. `//target/ast10x0/tests/smc:smc_test` PASSED (cached).
+2. `//target/ast10x0/tests/smc:smc_device_test` PASSED (cached).
+3. `//target/ast10x0/tests/smc_listener:smc_listener_test` deferred for now
+   (currently times out at 300s in this environment).
+   - Log shows system boot and thread start, then no completion before timeout.
+
+Notes:
+
+1. `*no_panics_test` targets are explicitly incompatible with
+   `--config=virt_ast10x0` in this environment and were excluded from Phase 0
+   baseline execution.
+2. Listener timeout investigation is deferred and does not block migration
+   phases unless we touch listener-specific code.
+
+Approval gate:
+
+1. Awaiting user approval to proceed to Phase 1 (shared register contract
+   extraction with no intended behavior change).
+
 ## Scope
 
 This status reflects:
