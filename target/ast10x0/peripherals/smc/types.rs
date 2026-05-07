@@ -226,6 +226,26 @@ impl FlashConfig {
 /// - FMC -> BootSpi { master_idx: 0 }
 /// - SPI1 -> HostSpi { master_idx: 0 }
 /// - SPI2 -> NormalSpi { master_idx: 2 }
+///
+/// # Behavioral Differences by Variant
+///
+/// ## BootSpi
+/// - **Decode-range sizing:** Full 256 MB range from configured capacity
+/// - **Calibration:** Run full timing sweep (exclusive master)
+/// - **SPIM bracketing:** Not required (direct FMC path, no arbitration)
+/// - **Use case:** Boot firmware with exclusive flash access
+///
+/// ## HostSpi
+/// - **Decode-range sizing:** 256 MB range (assumes single master on this interface)
+/// - **Calibration:** Skip if `master_idx != 0` (shared-bus topology)
+/// - **SPIM bracketing:** Required when `master_idx != 0` (shared with other masters)
+/// - **Use case:** Host BMC SPI access; may be muxed with other masters
+///
+/// ## NormalSpi
+/// - **Decode-range sizing:** Per-master sizing; when `master_idx != 0`, decode may be restricted
+/// - **Calibration:** Skip if `master_idx != 0` and `cs != 0` (shared topology)
+/// - **SPIM bracketing:** Required when `master_idx != 0` (shared-bus topology)
+/// - **Use case:** Normal user SPI access; often on shared external SPI buses
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmcTopology {
     /// Boot firmware SPI interface

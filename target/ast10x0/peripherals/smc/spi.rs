@@ -21,9 +21,19 @@ pub struct SpiReady {
 impl SpiUninit {
     /// Construct an uninitialized SPI controller for SPI1 or SPI2.
     ///
+    /// # Topology Requirements
+    /// 
+    /// The SPI wrapper is for HostSpi and NormalSpi topologies only.
+    /// BootSpi (FMC) should use the generic Smc<FmcRegisterBackend> directly.
+    ///
     /// # Safety
     /// Caller must ensure unique ownership of the selected SPI hardware block.
     pub unsafe fn new(controller_id: SmcController, mut config: SmcConfig) -> Result<Self, SmcError> {
+        // Phase 3: Topology-aware SPI construction check.
+        // 
+        // The SPI wrapper is specialized for HostSpi and NormalSpi topologies.
+        // FMC (BootSpi topology) uses the generic controller with FmcRegisterBackend.
+        // This check enforces that constraint at construction time.
         match controller_id {
             SmcController::Fmc => return Err(SmcError::InvalidChipSelect),
             SmcController::Spi1 | SmcController::Spi2 => {}

@@ -93,6 +93,20 @@ impl<B: SmcRegisterBackend> Smc<B, Uninitialized> {
 
     /// Initialize hardware and transition to `Ready` mode.
     pub fn init(self) -> Result<Smc<B, Ready>, SmcError> {
+        // Phase 3: Topology-aware initialization
+        // 
+        // The SmcTopology enum encodes the controller's role and master_idx:
+        // - BootSpi { master_idx }: Boot firmware path (typically FMC, master_idx=0)
+        // - HostSpi { master_idx }: Host BMC SPI path (typically SPI1, master_idx=0)
+        // - NormalSpi { master_idx }: Normal user SPI path (typically SPI2, master_idx=2)
+        //
+        // Topology gates behavior in setup_segments() and configure_timing():
+        // - Decode-range sizing: shared-bus topologies (master_idx != 0) may restrict ranges
+        // - Calibration skip: shared-bus topologies may skip CS1 calibration
+        // - SPI-specific control: HostSpi variant may require specific register programming
+        //
+        // The topology is consulted via self.config.topology.
+
         // 1. Configure flash types and write-enable per CS
         let mut conf = 0u32;
         if self.config.cs0.is_some() {
@@ -138,6 +152,19 @@ impl<B: SmcRegisterBackend> Smc<B, Uninitialized> {
     }
 
     fn configure_timing(&self, cs: usize, config: &FlashConfig) -> Result<(), SmcError> {
+        // Timing calibration is topology-aware.
+        //
+        // For BootSpi (FMC, master_idx=0): Full calibration sweep recommended.
+        //   Boot firmware has exclusive access; full timing margin is priority.
+        //
+        // For HostSpi / NormalSpi when master_idx != 0: Shared-bus topology.
+        //   When a secondary master shares the flash bus, calibration on CS1 may need
+        //   to be skipped to avoid interfering with the primary master's calibration.
+        //   Phase 3+: gate calibration logic on config.topology.master_idx().
+        //
+        // For now, all topologies use a single divider lookup; no HCLK sweep.
+        // Phase 3+: add conditional calibration logic per topology and master_idx.
+
         let sysclk_mhz = 200u32;
         let encoded_div = spi_freq_div(sysclk_mhz, config.spi_clock_mhz)?;
 
@@ -159,6 +186,19 @@ impl<B: SmcRegisterBackend> Smc<B, Uninitialized> {
     }
 
     fn setup_segments(&self) -> Result<(), SmcError> {
+        // Decode-range sizing is topology-aware.
+        //
+        // For BootSpi (FMC, master_idx=0): Full decode range from configured capacity.
+        //   Used for boot firmware; exclusive access to flash; no shared-bus concerns.
+        //
+        // For HostSpi / NormalSpi when master_idx != 0: Potential shared-bus topology.
+        //   When multiple masters multiplex a single SPI flash, decode ranges may need
+        //   to be restricted. Phase 3+ may implement decode_range_reinit logic keyed
+        //   on config.topology.master_idx() to prevent collisions.
+        //
+        // For now, all topologies use the full capacity from FlashConfig.
+        // Phase 3+: add conditional decode-range sizing based on topology + master_idx.
+
         let cs0_size = flash_capacity_bytes(self.config.cs0)?;
         let cs1_size = flash_capacity_bytes(self.config.cs1)?;
         total_capacity_bytes(self.config.cs0, self.config.cs1)?;
