@@ -11,7 +11,7 @@
     clippy::unimplemented
 )]
 
-use ast10x0_board_descriptors::{Ast10x0BoardDescriptor, SpimWiringError, apply_spim_wiring};
+use ast10x0_board::{Ast10x0BoardDescriptor, SpimWiringError, apply_spim_wiring};
 use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::{
     ChipSelect, FlashConfig, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,

@@ -10,7 +10,8 @@ use crate::smc::helpers::{
     validate_dma_read, validate_mapped_range,
 };
 use crate::smc::interrupts::{SmcInterrupt, SmcInterruptDecoder};
-use crate::smc::registers::SmcRegisters;
+use crate::smc::register_traits::SmcRegisterBackend;
+use crate::smc::fmc_backend::FmcRegisterBackend;
 use crate::smc::types::*;
 
 /// Internal controller state
@@ -37,9 +38,10 @@ pub struct Ready;
 
 /// Generic Static Memory Controller (SMC)
 ///
-/// The `Mode` type parameter enforces init ordering at compile time.
-pub struct Smc<Mode> {
-    regs: SmcRegisters,
+/// `B` is the register backend (implements `SmcRegisterBackend`).
+/// `Mode` enforces init ordering at compile time.
+pub struct Smc<B: SmcRegisterBackend, Mode> {
+    regs: B,
     controller_id: SmcController,
     config: SmcConfig,
     state: SmcState,
@@ -54,30 +56,32 @@ pub struct Smc<Mode> {
     _mode: PhantomData<fn() -> Mode>,
 }
 
-/// Ergonomic alias for the uninitialized controller handle.
-pub type UninitSmc = Smc<Uninitialized>;
+/// Ergonomic alias for the uninitialized controller handle (FMC backend).
+pub type UninitSmc = Smc<FmcRegisterBackend, Uninitialized>;
 
-/// Ergonomic alias for the initialized controller handle.
-pub type ReadySmc = Smc<Ready>;
+/// Ergonomic alias for the initialized controller handle (FMC backend).
+pub type ReadySmc = Smc<FmcRegisterBackend, Ready>;
 
-impl Smc<Uninitialized> {
-    /// Create a new SMC controller instance.
+/// Ergonomic alias for the uninitialized SPI controller handle.
+pub type UninitSpiSmc = Smc<crate::smc::spi_backend::SpiRegisterBackend, Uninitialized>;
+
+/// Ergonomic alias for the initialized SPI controller handle.
+pub type ReadySpiSmc = Smc<crate::smc::spi_backend::SpiRegisterBackend, Ready>;
+
+impl<B: SmcRegisterBackend> Smc<B, Uninitialized> {
+    /// Create a new SMC controller instance from a pre-built register backend.
     ///
     /// # Safety
     /// Caller must ensure:
-    /// - No other Smc instance exists for this hardware controller
-    /// - The controller's base address points to valid hardware
-    pub unsafe fn new(config: SmcConfig) -> Result<Self, SmcError> {
+    /// - `backend` wraps a valid hardware register block
+    /// - Only one `Smc` instance exists for this hardware controller
+    pub unsafe fn new_with_backend(backend: B, config: SmcConfig) -> Result<Self, SmcError> {
         if config.cs0.is_none() && config.cs1.is_none() {
             return Err(SmcError::InvalidCapacity);
         }
 
-        let base = config.controller_id.base_address() as *const _;
-        // SAFETY: Caller ensures base address is valid and no other instance exists.
-        let regs = unsafe { SmcRegisters::new(base) };
-
         Ok(Self {
-            regs,
+            regs: backend,
             controller_id: config.controller_id,
             config,
             state: SmcState::Ready,
@@ -88,7 +92,7 @@ impl Smc<Uninitialized> {
     }
 
     /// Initialize hardware and transition to `Ready` mode.
-    pub fn init(self) -> Result<Smc<Ready>, SmcError> {
+    pub fn init(self) -> Result<Smc<B, Ready>, SmcError> {
         // 1. Configure flash types and write-enable per CS
         let mut conf = 0u32;
         if self.config.cs0.is_some() {
@@ -173,7 +177,23 @@ impl Smc<Uninitialized> {
     }
 }
 
-impl Smc<Ready> {
+impl Smc<FmcRegisterBackend, Uninitialized> {
+    /// Create a new FMC SMC controller instance (FMC register backend).
+    ///
+    /// # Safety
+    /// Caller must ensure:
+    /// - No other Smc instance exists for this hardware controller
+    /// - The controller's base address points to valid hardware
+    pub unsafe fn new(config: SmcConfig) -> Result<Self, SmcError> {
+        let base = config.controller_id.base_address() as *const _;
+        // SAFETY: Caller ensures base address is valid and no other instance exists.
+        let regs = unsafe { FmcRegisterBackend::new(base) };
+        // SAFETY: Delegating ownership requirements to caller.
+        unsafe { Self::new_with_backend(regs, config) }
+    }
+}
+
+impl<B: SmcRegisterBackend> Smc<B, Ready> {
     /// Perform a programmed I/O read via memory window.
     ///
     /// Reads directly from the flash memory window. Hardware automatically

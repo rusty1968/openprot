@@ -6,7 +6,7 @@
 #![no_std]
 #![no_main]
 
-use ast10x0_board_descriptors::{apply_spim_wiring, presets, SpimWiring};
+use ast10x0_board::{apply_spim_wiring, presets, SpimWiring};
 use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::SmcController;
 use ast10x0_peripherals::spimonitor::MonitorPolicy;

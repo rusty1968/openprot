@@ -58,6 +58,9 @@ system_image_test(
 
 rust_binary_no_panics_test(
     name = "no_panics_test",
+    # TODO: Re-enable in CI once pw_kernel panic_detector handles this target
+    # runfiles layout correctly (currently misreads no_panics_test.sh as token DB).
     binary = ":test_boot_uc",
+    tags = ["manual"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
 )

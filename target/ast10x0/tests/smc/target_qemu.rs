@@ -29,7 +29,7 @@
 #![no_std]
 #![no_main]
 
-use ast10x0_peripherals::smc::{FlashConfig, Smc, SmcConfig, SmcController, SmcError, Uninitialized};
+use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController, SmcError, UninitSmc};
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
 use {console_backend as _, entry as _};
@@ -52,7 +52,7 @@ fn run_smc_qemu_test() -> Result<(), SmcError> {
         enable_interrupts: false,
     };
 
-    let controller = unsafe { Smc::<Uninitialized>::new(config)? };
+    let controller = unsafe { UninitSmc::new(config)? };
     let mut controller = controller.init()?;
 
     if !controller.is_ready() || controller.controller_id() != SmcController::Fmc {

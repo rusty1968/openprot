@@ -2,6 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! FMC-specialized wrapper around the generic SMC controller.
+//!
+//! # FMC vs SPI1/SPI2
+//!
+//! This module provides an abstraction **exclusively for the FMC (Firmware Memory Controller)**
+//! block. The FMC connects directly to flash without SPI-monitor interception.
+//!
+//! **SPI1 and SPI2** (application SPI controllers that route through SPIPF monitor) are
+//! handled by the separate [`crate::smc::spi`] module, not here.
+//!
+//! - **FMC**: Single dedicated flash controller, no SPI-monitor support, boot-time device
+//! - **SPI1/SPI2**: Multi-instance application controllers with optional SPIPF monitoring
+//!
+//! See [`crate::smc`] module-level documentation for the full taxonomy.
 
 use crate::smc::controller::{ReadySmc, UninitSmc};
 use crate::smc::interrupts::SmcInterrupt;

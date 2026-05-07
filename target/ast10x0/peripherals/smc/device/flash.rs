@@ -1,7 +1,7 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-//! SPI NOR facade with Phase 3A read support and Phase 3B API scaffolding.
+//! SPI NOR facade with shared logic for FMC and SPI1/SPI2 backends.
 
 use core::ops::FnMut;
 use core::result::Result;
