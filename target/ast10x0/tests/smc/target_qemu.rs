@@ -29,7 +29,7 @@
 #![no_std]
 #![no_main]
 
-use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController, SmcError, UninitSmc};
+use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController, SmcError, SmcTopology, UninitSmc};
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
 use {console_backend as _, entry as _};
@@ -50,6 +50,7 @@ fn run_smc_qemu_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let controller = unsafe { UninitSmc::new(config)? };

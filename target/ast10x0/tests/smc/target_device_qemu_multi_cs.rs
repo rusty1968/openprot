@@ -29,7 +29,7 @@
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, TransferMode,
+    ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology, TransferMode,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
@@ -55,6 +55,7 @@ fn run_multi_cs_test() -> Result<(), SmcError> {
         cs1: Some(FLASH_CFG),
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { FmcUninit::new(config)? };
@@ -91,6 +92,7 @@ fn run_multi_cs_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
     let uninit2 = unsafe { FmcUninit::new(config_cs0_only)? };
     let fmc2 = uninit2.init()?;

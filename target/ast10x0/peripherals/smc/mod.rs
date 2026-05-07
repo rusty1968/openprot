@@ -17,7 +17,7 @@ pub mod spi;
 pub mod interrupts;
 pub mod device;
 
-pub use types::{SmcError, SmcController, ChipSelect, FlashConfig, SmcConfig, SmcRetryable, TransferMode, AddressWidth};
+pub use types::{SmcError, SmcController, ChipSelect, FlashConfig, SmcConfig, SmcRetryable, TransferMode, AddressWidth, SmcTopology};
 pub use register_traits::SmcRegisterBackend;
 pub use fmc_backend::FmcRegisterBackend;
 pub use spi_backend::SpiRegisterBackend;

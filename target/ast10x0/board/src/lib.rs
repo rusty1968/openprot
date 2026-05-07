@@ -11,7 +11,7 @@
     clippy::unimplemented
 )]
 
-use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController};
+use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController, SmcTopology};
 use ast10x0_peripherals::spimonitor::MonitorPolicy;
 use ast10x0_peripherals::scu::registers::ScuRegisters;
 use ast10x0_peripherals::scu::pinctrl::PinctrlPin;
@@ -60,12 +60,20 @@ pub struct Ast10x0BoardDescriptor {
 impl Ast10x0BoardDescriptor {
     /// Convert descriptor data into a driver-facing SMC controller config.
     pub fn smc_config(&self) -> SmcConfig {
+        // Map controller role to topology (Phase 2: source topology from board descriptors)
+        let topology = match self.controller {
+            SmcController::Fmc => SmcTopology::BootSpi { master_idx: 0 },
+            SmcController::Spi1 => SmcTopology::HostSpi { master_idx: 0 },
+            SmcController::Spi2 => SmcTopology::NormalSpi { master_idx: 2 },
+        };
+
         SmcConfig {
             controller_id: self.controller,
             cs0: self.cs0,
             cs1: self.cs1,
             dma_enabled: false,
             enable_interrupts: false,
+            topology,
         }
     }
 

@@ -29,7 +29,7 @@
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    FlashConfig, SpiNorFlashDevice, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    FlashConfig, SpiNorFlashDevice, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology, SpiNorFlash,
     SpiUninit,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
@@ -54,6 +54,7 @@ fn run_device_qemu_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { FmcUninit::new(config)? };
@@ -104,6 +105,7 @@ fn run_device_qemu_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let spi_uninit = unsafe { SpiUninit::new(SmcController::Spi1, spi_cfg)? };

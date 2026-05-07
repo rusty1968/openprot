@@ -20,7 +20,7 @@
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SmcTopology, SpiNorFlash,
     SpiNorFlashDevice, SpiReady, SpiUninit, TransferMode,
 };
 use cortex_m_semihosting::debug::{exit, EXIT_FAILURE, EXIT_SUCCESS};
@@ -58,6 +58,7 @@ fn init_spi(
         cs1,
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { SpiUninit::new(controller_id, config)? };

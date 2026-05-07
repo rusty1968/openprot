@@ -215,6 +215,39 @@ impl FlashConfig {
     }
 }
 
+/// SPI controller topology: role and master index
+///
+/// Mirrors aspeed-rust's `ctrl_type` and `master_idx` concepts.
+/// The topology determines decode-range sizing, calibration skip rules,
+/// and other controller-specific behaviors that depend on the controller's
+/// role in the system and its position in multi-channel arrangements.
+///
+/// Mappings follow aspeed-rust conventions:
+/// - FMC -> BootSpi { master_idx: 0 }
+/// - SPI1 -> HostSpi { master_idx: 0 }
+/// - SPI2 -> NormalSpi { master_idx: 2 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmcTopology {
+    /// Boot firmware SPI interface
+    BootSpi { master_idx: u8 },
+    /// Host BMC SPI interface
+    HostSpi { master_idx: u8 },
+    /// Normal user SPI interface
+    NormalSpi { master_idx: u8 },
+}
+
+impl SmcTopology {
+    /// Get the master index (multiplex/channel ID) for this topology
+    #[must_use]
+    pub const fn master_idx(self) -> u8 {
+        match self {
+            Self::BootSpi { master_idx } => master_idx,
+            Self::HostSpi { master_idx } => master_idx,
+            Self::NormalSpi { master_idx } => master_idx,
+        }
+    }
+}
+
 /// Per-controller configuration
 #[derive(Clone, Copy, Debug)]
 pub struct SmcConfig {
@@ -228,4 +261,6 @@ pub struct SmcConfig {
     pub dma_enabled: bool,
     /// Enable interrupt handlers
     pub enable_interrupts: bool,
+    /// Controller topology (role and master index)
+    pub topology: SmcTopology,
 }

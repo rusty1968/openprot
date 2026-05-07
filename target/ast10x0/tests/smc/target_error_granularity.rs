@@ -30,7 +30,7 @@
 #![no_main]
 
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, TransferMode,
+    ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology, TransferMode,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
@@ -61,6 +61,7 @@ fn run_error_granularity_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: true,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { FmcUninit::new(config)? };

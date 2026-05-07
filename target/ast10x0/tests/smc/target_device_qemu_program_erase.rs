@@ -14,7 +14,7 @@
 #![no_std]
 #![no_main]
 
-use ast10x0_peripherals::smc::{
+use ast10x0_peripherals::smc::{SmcTopology, 
     AddressWidth, ChipSelect, FlashAddressingPolicy, FlashConfig, SpiNorFlashDevice, FmcUninit,
     SmcConfig, SmcController, SmcError, SpiNorFlash, TransferMode,
 };
@@ -85,6 +85,7 @@ fn run_device_program_erase_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { FmcUninit::new(config)? };

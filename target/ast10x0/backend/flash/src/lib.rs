@@ -14,7 +14,7 @@
 use ast10x0_board::{Ast10x0BoardDescriptor, SpimWiringError, apply_spim_wiring};
 use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SpiNorFlash,
+    ChipSelect, FlashConfig, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology, SpiNorFlash,
     SpiNorFlashDevice, SpiReady, SpiUninit,
 };
 
@@ -305,6 +305,7 @@ fn build_smc_controller(
         // Gates `enable_dma_irq()` inside `Smc::dma_read` (controller.rs:217).
         // Required for the IRQ-driven park/retry path in the runtime.
         enable_interrupts: true,
+        topology: SmcTopology::BootSpi { master_idx: 0 }, // TODO: Phase 2 refine per controller
     };
 
     match controller {

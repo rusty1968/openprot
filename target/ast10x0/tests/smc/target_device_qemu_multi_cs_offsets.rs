@@ -39,7 +39,7 @@
 
 use ast10x0_peripherals::smc::{
     ChipSelect, FlashConfig, SpiNorFlashDevice, FmcUninit, SmcConfig, SmcController, SmcError,
-    SpiNorFlash,
+    SmcTopology, SpiNorFlash,
 };
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
@@ -78,6 +78,7 @@ fn run_offsets_test() -> Result<(), SmcError> {
         cs1: Some(CS1_CFG),
         dma_enabled: false,
         enable_interrupts: false,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { FmcUninit::new(config)? };

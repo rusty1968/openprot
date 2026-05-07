@@ -37,7 +37,7 @@
 #![no_std]
 #![no_main]
 
-use ast10x0_peripherals::smc::{FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError};
+use ast10x0_peripherals::smc::{FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology};
 use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
 use target_common::{TargetInterface, declare_target};
 use {console_backend as _, entry as _};
@@ -64,6 +64,7 @@ fn run_error_irq_test() -> Result<(), SmcError> {
         cs1: None,
         dma_enabled: true,
         enable_interrupts: true,
+        topology: SmcTopology::BootSpi { master_idx: 0 },
     };
 
     let uninit = unsafe { FmcUninit::new(config)? };
