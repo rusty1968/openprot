@@ -14,7 +14,9 @@
 use ast10x0_peripherals::smc::{FlashConfig, SmcConfig, SmcController};
 use ast10x0_peripherals::spimonitor::MonitorPolicy;
 use ast10x0_peripherals::scu::registers::ScuRegisters;
+use ast10x0_peripherals::scu::pinctrl::PinctrlPin;
 use ast10x0_peripherals::spimonitor::registers::{SpiMonitorController, SpiMonitorRegisters};
+use ast10x0_peripherals::spimonitor::LockedSpiMonitor;
 
 pub mod spim_wiring;
 pub mod monitor;
@@ -49,6 +51,10 @@ pub struct Ast10x0BoardDescriptor {
     /// SPIPF policy programmed and locked when `spim_wiring` is `Some(_)`.
     /// Ignored for FMC descriptors.
     pub monitor_policy: MonitorPolicy,
+    /// Pin control groups to apply before SPIM wiring during board init.
+    /// Applied in order via `ScuRegisters::apply_pinctrl_group()` before
+    /// SPIM routing is programmed and locked.
+    pub pinctrl_groups: &'static [&'static [PinctrlPin]],
 }
 
 impl Ast10x0BoardDescriptor {
@@ -60,6 +66,43 @@ impl Ast10x0BoardDescriptor {
             cs1: self.cs1,
             dma_enabled: false,
             enable_interrupts: false,
+        }
+    }
+
+    /// Initialize board: apply pinctrl groups, then SPIM wiring and policy lock.
+    ///
+    /// This is a one-way operation: the SPIPF policy lock is irreversible until
+    /// reset. Callers should pass vetted presets to avoid bricking the SPI bus.
+    ///
+    /// # Safety
+    /// Caller must hold exclusive access to the SCU register block and to the
+    /// target SPIPF block for the lifetime of the operation.
+    ///
+    /// # Errors
+    /// Returns error if controller/source routing validation fails or if the
+    /// policy is invalid.
+    pub unsafe fn init_board(
+        &self,
+        scu: &ScuRegisters,
+    ) -> Result<Option<LockedSpiMonitor>, SpimWiringError> {
+        // Step 1: Apply all pinctrl groups in order
+        for group in self.pinctrl_groups {
+            scu.apply_pinctrl_group(group);
+        }
+
+        // Step 2: Apply SPIM wiring if present, lock policy
+        match &self.spim_wiring {
+            Some(wiring) => {
+                // SAFETY: Caller upholds the exclusivity requirements
+                unsafe {
+                    apply_spim_wiring(scu, self.controller, *wiring, &self.monitor_policy)
+                        .map(Some)
+                }
+            }
+            None => {
+                // FMC path: no SPIM routing or policy lock
+                Ok(None)
+            }
         }
     }
 
@@ -79,6 +122,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: None,
             monitor_policy: MonitorPolicy::empty(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -92,6 +136,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: Some(SpimWiring::default_spi1_via_spim0()),
             monitor_policy: presets::bmc_default_policy(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -105,6 +150,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: Some(SpimWiring::default_spi2_via_spim2()),
             monitor_policy: presets::bmc_default_policy(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -128,6 +174,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: None,
             monitor_policy: MonitorPolicy::empty(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -141,6 +188,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: Some(SpimWiring::default_spi1_via_spim0()),
             monitor_policy: presets::bmc_default_policy(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -153,6 +201,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: Some(SpimWiring::default_spi2_via_spim2()),
             monitor_policy: presets::bmc_default_policy(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -221,6 +270,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: None,
             monitor_policy: MonitorPolicy::empty(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -245,6 +295,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: Some(SpimWiring::default_spi1_via_spim0()),
             monitor_policy: presets::bmc_default_policy(),
+            pinctrl_groups: &[],
         }
     }
 
@@ -276,6 +327,7 @@ impl Ast10x0BoardDescriptor {
             unknown_jedec_policy: UnknownJedecPolicy::StrictReject,
             spim_wiring: Some(SpimWiring::default_spi2_via_spim2()),
             monitor_policy: presets::bmc_default_policy(),
+            pinctrl_groups: &[],
         }
     }
 }
