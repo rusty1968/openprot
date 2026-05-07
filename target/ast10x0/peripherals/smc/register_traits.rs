@@ -11,6 +11,18 @@
 //! listed here are part of the shared controller's public API. Backend-specific
 //! registers and operations are NOT exposed through this trait and must be
 //! accessed directly on the backend implementation.
+//!
+//! # Phase 5: Topology Logic Boundary
+//!
+//! **This trait is pure register abstraction. No topology logic belongs here.**
+//! 
+//! All decisions about when to call these operations, how to interpret results
+//! based on controller role, and topology-gated behaviors (decode-range sizing,
+//! calibration skip, control register programming per role) live in the
+//! controller layer (`controller.rs`), not in backends or this trait.
+//!
+//! Backends are transport only; they answer "how to read/write hardware registers."
+//! The controller layer answers "what to do with the data based on the topology."
 
 use crate::smc::types::ChipSelect;
 

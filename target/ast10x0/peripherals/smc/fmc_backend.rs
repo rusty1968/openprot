@@ -5,6 +5,20 @@
 //!
 //! Consolidates all unsafe hardware register access into a single unsafe
 //! perimeter, following the AST1060 PAC guide pattern.
+//!
+//! # Architecture: Pure Register Transport
+//!
+//! This backend implements the `SmcRegisterBackend` trait with zero topology logic.
+//! All register operations are direct hardware accessors:
+//! - `read_*()`: Read raw register bits
+//! - `write_*()`: Write raw register bits
+//! - `modify_*()`: Read-modify-write with closure
+//!
+//! Topology-aware decisions (when to call these accessors, which registers matter
+//! for a given controller role, decode-range sizing, calibration gating, etc.)
+//! live exclusively in `controller.rs`, not here.
+//!
+//! This keeps the backend simple and the topology logic centralized.
 
 use ast1060_pac as device;
 use core::marker::PhantomData;
@@ -14,6 +28,10 @@ use core::cell::UnsafeCell;
 ///
 /// This struct consolidates all unsafe hardware access. All register operations
 /// go through this single point, making it easy to audit safety invariants.
+///
+/// **No topology logic here.** This backend is pure register transport.
+/// Topology-aware behavior (when to use which registers, decode-range sizing,
+/// calibration gating) is gated by `SmcConfig.topology` in the controller layer.
 ///
 /// Register naming follows AST1060 PAC convention: methods are named by their
 /// hex offsets (e.g., `fmc000()` for offset 0x00, `fmc080()` for offset 0x80).

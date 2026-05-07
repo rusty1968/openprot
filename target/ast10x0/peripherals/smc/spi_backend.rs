@@ -7,6 +7,20 @@
 //! Uses `ast1060_pac::spi::RegisterBlock` — distinct from the FMC backend
 //! which uses `ast1060_pac::fmc::RegisterBlock`.
 //!
+//! # Architecture: Pure Register Transport
+//!
+//! This backend implements the `SmcRegisterBackend` trait with zero topology logic.
+//! All register operations are direct hardware accessors:
+//! - `read_*()`: Read raw register bits
+//! - `write_*()`: Write raw register bits
+//! - `modify_*()`: Read-modify-write with closure
+//!
+//! Topology-aware decisions (when to call these accessors, which registers matter
+//! for a given controller role, decode-range sizing, calibration gating, etc.)
+//! live exclusively in `controller.rs`, not here.
+//!
+//! This keeps the backend simple and the topology logic centralized.
+//!
 //! Key semantic differences vs FMC:
 //! - DMA interrupt enable/disable uses raw bit manipulation (SPI lacks named
 //!   field `dmaintenbl`; FMC exposes it as a structured accessor)
@@ -22,6 +36,10 @@ use crate::smc::types::ChipSelect;
 /// Safe wrapper around SPI hardware registers.
 ///
 /// Implements `SmcRegisterBackend` directly — no redundant concrete methods.
+///
+/// **No topology logic here.** This backend is pure register transport.
+/// Topology-aware behavior (when to use which registers, decode-range sizing,
+/// calibration gating) is gated by `SmcConfig.topology` in the controller layer.
 pub struct SpiRegisterBackend {
     base: *const device::spi::RegisterBlock,
     _not_sync: PhantomData<UnsafeCell<()>>,
