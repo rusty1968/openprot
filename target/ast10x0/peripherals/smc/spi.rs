@@ -17,14 +17,13 @@
 //! For BootSpi (FMC), use `Smc<FmcRegisterBackend>` directly.
 //! For HostSpi/NormalSpi (SPI1/SPI2), use this wrapper.
 
-use crate::smc::controller::{ReadySpiSmc, UninitSpiSmc};
+use crate::smc::controller::{ReadySmc, UninitSmc};
 use crate::smc::interrupts::SmcInterrupt;
-use crate::smc::spi_backend::SpiRegisterBackend;
 use crate::smc::types::{ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, TransferMode};
 
 /// SPI handle before hardware initialization.
 pub struct SpiUninit {
-    inner: UninitSpiSmc,
+    inner: UninitSmc,
 }
 
 /// SPI handle after hardware initialization.
@@ -44,7 +43,7 @@ pub struct SpiUninit {
 /// spi.read(0, &mut buf)?;
 /// ```
 pub struct SpiReady {
-    inner: ReadySpiSmc,
+    inner: ReadySmc,
 }
 
 impl SpiUninit {
@@ -69,10 +68,8 @@ impl SpiUninit {
         }
 
         config.controller_id = controller_id;
-        let base = config.controller_id.base_address() as *const _;
         // SAFETY: Caller upholds controller ownership requirements.
-        let backend = unsafe { SpiRegisterBackend::new(base) };
-        let inner = unsafe { UninitSpiSmc::new_with_backend(backend, config)? };
+        let inner = unsafe { UninitSmc::new(config)? };
         Ok(Self { inner })
     }
 
@@ -157,12 +154,12 @@ impl SpiReady {
     }
 
     /// Access the underlying generic ready controller.
-    pub fn as_inner(&self) -> &ReadySpiSmc {
+    pub fn as_inner(&self) -> &ReadySmc {
         &self.inner
     }
 
     /// Mutable access to the underlying generic ready controller.
-    pub fn as_inner_mut(&mut self) -> &mut ReadySpiSmc {
+    pub fn as_inner_mut(&mut self) -> &mut ReadySmc {
         &mut self.inner
     }
 }
