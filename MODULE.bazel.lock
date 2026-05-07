@@ -482,7 +482,7 @@
   "moduleExtensions": {
     "//third_party/ast1060-pac:extensions.bzl%ast1060_pac_repos": {
       "general": {
-        "bzlTransitiveDigest": "9k7D+xkEM99NPid/h7wYsj3Z0YaZTgD7Qr32ye2Z5RM=",
+        "bzlTransitiveDigest": "mm7poDPtVh9kE3y6akOp1o/iymk8X5XG8dOKjYM8eA0=",
         "usagesDigest": "hP7eNxX+Iwpxc1K8vfzkXD13vb8ur+xKq4rHQmySyyc=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -2734,11 +2734,11 @@
         "usagesDigest": "/Nz9QH+EBlDXoVXWiAEH8owsAo1cu+GkXjlRdolG7Sk=",
         "recordedFileInputs": {
           "@@//third_party/crates_io/Cargo.lock": "7b10a99f96ba7d63684ed1d05166d956f8c04b5ca8cf5aeb82ba5a3da8b11970",
-          "@@//third_party/crates_io/Cargo.toml": "606d67b2a9bf5bfd0277f2ce3c9a55487c8362f2467b405f85502ebd4004fdc2",
+          "@@//third_party/crates_io/Cargo.toml": "a46ad2a1cbdc773543f6f07c6eaa3b1bd09df3288d6d2b986b00aeba7b3da10d",
           "@@caliptra_deps+//crates_io/embedded/Cargo.lock": "d6c0101f48da22f2bc2d339f358de79bad3dd03218c6db29a14099b9f7757691",
-          "@@caliptra_deps+//crates_io/embedded/Cargo.toml": "8f9f4ed2721db13476b12fdac045dac2142b38f189a8abb5f4c446dc0c6ac3dd",
+          "@@caliptra_deps+//crates_io/embedded/Cargo.toml": "044db5948512ba2e16b96fc9271cca60f94fd04a5044747cd13782a6aa1128c6",
           "@@caliptra_deps+//crates_io/host/Cargo.lock": "ae555b01424917ec61d892c15d7a66af88c2f10be4e0e7b0bc2357b702883b89",
-          "@@caliptra_deps+//crates_io/host/Cargo.toml": "466d5a4467db483353a045384ab6114406490f526d40689317021d91ef201071",
+          "@@caliptra_deps+//crates_io/host/Cargo.toml": "79502e67e9ff4844591dbd9458e2e675cfc4253bb81dd81cb640b39db763607e",
           "@@pigweed+//third_party/crates_io/crates_no_std/Cargo.lock": "d38da5fa5f942b59a8017730285afe69aaf6f741b6171f361d66202de3473bc2",
           "@@pigweed+//third_party/crates_io/crates_no_std/Cargo.toml": "00e4a621a4a49d1b269bb2e688d8b5bbabb8700eb7b583ccaa20c36a60aebf98",
           "@@pigweed+//third_party/crates_io/crates_std/Cargo.lock": "13ffbc71abd52f9c79d69ce7101aca75faddaefb314ab8b112a623ab0ea81540",
