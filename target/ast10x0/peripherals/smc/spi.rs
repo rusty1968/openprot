@@ -2,6 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! SPI1/SPI2-specialized wrapper around the generic SMC controller.
+//!
+//! # Architecture: Wrapper vs. Controller
+//!
+//! This module provides an ergonomic construction API for SPI1/SPI2 controllers.
+//! **All topology-aware behavior gating (decode-range sizing, calibration skip,
+//! role-specific control programming) lives in the generic controller layer**
+//! (`controller.rs`), not here.
+//!
+//! The wrapper's role is **construction and delegation only**:
+//! - `SpiUninit::new()`: Type-check that controller_id is SPI1 or SPI2 (not FMC)
+//! - `SpiReady` methods: Delegate to inner controller operations
+//!
+//! For BootSpi (FMC), use `Smc<FmcRegisterBackend>` directly.
+//! For HostSpi/NormalSpi (SPI1/SPI2), use this wrapper.
 
 use crate::smc::controller::{ReadySpiSmc, UninitSpiSmc};
 use crate::smc::interrupts::SmcInterrupt;
@@ -14,6 +28,21 @@ pub struct SpiUninit {
 }
 
 /// SPI handle after hardware initialization.
+///
+/// # Topology Gating
+///
+/// This wrapper delegates all operations to the inner controller. Topology-specific
+/// behavior (decode-range sizing, calibration skip, role-dependent control register
+/// programming) is handled by the controller layer, not here. This keeps the wrapper
+/// thin and the topology logic centralized.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut spi = unsafe { SpiUninit::new(SmcController::Spi1, config)? };
+/// let spi = spi.init()?;  // Topology-gated behaviors in controller.init()
+/// spi.read(0, &mut buf)?;
+/// ```
 pub struct SpiReady {
     inner: ReadySpiSmc,
 }
