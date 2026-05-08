@@ -21,6 +21,7 @@ rust_library(
     name = "flash",
     srcs = [
         "flash.rs",
+        "flash_ext.rs",
     ],
     crate_name = "hal_flash",
     edition = "2024",
@@ -35,7 +36,7 @@ rust_library(
 
 rust_test(
     name = "flash_test",
-    crate = ":hal_flash",
+    crate = ":flash",
     rustc_flags = [
         "-C",
         "debug-assertions",

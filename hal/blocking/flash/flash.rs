@@ -3,7 +3,13 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod flash_ext;
+
 use core::{cmp::min, num::NonZero};
+pub use flash_ext::{
+    flash_flatten, FlashErasedByte, FlashExOp, FlashJesd216, FlashPageInfo, FlashPageLayout,
+    FlashRegion,
+};
 pub use hal_flash_driver::FlashAddress;
 use hal_flash_driver::FlashDriver;
 use util_error::ErrorCode;
