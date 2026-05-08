@@ -1,0 +1,10 @@
+# Licensed under the Apache-2.0 license
+
+sh_binary(
+    name = "jtag_load_elf",
+    srcs = ["jtag_load_elf.sh"],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["jtag_load_elf.sh"])
