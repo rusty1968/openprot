@@ -14,8 +14,8 @@
 //!    inspected.
 //! 3. **PIO read — bounds rejection** — assert that a read past the configured
 //!    capacity returns `SmcError::InvalidCapacity` before touching hardware.
-//! 4. **DMA args rejection** — assert that an unaligned DRAM address is
-//!    rejected with `SmcError::InvalidCapacity`.
+//! 4. **DMA disabled rejection** — assert that `dma_read` returns
+//!    `SmcError::DmaNotEnabled` when `SmcConfig::dma_enabled` is false.
 
 #![no_std]
 #![no_main]
@@ -72,9 +72,12 @@ fn run_smc_smoke_test() -> Result<(), SmcError> {
         Ok(_) => return Err(SmcError::HardwareError),
     }
 
-    // --- 4. DMA args rejection — unaligned DRAM address ---
+    // --- 4. DMA disabled rejection ---
+    // dma_enabled: false in the config above; dma_read must return
+    // DmaNotEnabled before touching any hardware.  Argument validation
+    // (alignment, bounds) is covered by unit tests in helpers.rs.
     match controller.dma_read(0, 0x2, 256) {
-        Err(SmcError::InvalidCapacity) => Ok(()),
+        Err(SmcError::DmaNotEnabled) => Ok(()),
         Err(other) => Err(other),
         Ok(()) => Err(SmcError::HardwareError),
     }

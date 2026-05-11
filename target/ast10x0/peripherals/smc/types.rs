@@ -28,6 +28,8 @@ pub enum SmcError {
     WriteInProgress,
     /// Controller is not in the Ready state; call was made at wrong lifecycle stage
     ControllerNotReady,
+    /// DMA was requested but `SmcConfig::dma_enabled` is false for this controller
+    DmaNotEnabled,
 }
 
 /// Chip select index for a controller that may have multiple attached devices.

@@ -16,10 +16,12 @@ use crate::smc::types::*;
 /// Internal controller state
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SmcState {
-    Ready,
+    /// Controller is initialized and idle — no operation in progress.
+    Idle,
+    /// A DMA transfer has been kicked and is in progress.
     DmaInFlight,
-    #[allow(dead_code)]
-    Error,
+    /// Controller encountered an unrecoverable hardware fault.
+    Faulted,
 }
 
 const ASPEED_SPI_USER: u32 = 0x3;
@@ -51,6 +53,11 @@ pub struct Smc<Mode> {
     /// CS0 starts at `controller_id.flash_window_address()`;
     /// CS1 starts immediately after the CS0 segment.
     flash_window_base: [usize; 2],
+    /// CS0 segment register value saved immediately before a DMA transfer
+    /// overwrites it with the transfer window. Restored verbatim on completion
+    /// or error so that subsequent user-mode transactions see the correct
+    /// full-capacity AHB window.
+    saved_cs0_segment: u32,
     _mode: PhantomData<fn() -> Mode>,
 }
 
@@ -80,9 +87,10 @@ impl Smc<Uninitialized> {
             regs,
             controller_id: config.controller_id,
             config,
-            state: SmcState::Ready,
+            state: SmcState::Idle,
             normal_read_ctrl: [0; 2],
             flash_window_base: [0; 2],
+            saved_cs0_segment: 0,
             _mode: PhantomData,
         })
     }
@@ -140,9 +148,10 @@ impl Smc<Uninitialized> {
             regs: self.regs,
             controller_id: self.controller_id,
             config: self.config,
-            state: SmcState::Ready,
+            state: SmcState::Idle,
             normal_read_ctrl: [cs0_normal_read, cs1_normal_read],
             flash_window_base,
+            saved_cs0_segment: 0,
             _mode: PhantomData,
         })
     }
@@ -239,8 +248,11 @@ impl Smc<Ready> {
 
     /// Initiate a DMA read operation (non-blocking).
     pub fn dma_read(&mut self, flash_offset: u32, dram_addr: usize, len: u32) -> Result<(), SmcError> {
-        if self.state != SmcState::Ready {
+        if self.state != SmcState::Idle {
             return Err(SmcError::ControllerNotReady);
+        }
+        if !self.config.dma_enabled {
+            return Err(SmcError::DmaNotEnabled);
         }
 
         let capacity_bytes = total_capacity_bytes(self.config.cs0, self.config.cs1)?;
@@ -250,6 +262,7 @@ impl Smc<Ready> {
         self.regs.write_dma_len(validated.dma_len_reg);
 
         let seg = encode_segment(validated.flash_start, validated.flash_end)?;
+        self.saved_cs0_segment = self.regs.read_cs0_segment();
         self.regs.write_cs0_segment(seg);
 
         // Enable the completion IRQ before kicking DMA. QEMU evaluates
@@ -280,6 +293,38 @@ impl Smc<Ready> {
         self.regs.clear_dma_status(clear_mask & DMA_STATUS_RELEVANT_BITS);
     }
 
+    /// Decode status bits, restore segment, and transition controller state.
+    ///
+    /// Called by both `handle_dma_irq` (IRQ-driven) and `poll_dma_completion`
+    /// (polling). Assumes `status & DMA_STATUS_RELEVANT_BITS != 0`.
+    fn complete_dma(&mut self, status: u32) -> Result<SmcInterrupt, SmcError> {
+        let relevant = status & DMA_STATUS_RELEVANT_BITS;
+        let dma_in_flight = self.state == SmcState::DmaInFlight;
+        let decoded = SmcInterruptDecoder::decode_with_context(status, dma_in_flight);
+        self.clear_dma_status(relevant);
+        match decoded {
+            SmcInterrupt::DmaComplete => {
+                self.regs.write_cs0_segment(self.saved_cs0_segment);
+                self.state = SmcState::Idle;
+                Ok(decoded)
+            }
+            SmcInterrupt::DmaError => {
+                self.regs.write_cs0_segment(self.saved_cs0_segment);
+                self.state = SmcState::Idle;
+                Err(SmcError::DmaAborted)
+            }
+            SmcInterrupt::CommandAbort => {
+                self.state = SmcState::Faulted;
+                Err(SmcError::HardwareError)
+            }
+            SmcInterrupt::WriteProtected => {
+                self.state = SmcState::Faulted;
+                Err(SmcError::WriteProtected)
+            }
+            SmcInterrupt::Unknown => Err(SmcError::HardwareError),
+        }
+    }
+
     /// Decode and complete an in-flight DMA operation from an IRQ event.
     ///
     /// Returns the decoded interrupt cause when a completion/error event was
@@ -287,42 +332,39 @@ impl Smc<Ready> {
     /// `SmcError::ControllerNotReady` to indicate no completion work was found.
     pub fn handle_dma_irq(&mut self) -> Result<SmcInterrupt, SmcError> {
         self.regs.disable_dma_irq();
-
         let status = self.dma_status();
-        let relevant = status & DMA_STATUS_RELEVANT_BITS;
-        if relevant == 0 {
+        if status & DMA_STATUS_RELEVANT_BITS == 0 {
             return Err(SmcError::ControllerNotReady);
         }
+        self.complete_dma(status)
+    }
 
-        let dma_in_flight = self.state == SmcState::DmaInFlight;
-        let decoded = SmcInterruptDecoder::decode_with_context(status, dma_in_flight);
-
-        self.clear_dma_status(relevant);
-
-        match decoded {
-            SmcInterrupt::DmaComplete => {
-                self.state = SmcState::Ready;
-                Ok(decoded)
-            }
-            SmcInterrupt::DmaError => {
-                self.state = SmcState::Ready;
-                Err(SmcError::DmaAborted)
-            }
-            SmcInterrupt::CommandAbort => {
-                self.state = SmcState::Error;
-                Err(SmcError::HardwareError)
-            }
-            SmcInterrupt::WriteProtected => {
-                self.state = SmcState::Error;
-                Err(SmcError::WriteProtected)
-            }
-            SmcInterrupt::Unknown => Err(SmcError::HardwareError),
+    /// Poll for DMA completion without requiring an IRQ.
+    ///
+    /// Returns `nb::Error::WouldBlock` while the transfer is still in progress.
+    /// Returns `Ok(())` on success or `nb::Error::Other(SmcError)` on failure.
+    /// Returns `nb::Error::Other(SmcError::ControllerNotReady)` if no DMA is
+    /// in flight.
+    ///
+    /// Suitable for spin-poll loops in contexts where `enable_interrupts` is
+    /// false (e.g., QEMU tests without an IRQ handler):
+    /// ```ignore
+    /// nb::block!(fmc.poll_dma_completion())?;
+    /// ```
+    pub fn poll_dma_completion(&mut self) -> nb::Result<(), SmcError> {
+        if self.state != SmcState::DmaInFlight {
+            return Err(nb::Error::Other(SmcError::ControllerNotReady));
         }
+        let status = self.dma_status();
+        if status & DMA_STATUS_RELEVANT_BITS == 0 {
+            return Err(nb::Error::WouldBlock);
+        }
+        self.complete_dma(status).map(|_| ()).map_err(nb::Error::Other)
     }
 
     /// Check if controller is ready for operations.
     pub fn is_ready(&self) -> bool {
-        self.state == SmcState::Ready
+        self.state == SmcState::Idle
     }
 
     /// Get the controller identifier.
@@ -372,7 +414,7 @@ impl Smc<Ready> {
         rx: &mut [u8],
         mode: TransferMode,
     ) -> Result<(), SmcError> {
-        if self.state != SmcState::Ready {
+        if self.state != SmcState::Idle {
             return Err(SmcError::ControllerNotReady);
         }
         if cs == ChipSelect::Cs1 && self.config.cs1.is_none() {

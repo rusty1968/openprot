@@ -76,6 +76,11 @@ impl FmcReady {
         self.inner.handle_dma_irq()
     }
 
+    /// Poll for DMA completion without requiring an IRQ. See `Smc::poll_dma_completion`.
+    pub fn poll_dma_completion(&mut self) -> nb::Result<(), SmcError> {
+        self.inner.poll_dma_completion()
+    }
+
     /// Check if FMC is ready for operations.
     pub fn is_ready(&self) -> bool {
         self.inner.is_ready()

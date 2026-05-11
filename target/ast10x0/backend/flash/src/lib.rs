@@ -61,6 +61,7 @@ fn smc_to_backend_error(err: SmcError) -> BackendError {
         SmcError::DmaAborted | SmcError::DmaLengthMismatch => BackendError::IoError,
         SmcError::DeviceNotSupported
         | SmcError::WriteInProgress
+        | SmcError::DmaNotEnabled
         | SmcError::HardwareError => BackendError::InternalError,
     }
 }
