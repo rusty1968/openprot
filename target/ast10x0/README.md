@@ -12,15 +12,6 @@ bazel build //target/ast10x0/...
 
 ## Running Tests
 
-### Host-side unit tests (no QEMU)
-
-These run natively on the host and cover helpers, encoding, and device-layer
-logic:
-
-```console
-bazelisk test //target/ast10x0/peripherals/...
-```
-
 ### QEMU kernel tests
 
 The `virt_ast10x0` config sets `--platforms=//target/ast10x0` and launches
@@ -41,21 +32,12 @@ Pass an empty `--test_tag_filters=` to override `k_common` and include all
 bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/...
 ```
 
-### Complete baseline (host + QEMU + integration)
-
-```console
-bazelisk test //target/ast10x0/peripherals/... && \
-bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/...
-```
-
 For more detailed failures add `--verbose_failures` to either command.
 
 ## Notes
 
 - `bazel build //target/ast10x0/...` builds all targets but does not execute
   any tests.
-- `bazelisk test //target/ast10x0/peripherals/...` runs host-side unit tests
-  only; no QEMU or bare-metal runner required.
 - `--config=virt_ast10x0` excludes `integration`-tagged targets by default.
   Use `--test_tag_filters=` (empty) to include them.
 - The `integration` tag covers QEMU-only tests that depend on flash model
