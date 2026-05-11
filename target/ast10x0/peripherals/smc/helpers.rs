@@ -14,10 +14,48 @@ const SMC_WINDOW_SIZE_BYTES: usize = 256 * 1024 * 1024;
 const DMA_DRAM_MASK: u32 = 0x000BFFFC;
 pub(crate) const SPI_CTRL_FREQ_MASK: u32 = 0x0F00_0F00;
 
+/// DMA engine's base address for flash-side memory (fmc084 / spi084).
+/// DMA flash address = flash_window_base[cs] - SPI_DMA_FLASH_MAP_BASE + cs_offset.
+pub(crate) const SPI_DMA_FLASH_MAP_BASE: usize = 0x6000_0000;
+
+/// DMA engine's base address for SRAM-side memory (fmc088 / spi088).
+/// DMA DRAM address = physical_sram_addr + SPI_DMA_RAM_MAP_BASE.
+pub(crate) const SPI_DMA_RAM_MAP_BASE: u32 = 0x8000_0000;
+
+/// Written to spi080/fmc080 to request the DMA bus (sets DMAReq, bit 31).
+/// On SPI1/SPI2 this asserts the hardware arbiter request line.
+/// On FMC, bits 20–31 are Reserved — the write is a no-op.
+/// Matches aspeed-rust `SPI_DMA_GET_REQ_MAGIC`.
+pub(crate) const SPI_DMA_GET_REQ_MAGIC: u32 = 0xaeed_0000;
+
+/// Written to spi080/fmc080 to release the DMA bus grant (DMADiscard).
+/// On SPI1/SPI2 this releases the arbiter grant after DMA completes.
+/// On FMC, bits 20–31 are Reserved — the write is a no-op.
+/// Matches aspeed-rust `SPI_DMA_DISCARD_REQ_MAGIC`.
+pub(crate) const SPI_DMA_DISCARD_REQ_MAGIC: u32 = 0xdeea_0000;
+
+/// spi080 bit 31: DMA bus request is pending (SPI1/SPI2 only).
+/// Reads as 0 on FMC (Reserved).
+pub(crate) const SPI_DMA_REQUEST: u32 = 1 << 31;
+
+/// spi080 bit 30: DMA bus grant is held (SPI1/SPI2 only).
+/// Reads as 0 on FMC (Reserved).
+pub(crate) const SPI_DMA_GRANT: u32 = 1 << 30;
+
+/// Validated parameters for a DMA read operation, ready to be written to hardware registers.
+///
+/// Produced by [`validate_dma_read`] after bounds-checking and address translation.
+/// All fields are in the format expected directly by the DMA engine registers.
 pub(crate) struct ValidatedDmaRead {
+    /// DMA engine flash-side address (written to fmc084 / spi084).
+    ///
+    /// Computed as `flash_window_base[cs] - SPI_DMA_FLASH_MAP_BASE + cs_offset`.
     pub flash_start: usize,
-    pub flash_end: usize,
+    /// DMA engine DRAM-side address (written to fmc088 / spi088).
+    ///
+    /// Must be 4-byte aligned and satisfy the hardware mask (`DMA_DRAM_MASK`).
     pub dram_addr: u32,
+    /// Value to write to the DMA length register (transfer length minus one).
     pub dma_len_reg: u32,
 }
 
@@ -70,8 +108,19 @@ pub(crate) fn validate_mapped_range(
     Ok(offset)
 }
 
+/// Validate a DMA read request and compute DMA register values.
+///
+/// `flash_window_base`: per-CS AHB window base addresses from `Smc<Ready>`.
+/// `cs0_capacity`: byte size of CS0; used to derive which CS the offset falls in.
+///
+/// The chip select is never accepted as a caller argument. The controller-relative
+/// `flash_offset` encodes it implicitly: any offset in `[0, cs0_capacity)` names
+/// CS0; any offset in `[cs0_capacity, capacity_bytes)` names CS1. See
+/// EVD-20260511-dma-flash-offset-encodes-cs for the full rationale.
 pub(crate) fn validate_dma_read(
     flash_offset: u32,
+    flash_window_base: [usize; 2],
+    cs0_capacity: usize,
     dram_addr: usize,
     len: u32,
     capacity_bytes: usize,
@@ -80,8 +129,32 @@ pub(crate) fn validate_dma_read(
         return Err(SmcError::InvalidCapacity);
     }
 
-    let flash_start = validate_mapped_range(flash_offset, len as usize, capacity_bytes)?;
-    let flash_end = flash_start + len as usize;
+    // Flash offset must be 4-byte aligned (spec §1.3, matching aspeed-rust).
+    if flash_offset & 0x3 != 0 {
+        return Err(SmcError::InvalidCapacity);
+    }
+
+    // Bounds-check the controller-relative offset.
+    let _ = validate_mapped_range(flash_offset, len as usize, capacity_bytes)?;
+
+    // Derive cs and within-CS offset from the controller-relative flash_offset.
+    // CS0 occupies [0, cs0_capacity); CS1 occupies [cs0_capacity, capacity_bytes).
+    let flash_offset = flash_offset as usize;
+    let (cs, cs_offset) = if flash_offset < cs0_capacity {
+        (0, flash_offset)
+    } else {
+        (1, flash_offset - cs0_capacity)
+    };
+
+    // Compute the DMA engine's flash address (written to fmc084/spi084).
+    // Formula from aspeed-rust fmccontroller.rs::read_dma:
+    //   fmc084 = decode_addr[cs].start + op.address.value - SPI_DMA_FLASH_MAP_BASE
+    //          = flash_window_base[cs] - SPI_DMA_FLASH_MAP_BASE + cs_offset
+    let flash_start = flash_window_base[cs]
+        .checked_sub(SPI_DMA_FLASH_MAP_BASE)
+        .and_then(|base| base.checked_add(cs_offset))
+        .ok_or(SmcError::InvalidCapacity)?;
+
     let dram_addr = u32::try_from(dram_addr).map_err(|_| SmcError::InvalidCapacity)?;
     if dram_addr & 0x3 != 0 || dram_addr != (dram_addr & DMA_DRAM_MASK) {
         return Err(SmcError::InvalidCapacity);
@@ -89,7 +162,6 @@ pub(crate) fn validate_dma_read(
 
     Ok(ValidatedDmaRead {
         flash_start,
-        flash_end,
         dram_addr,
         dma_len_reg: len - 1,
     })
@@ -226,36 +298,64 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // FMC window base for tests: 0x8000_0000; SPI_DMA_FLASH_MAP_BASE: 0x6000_0000
+    // Expected fmc084 for CS0 offset 0x1000: 0x8000_0000 - 0x6000_0000 + 0x1000 = 0x2000_1000
+    const TEST_WINDOW: [usize; 2] = [0x8000_0000, 0x8100_0000]; // CS0=16MB, CS1 starts at +16MB
+    const TEST_CS0_CAP: usize = 16 * 1024 * 1024;
+    const TEST_CAP: usize = 16 * 1024 * 1024;
+
     #[test]
     fn test_validate_dma_read_accepts_valid_request() {
-        let validated = validate_dma_read(0x1000, 0x0008_0000, 512, 16 * 1024 * 1024).unwrap();
-        assert_eq!(validated.flash_start, 0x1000);
-        assert_eq!(validated.flash_end, 0x1200);
+        let validated = validate_dma_read(
+            0x1000, TEST_WINDOW, TEST_CS0_CAP, 0x0008_0000, 512, TEST_CAP,
+        ).unwrap();
+        assert_eq!(validated.flash_start, 0x2000_1000); // 0x8000_0000 - 0x6000_0000 + 0x1000
         assert_eq!(validated.dram_addr, 0x0008_0000);
         assert_eq!(validated.dma_len_reg, 511);
     }
 
     #[test]
+    fn test_validate_dma_read_cs1_region() {
+        // Offset falls in CS1 region (past 16 MB CS0) on a 32 MB dual-CS controller.
+        const DUAL_WINDOW: [usize; 2] = [0x8000_0000, 0x8100_0000];
+        const CS0_CAP: usize = 16 * 1024 * 1024;
+        const TOTAL_CAP: usize = 32 * 1024 * 1024;
+        let cs1_offset = CS0_CAP + 0x1000;
+        let validated = validate_dma_read(
+            cs1_offset as u32, DUAL_WINDOW, CS0_CAP, 0x0008_0000, 512, TOTAL_CAP,
+        ).unwrap();
+        // fmc084 = 0x8100_0000 - 0x6000_0000 + 0x1000 = 0x2100_1000
+        assert_eq!(validated.flash_start, 0x2100_1000);
+        assert_eq!(validated.dma_len_reg, 511);
+    }
+
+    #[test]
     fn test_validate_dma_read_rejects_zero_length() {
-        let result = validate_dma_read(0, 0x0008_0000, 0, 16 * 1024 * 1024);
+        let result = validate_dma_read(0, TEST_WINDOW, TEST_CS0_CAP, 0x0008_0000, 0, TEST_CAP);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_dma_read_rejects_unaligned_flash_offset() {
+        let result = validate_dma_read(0x1001, TEST_WINDOW, TEST_CS0_CAP, 0x0008_0000, 256, TEST_CAP);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_dma_read_rejects_unaligned_dram() {
-        let result = validate_dma_read(0, 0x0008_0002, 256, 16 * 1024 * 1024);
+        let result = validate_dma_read(0, TEST_WINDOW, TEST_CS0_CAP, 0x0008_0002, 256, TEST_CAP);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_dma_read_rejects_masked_dram_bits() {
-        let result = validate_dma_read(0, 0x1000_0000, 256, 16 * 1024 * 1024);
+        let result = validate_dma_read(0, TEST_WINDOW, TEST_CS0_CAP, 0x1000_0000, 256, TEST_CAP);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_dma_read_rejects_flash_range_overflow() {
-        let result = validate_dma_read(0x00ff_ff00, 0x0008_0000, 0x200, 16 * 1024 * 1024);
+        let result = validate_dma_read(0x00ff_ff00, TEST_WINDOW, TEST_CS0_CAP, 0x0008_0000, 0x200, TEST_CAP);
         assert!(result.is_err());
     }
 }

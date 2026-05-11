@@ -6,8 +6,8 @@
 use core::marker::PhantomData;
 
 use crate::smc::helpers::{
-    SPI_CTRL_FREQ_MASK, encode_segment, flash_capacity_bytes, spi_freq_div, total_capacity_bytes,
-    validate_dma_read, validate_mapped_range,
+    SPI_CTRL_FREQ_MASK, SPI_DMA_RAM_MAP_BASE, encode_segment, flash_capacity_bytes, spi_freq_div,
+    total_capacity_bytes, validate_dma_read, validate_mapped_range,
 };
 use crate::smc::interrupts::{SmcInterrupt, SmcInterruptDecoder};
 use crate::smc::registers::SmcRegisters;
@@ -26,6 +26,7 @@ enum SmcState {
 
 const ASPEED_SPI_USER: u32 = 0x3;
 const ASPEED_SPI_USER_INACTIVE: u32 = 0x4;
+const ASPEED_SPI_NORMAL_READ: u32 = 0x1;
 const DMA_STATUS_RELEVANT_BITS: u32 = (1 << 11) | (1 << 10) | (1 << 9);
 /// Mask for bits that are not IO mode or mode-type fields — preserves
 /// frequency divisor and other config bits across per-phase ctrl writes.
@@ -53,11 +54,6 @@ pub struct Smc<Mode> {
     /// CS0 starts at `controller_id.flash_window_address()`;
     /// CS1 starts immediately after the CS0 segment.
     flash_window_base: [usize; 2],
-    /// CS0 segment register value saved immediately before a DMA transfer
-    /// overwrites it with the transfer window. Restored verbatim on completion
-    /// or error so that subsequent user-mode transactions see the correct
-    /// full-capacity AHB window.
-    saved_cs0_segment: u32,
     _mode: PhantomData<fn() -> Mode>,
 }
 
@@ -90,7 +86,6 @@ impl Smc<Uninitialized> {
             state: SmcState::Idle,
             normal_read_ctrl: [0; 2],
             flash_window_base: [0; 2],
-            saved_cs0_segment: 0,
             _mode: PhantomData,
         })
     }
@@ -151,7 +146,6 @@ impl Smc<Uninitialized> {
             state: SmcState::Idle,
             normal_read_ctrl: [cs0_normal_read, cs1_normal_read],
             flash_window_base,
-            saved_cs0_segment: 0,
             _mode: PhantomData,
         })
     }
@@ -256,14 +250,42 @@ impl Smc<Ready> {
         }
 
         let capacity_bytes = total_capacity_bytes(self.config.cs0, self.config.cs1)?;
-        let validated = validate_dma_read(flash_offset, dram_addr, len, capacity_bytes)?;
+        let cs0_capacity = flash_capacity_bytes(self.config.cs0)?;
+        let validated = validate_dma_read(
+            flash_offset,
+            self.flash_window_base,
+            cs0_capacity,
+            dram_addr,
+            len,
+            capacity_bytes,
+        )?;
 
-        self.regs.write_dma_addr(validated.dram_addr);
+        // Acquire the DMA bus arbiter before programming any DMA registers.
+        // On SPI1/SPI2: writes SPI_DMA_GET_REQ_MAGIC and spins until DMAGrant
+        // (bit 30 of spi080) is set. On FMC: bits 20–31 are Reserved — the write
+        // is a no-op and the spin condition is immediately false. Safe to call
+        // unconditionally on all controllers, matching aspeed-rust's approach.
+        self.regs.acquire_dma_arbiter();
+
+        // Set CS0 control register to normal-read mode before programming DMA
+        // registers. The DMA engine reads the CSx control register to know which
+        // SPI command to issue; it must be in normal-read mode (not user mode)
+        // before the kick. Matches aspeed-rust fmccontroller.rs::read_dma
+        // ctrl construction: preserve frequency bits, set ASPEED_SPI_NORMAL_READ.
+        self.regs.write_cs0_ctrl(
+            (self.normal_read_ctrl[0] & SPI_CTRL_FREQ_MASK) | ASPEED_SPI_NORMAL_READ,
+        );
+
+        // Program DMA registers in the order used by aspeed-rust fmccontroller.rs::read_dma:
+        //   fmc084 = flash side DMA address (R_DMA_FLASH_ADDR)
+        //            = flash_window_base[cs] - SPI_DMA_FLASH_MAP_BASE + cs_offset
+        //            (computed in validate_dma_read)
+        //   fmc088 = DRAM/SRAM destination address (R_DMA_DRAM_ADDR)
+        //            = physical_sram_addr + SPI_DMA_RAM_MAP_BASE
+        //   fmc08c = transfer length - 1 (R_DMA_LEN)
+        self.regs.write_dma_flash_addr(validated.flash_start as u32);
+        self.regs.write_dma_dram_addr(validated.dram_addr + SPI_DMA_RAM_MAP_BASE);
         self.regs.write_dma_len(validated.dma_len_reg);
-
-        let seg = encode_segment(validated.flash_start, validated.flash_end)?;
-        self.saved_cs0_segment = self.regs.read_cs0_segment();
-        self.regs.write_cs0_segment(seg);
 
         // Enable the completion IRQ before kicking DMA. QEMU evaluates
         // INTR_CTRL_DMA_EN exactly once at DMA-done time
@@ -275,7 +297,9 @@ impl Smc<Ready> {
             self.regs.enable_dma_irq();
         }
 
-        self.regs.write_dma_ctrl(0x1); // DMA_CTRL_REQUEST
+        // Kick DMA via read-modify-write to preserve timing calibration
+        // bits (fmc080 bits 8-19), matching aspeed-rust fmccontroller.rs::read_dma.
+        self.regs.kick_dma_read();
 
         self.state = SmcState::DmaInFlight;
         Ok(())
@@ -293,7 +317,7 @@ impl Smc<Ready> {
         self.regs.clear_dma_status(clear_mask & DMA_STATUS_RELEVANT_BITS);
     }
 
-    /// Decode status bits, restore segment, and transition controller state.
+    /// Decode status bits and transition controller state.
     ///
     /// Called by both `handle_dma_irq` (IRQ-driven) and `poll_dma_completion`
     /// (polling). Assumes `status & DMA_STATUS_RELEVANT_BITS != 0`.
@@ -304,12 +328,12 @@ impl Smc<Ready> {
         self.clear_dma_status(relevant);
         match decoded {
             SmcInterrupt::DmaComplete => {
-                self.regs.write_cs0_segment(self.saved_cs0_segment);
+                self.regs.disable_dma();
                 self.state = SmcState::Idle;
                 Ok(decoded)
             }
             SmcInterrupt::DmaError => {
-                self.regs.write_cs0_segment(self.saved_cs0_segment);
+                self.regs.disable_dma();
                 self.state = SmcState::Idle;
                 Err(SmcError::DmaAborted)
             }
@@ -341,25 +365,30 @@ impl Smc<Ready> {
 
     /// Poll for DMA completion without requiring an IRQ.
     ///
-    /// Returns `nb::Error::WouldBlock` while the transfer is still in progress.
-    /// Returns `Ok(())` on success or `nb::Error::Other(SmcError)` on failure.
-    /// Returns `nb::Error::Other(SmcError::ControllerNotReady)` if no DMA is
-    /// in flight.
+    /// Returns `Poll::Pending` while the transfer is still in progress.
+    /// Returns `Poll::Ready(Ok(()))` on success or `Poll::Ready(Err(SmcError))`
+    /// on failure. Returns `Poll::Ready(Err(SmcError::ControllerNotReady))` if
+    /// no DMA is in flight.
     ///
     /// Suitable for spin-poll loops in contexts where `enable_interrupts` is
     /// false (e.g., QEMU tests without an IRQ handler):
     /// ```ignore
-    /// nb::block!(fmc.poll_dma_completion())?;
+    /// loop {
+    ///     match controller.poll_dma_completion() {
+    ///         Poll::Ready(result) => break result,
+    ///         Poll::Pending => {}
+    ///     }
+    /// }
     /// ```
-    pub fn poll_dma_completion(&mut self) -> nb::Result<(), SmcError> {
+    pub fn poll_dma_completion(&mut self) -> core::task::Poll<Result<(), SmcError>> {
         if self.state != SmcState::DmaInFlight {
-            return Err(nb::Error::Other(SmcError::ControllerNotReady));
+            return core::task::Poll::Ready(Err(SmcError::ControllerNotReady));
         }
         let status = self.dma_status();
         if status & DMA_STATUS_RELEVANT_BITS == 0 {
-            return Err(nb::Error::WouldBlock);
+            return core::task::Poll::Pending;
         }
-        self.complete_dma(status).map(|_| ()).map_err(nb::Error::Other)
+        core::task::Poll::Ready(self.complete_dma(status).map(|_| ()))
     }
 
     /// Check if controller is ready for operations.

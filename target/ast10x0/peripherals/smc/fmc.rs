@@ -77,7 +77,7 @@ impl FmcReady {
     }
 
     /// Poll for DMA completion without requiring an IRQ. See `Smc::poll_dma_completion`.
-    pub fn poll_dma_completion(&mut self) -> nb::Result<(), SmcError> {
+    pub fn poll_dma_completion(&mut self) -> core::task::Poll<Result<(), SmcError>> {
         self.inner.poll_dma_completion()
     }
 
