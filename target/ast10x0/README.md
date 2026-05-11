@@ -10,36 +10,54 @@ Build all targets under the AST10x0 tree with:
 bazel build //target/ast10x0/...
 ```
 
-Run the AST10x0 test targets with:
+## Running Tests
+
+### Host-side unit tests (no QEMU)
+
+These run natively on the host and cover helpers, encoding, and device-layer
+logic:
 
 ```console
-bazel test //target/ast10x0/...
+bazelisk test //target/ast10x0/peripherals/...
 ```
 
-This builds the AST10x0 test targets and any required dependencies. Firmware-
-backed tests are skipped unless a runner is configured.
+### QEMU kernel tests
 
-## Running Tests Under QEMU
-
-Run the full AST10x0 test suite under QEMU with:
+The `virt_ast10x0` config sets `--platforms=//target/ast10x0` and launches
+system images under Pigweed's QEMU runner (`ast1030-evb` machine, semihosting).
+Targets tagged `integration` are excluded by default via the `k_common` tag
+filter (`--test_tag_filters=-integration,...`):
 
 ```console
-bazel test --config=virt_ast10x0 //target/ast10x0/...
+bazelisk test --config=virt_ast10x0 //target/ast10x0/...
 ```
 
-The `virt_ast10x0` config launches images with Pigweed's QEMU runner using the
-`ast1030-evb` machine and semihosting.
+### Full test run including integration tests
 
-For more detailed failures:
+Pass an empty `--test_tag_filters=` to override `k_common` and include all
+`integration`-tagged QEMU-only tests (multi-CS, program/erase, DMA, erase-state):
 
 ```console
-bazel test --config=virt_ast10x0 --verbose_failures //target/ast10x0/...
+bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/...
 ```
+
+### Complete baseline (host + QEMU + integration)
+
+```console
+bazelisk test //target/ast10x0/peripherals/... && \
+bazelisk test --config=virt_ast10x0 --test_tag_filters= //target/ast10x0/...
+```
+
+For more detailed failures add `--verbose_failures` to either command.
 
 ## Notes
 
-- `bazel build //target/ast10x0/...` builds all targets under the AST10x0 tree.
-- `bazel test //target/ast10x0/...` builds the AST10x0 test targets and any
-  required dependencies, but skips bare-metal test execution.
-- `bazel test --config=virt_ast10x0 //target/ast10x0/...` executes the AST10x0
-  system-image tests under QEMU.
+- `bazel build //target/ast10x0/...` builds all targets but does not execute
+  any tests.
+- `bazelisk test //target/ast10x0/peripherals/...` runs host-side unit tests
+  only; no QEMU or bare-metal runner required.
+- `--config=virt_ast10x0` excludes `integration`-tagged targets by default.
+  Use `--test_tag_filters=` (empty) to include them.
+- The `integration` tag covers QEMU-only tests that depend on flash model
+  behaviour (erase state, multi-CS routing, program/erase cycles) and cannot
+  be assumed to be valid on silicon without further qualification.
