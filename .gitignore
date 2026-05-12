@@ -126,3 +126,9 @@ criterion/
 
 # Build scripts
 build.rs.bk
+
+# Local design working docs under SCU peripheral
+/target/ast10x0/peripherals/scu/design/
+
+# Local design working docs under SPIMonitor peripheral
+/target/ast10x0/peripherals/spimonitor/design/
