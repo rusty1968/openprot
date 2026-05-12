@@ -8,8 +8,9 @@ use super::types::ScuRegisterHalf;
 
 impl ScuRegisters {
     /// Assert reset bits in the selected reset-control register half.
+    ///
+    /// Caller must call `unlock_write_protection()` before this.
     pub fn assert_reset_mask(&self, half: ScuRegisterHalf, mask: u32) {
-        self.unlock_write_protection();
         match half {
             ScuRegisterHalf::Lower => {
                 self.regs().scu040().write(|w| unsafe { w.bits(mask) });
@@ -21,8 +22,9 @@ impl ScuRegisters {
     }
 
     /// Deassert reset bits in the selected reset-control register half.
+    ///
+    /// Caller must call `unlock_write_protection()` before this.
     pub fn deassert_reset_mask(&self, half: ScuRegisterHalf, mask: u32) {
-        self.unlock_write_protection();
         match half {
             ScuRegisterHalf::Lower => {
                 self.regs().scu044().write(|w| unsafe { w.bits(mask) });

@@ -6,4 +6,3 @@
 pub mod i2c;
 pub mod scu;
 pub mod uart;
-pub mod spimonitor;
