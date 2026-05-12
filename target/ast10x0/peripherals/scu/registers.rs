@@ -22,7 +22,7 @@ impl ScuRegisters {
     /// Caller must ensure:
     /// - `base` points to a valid SCU register block.
     /// - access to the SCU instance is serialized appropriately.
-    pub(crate) const unsafe fn new(base: *const device::scu::RegisterBlock) -> Self {
+    const unsafe fn new(base: *const device::scu::RegisterBlock) -> Self {
         Self {
             base,
             _not_sync: PhantomData,
@@ -33,7 +33,7 @@ impl ScuRegisters {
     ///
     /// # Safety
     /// Caller must ensure access to the singleton SCU is coordinated.
-    pub const unsafe fn new_global() -> Self {
+    const unsafe fn new_global() -> Self {
         // SAFETY: Caller upholds the singleton access contract.
         unsafe { Self::new(device::Scu::ptr()) }
     }
@@ -54,7 +54,7 @@ impl ScuRegisters {
     }
 
     #[inline]
-    pub(crate) fn regs(&self) -> &device::scu::RegisterBlock {
+    pub fn regs(&self) -> &device::scu::RegisterBlock {
         // SAFETY: Constructor guarantees a valid SCU register block pointer.
         unsafe { &*self.base }
     }
@@ -64,7 +64,7 @@ impl ScuRegisters {
     /// Call this once before a sequence of SCU writes, following the aspeed-rust
     /// pattern of a single unlock per batch of register operations.
     #[inline]
-    pub fn unlock_write_protection(&self) {
+    fn unlock_write_protection(&self) {
         self.regs()
             .scu000()
             .write(|w| unsafe { w.bits(SCU_UNLOCK_KEY) });

@@ -15,9 +15,7 @@
 use ast10x0_peripherals::scu::{PinctrlPin, ScuRegisters};
 use ast10x0_peripherals::scu::{ClockRegisterHalf, ScuRegisterHalf};
 
-/// Board-level descriptor for AST10x0 SMC flash topology.
-///
-/// Describes board pin-control setup for early platform initialization.
+/// Board descriptor metadata for AST10x0 board initialization.
 #[derive(Clone, Debug)]
 pub struct Ast10x0BoardDescriptor {
     /// Pin control groups to apply during board init.
@@ -25,48 +23,55 @@ pub struct Ast10x0BoardDescriptor {
     pub pinctrl_groups: &'static [&'static [PinctrlPin]],
 }
 
-impl Ast10x0BoardDescriptor {
-    /// Initialize board: apply pinctrl groups.
-    ///
-    /// # Safety
-    /// Caller must hold exclusive access to the SCU register block.
-    pub unsafe fn init_board(&self, scu: &ScuRegisters) {
-        for group in self.pinctrl_groups {
-            scu.apply_pinctrl_group(group);
-        }
-    }
+/// Runtime board object that executes hardware initialization steps.
+pub struct Ast10x0Board {
+    descriptor: Ast10x0BoardDescriptor,
 }
 
-/// Initialize I2C subsystem at the board level.
-///
-/// This performs the platform-level I2C initialization:
-/// 1. Enable I2C clock via SCU
-/// 2. Assert I2C/SMBus controller reset
-/// 3. Delay for reset to settle
-/// 4. Deassert reset
-/// 5. Delay for recovery
-/// 6. Configure I2C global registers (clock dividers, etc.)
-///
-/// # Safety
-/// - Must be called only once during board initialization.
-/// - Not thread-safe; caller must ensure no concurrent SCU or I2C accesses.
-pub unsafe fn init_i2c() {
-    // Unlock SCU once before the sequence of writes (aspeed-rust pattern)
-    let scu = unsafe { ScuRegisters::new_global_unlocked() };
+impl Ast10x0Board {
+    /// Create a board runtime object from board metadata.
+    #[must_use]
+    pub const fn new(descriptor: Ast10x0BoardDescriptor) -> Self {
+        Self { descriptor }
+    }
 
-    // Enable I2C clock (Group 0, bit 2)
-    scu.ungate_clock_mask(ClockRegisterHalf::Lower, 1 << 2);
+    /// Initialize board: apply pinctrl groups and initialize I2C subsystem.
+    ///
+    /// This performs the complete platform-level initialization:
+    /// 1. Apply pinctrl groups
+    /// 2. Enable I2C clock via SCU
+    /// 3. Assert I2C/SMBus controller reset
+    /// 4. Delay for reset to settle
+    /// 5. Deassert reset
+    /// 6. Delay for recovery
+    /// 7. Configure I2C global registers (clock dividers, etc.)
+    ///
+    /// # Safety
+    /// - Must be called only once during board initialization.
+    /// - Not thread-safe; caller must ensure no concurrent SCU or I2C accesses.
+    pub unsafe fn init(&self) {
+        // Unlock SCU once before the sequence of writes (aspeed-rust pattern)
+        let scu = unsafe { ScuRegisters::new_global_unlocked() };
 
-    // Assert I2C reset (Upper half, bit 2)
-    scu.assert_reset_mask(ScuRegisterHalf::Upper, 1 << 2);
-    delay_us(1000);
+        // Apply pinctrl groups
+        for group in self.descriptor.pinctrl_groups {
+            scu.apply_pinctrl_group(group);
+        }
 
-    // Deassert I2C reset
-    scu.deassert_reset_mask(ScuRegisterHalf::Upper, 1 << 2);
-    delay_us(1000);
+        // Enable I2C clock (Group 0, bit 2)
+        scu.ungate_clock_mask(ClockRegisterHalf::Lower, 1 << 2);
 
-    // Configure I2C global registers (clock dividers, etc.)
-    unsafe { ast10x0_peripherals::i2c::init_i2c_global() };
+        // Assert I2C reset (Upper half, bit 2)
+        scu.assert_reset_mask(ScuRegisterHalf::Upper, 1 << 2);
+        delay_us(1000);
+
+        // Deassert I2C reset
+        scu.deassert_reset_mask(ScuRegisterHalf::Upper, 1 << 2);
+        delay_us(1000);
+
+        // Configure I2C global registers (clock dividers, etc.)
+        unsafe { ast10x0_peripherals::i2c::init_i2c_global() };
+    }
 }
 
 /// Simple busy-wait delay in microseconds.
