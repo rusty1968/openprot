@@ -10,8 +10,7 @@ use ast10x0_peripherals::i2c::{
 };
 use ast10x0_peripherals::scu::pinctrl;
 use codegen as _;
-use console_backend as _;
-use cortex_m_semihosting::debug::{EXIT_FAILURE, EXIT_SUCCESS, exit};
+use console_backend::console_backend_write_all;
 use entry as _;
 use target_common::{TargetInterface, declare_target};
 
@@ -446,21 +445,15 @@ impl TargetInterface for Target {
     const NAME: &'static str = "AST10x0 Kernel I2C";
 
     fn main() -> ! {
-        let exit_status = match run_i2c_init_smoke_test() {
-            Ok(()) => EXIT_SUCCESS,
+        let sentinel: &[u8] = match run_i2c_init_smoke_test() {
+            Ok(()) => b"TEST_RESULT:PASS\n",
             Err(error) => {
                 pw_log::error!("I2C init smoke test failed: {}", error as &str);
-                EXIT_FAILURE
+                b"TEST_RESULT:FAIL\n"
             }
         };
 
-        exit(exit_status);
-        #[expect(clippy::empty_loop)]
-        loop {}
-    }
-
-    fn shutdown(code: u32) -> ! {
-        pw_log::info!("Shutting down with code {}", code as u32);
+        let _ = console_backend_write_all(sentinel);
         #[expect(clippy::empty_loop)]
         loop {}
     }
