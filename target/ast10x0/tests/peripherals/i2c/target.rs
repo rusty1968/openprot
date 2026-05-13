@@ -354,6 +354,17 @@ fn run_i2c_init_smoke_test() -> Result<(), &'static str> {
             clock_config: ClockConfig::ast1060_default(),
         },
     )?;
+    run_init_case_dma(
+        "dma-fast",
+        I2cConfig {
+            speed: I2cSpeed::Fast,
+            xfer_mode: I2cXferMode::DmaMode,
+            multi_master: true,
+            smbus_timeout: true,
+            smbus_alert: false,
+            clock_config: ClockConfig::ast1060_default(),
+        },
+    )?;
 
     pw_log::info!("=== AST10x0 I2C init smoke test complete ===");
     Ok(())
@@ -369,6 +380,45 @@ fn run_init_case(name: &str, config: I2cConfig) -> Result<(), &'static str> {
             ast1060_pac::I2c1::ptr(),
             ast1060_pac::I2cbuff1::ptr(),
             &config,
+            |_| core::hint::spin_loop(),
+        )
+    };
+
+    match result {
+        Ok(_i2c) => {
+            verify_init_registers(name, &config)?;
+            pw_log::info!("{} mode init+verify passed", name as &str);
+            Ok(())
+        }
+        Err(error) => {
+            let error_name = i2c_error_str(error);
+            pw_log::error!(
+                "{} mode init failed: {}",
+                name as &str,
+                error_name as &str
+            );
+            dump_i2c1_registers(name, &config);
+            Err(ERR_INIT_FAILED)
+        }
+    }
+}
+
+fn run_init_case_dma(name: &str, config: I2cConfig) -> Result<(), &'static str> {
+    pw_log::info!(
+        "Instantiating controller 1 in {} mode (new_with_dma)",
+        name as &str
+    );
+
+    let mut dma_buf = [0u8; 64];
+
+    // SAFETY: The test owns the controller for the process lifetime and uses
+    // the matching I2C/I2CBUFF register pair for controller 1.
+    let result = unsafe {
+        Ast1060I2c::new_with_dma(
+            ast1060_pac::I2c1::ptr(),
+            ast1060_pac::I2cbuff1::ptr(),
+            &config,
+            &mut dma_buf,
             |_| core::hint::spin_loop(),
         )
     };
