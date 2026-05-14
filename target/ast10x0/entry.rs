@@ -104,7 +104,20 @@ macro_rules! default_handler {
         $(
             #[unsafe(no_mangle)]
             pub extern "C" fn $name() {
-                // Default: infinite loop
+                // Debug hack: print which stub fired once, then hang.
+                // Self-limiting via AtomicBool so a re-asserting source
+                // can't flood the UART. Uses byte-slice literal only
+                // (no formatting, no locks) so it is safe to call from
+                // ISR context against the polled UART backend.
+                static FIRED: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                if !FIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                    let _ = unsafe {
+                        console_backend::console_backend_write_all(
+                            concat!("[ISR-STUB] ", stringify!($name), "\r\n").as_bytes(),
+                        )
+                    };
+                }
                 loop {}
             }
         )*
