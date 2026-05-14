@@ -59,6 +59,7 @@ test:k_common  --test_tag_filters=-integration,-do_not_build,-do_not_run_test,-k
 # Requires key-based SSH auth: ssh-copy-id <user>@<pi-host>
 # Usage: AST1060_EVB_PI_HOST=<pi-hostname> bazel test --config=k_ast1060_evb //...
 common:k_ast1060_evb --platforms=//target/ast10x0
+common:k_ast1060_evb --//target/ast10x0:uart_boot_header=true
 build:k_ast1060_evb --build_tag_filters=-do_not_build,-kernel_doc_test
 # Board tests share one physical board; run them one at a time.
 test:k_ast1060_evb --local_test_jobs=1
