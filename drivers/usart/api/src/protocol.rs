@@ -4,6 +4,8 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub const MAX_PAYLOAD_SIZE: usize = 256;
+pub const PROTOCOL_VERSION: u8 = 0;
+const PROTOCOL_VERSION_MASK: u8 = 0x0f;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,8 @@ pub enum UsartOp {
     /// the server queues the request and completes it when the RX IRQ fires
     /// if no data is ready yet.
     TryRead = 0x07,
+    /// Wait until transmit is fully drained (TX idle).
+    Drain = 0x08,
 }
 
 impl TryFrom<u8> for UsartOp {
@@ -38,6 +42,7 @@ impl TryFrom<u8> for UsartOp {
             0x05 => Ok(Self::EnableInterrupts),
             0x06 => Ok(Self::DisableInterrupts),
             0x07 => Ok(Self::TryRead),
+            0x08 => Ok(Self::Drain),
             _ => Err(UsartError::InvalidOperation),
         }
     }
@@ -55,6 +60,7 @@ pub enum UsartError {
     /// No data available right now; the server has queued the request and will
     /// complete it when data arrives via RX interrupt.
     WouldBlock = 0x06,
+    UnsupportedVersion = 0x07,
     InternalError = 0xFF,
 }
 
@@ -68,8 +74,56 @@ impl From<u8> for UsartError {
             0x04 => Self::Busy,
             0x05 => Self::Timeout,
             0x06 => Self::WouldBlock,
+            0x07 => Self::UnsupportedVersion,
             _ => Self::InternalError,
         }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsartParityWire {
+    None = 0,
+    Even = 1,
+    Odd = 2,
+}
+
+impl TryFrom<u8> for UsartParityWire {
+    type Error = UsartError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Even),
+            2 => Ok(Self::Odd),
+            _ => Err(UsartError::InvalidConfiguration),
+        }
+    }
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct UsartConfigurePayload {
+    pub baud_rate: u32,
+    pub parity: u8,
+    pub stop_bits: u8,
+    pub reserved: u16,
+}
+
+impl UsartConfigurePayload {
+    pub const SIZE: usize = 8;
+
+    pub fn new(baud_rate: u32, parity: UsartParityWire, stop_bits: u8) -> Self {
+        Self {
+            baud_rate: baud_rate.to_le(),
+            parity: parity as u8,
+            stop_bits,
+            reserved: 0,
+        }
+    }
+
+    pub fn baud_rate_value(&self) -> u32 {
+        u32::from_le(self.baud_rate)
     }
 }
 
@@ -89,7 +143,7 @@ impl UsartRequestHeader {
     pub fn new(op: UsartOp, arg0: u16, arg1: u16, payload_len: u16) -> Self {
         Self {
             op_code: op as u8,
-            flags: 0,
+            flags: PROTOCOL_VERSION,
             arg0: arg0.to_le(),
             arg1: arg1.to_le(),
             payload_len: payload_len.to_le(),
@@ -110,6 +164,10 @@ impl UsartRequestHeader {
 
     pub fn arg1_value(&self) -> u16 {
         u16::from_le(self.arg1)
+    }
+
+    pub fn protocol_version(&self) -> u8 {
+        self.flags & PROTOCOL_VERSION_MASK
     }
 }
 

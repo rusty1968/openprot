@@ -3,8 +3,10 @@
 
 #![no_std]
 
+use usart_api::backend::Parity;
 use usart_api::{
-    UsartError, UsartOp, UsartRequestHeader, UsartResponseHeader, MAX_PAYLOAD_SIZE,
+    UsartConfigurePayload, UsartError, UsartOp, UsartParityWire, UsartRequestHeader,
+    UsartResponseHeader, MAX_PAYLOAD_SIZE,
 };
 use userspace::syscall;
 use userspace::time::Instant;
@@ -35,11 +37,45 @@ impl UsartClient {
     }
 
     pub fn configure(&self, baud_rate: u32) -> Result<(), ClientError> {
-        let arg0 = (baud_rate & 0xffff) as u16;
-        let arg1 = (baud_rate >> 16) as u16;
-        self.call_no_payload(UsartOp::Configure, arg0, arg1)
+        self.configure_with(baud_rate, Parity::None, 1)
     }
 
+    pub fn configure_with(
+        &self,
+        baud_rate: u32,
+        parity: Parity,
+        stop_bits: u8,
+    ) -> Result<(), ClientError> {
+        let mut req = [0u8; MAX_BUF_SIZE];
+        let mut resp = [0u8; MAX_BUF_SIZE];
+
+        let parity = match parity {
+            Parity::None => UsartParityWire::None,
+            Parity::Even => UsartParityWire::Even,
+            Parity::Odd => UsartParityWire::Odd,
+        };
+
+        let cfg = UsartConfigurePayload::new(baud_rate, parity, stop_bits);
+        let hdr = UsartRequestHeader::new(UsartOp::Configure, 0, 0, UsartConfigurePayload::SIZE as u16);
+        req[..UsartRequestHeader::SIZE].copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        req[UsartRequestHeader::SIZE..UsartRequestHeader::SIZE + UsartConfigurePayload::SIZE]
+            .copy_from_slice(zerocopy::IntoBytes::as_bytes(&cfg));
+
+        let resp_len = syscall::channel_transact(
+            self.handle,
+            &req[..UsartRequestHeader::SIZE + UsartConfigurePayload::SIZE],
+            &mut resp,
+            Instant::MAX,
+        )?;
+
+        parse_no_payload_response(&resp[..resp_len])
+    }
+
+    /// Submit bytes to the backend transmit path.
+    ///
+    /// Success means the write was accepted by the backend, not necessarily
+    /// that all bytes have fully drained on the wire. Call `drain` when callers
+    /// require TX-idle completion semantics.
     pub fn write(&self, data: &[u8]) -> Result<usize, ClientError> {
         if data.len() > MAX_PAYLOAD_SIZE {
             return Err(ClientError::BufferTooSmall);
@@ -90,6 +126,10 @@ impl UsartClient {
         )?;
 
         parse_payload_response(&resp[..resp_len], out)
+    }
+
+    pub fn drain(&self) -> Result<(), ClientError> {
+        self.call_no_payload(UsartOp::Drain, 0, 0)
     }
 
     /// Non-blocking read.
