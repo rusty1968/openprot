@@ -6,7 +6,10 @@
 pub mod runtime;
 
 use usart_api::backend::{BackendError, IrqMask, UsartBackend};
-use usart_api::{UsartError, UsartOp, UsartRequestHeader, UsartResponseHeader};
+use usart_api::{
+    PROTOCOL_VERSION, UsartConfigurePayload, UsartError, UsartOp, UsartParityWire,
+    UsartRequestHeader, UsartResponseHeader,
+};
 
 pub const MAX_REQUEST_SIZE: usize = 512;
 pub const MAX_RESPONSE_SIZE: usize = 512;
@@ -23,7 +26,7 @@ pub enum DispatchOutcome {
 
 pub fn dispatch_request<B: UsartBackend>(
     backend: &mut B,
-    pending: &mut runtime::PendingRead,
+    pending: &mut runtime::PendingIo,
     client_channel: u32,
     request: &[u8],
     response: &mut [u8],
@@ -36,6 +39,10 @@ pub fn dispatch_request<B: UsartBackend>(
     let Some(hdr) = zerocopy::Ref::<_, UsartRequestHeader>::from_bytes(hdr_bytes).ok() else {
         return DispatchOutcome::Respond(encode_error(response, UsartError::InvalidOperation));
     };
+
+    if hdr.protocol_version() != PROTOCOL_VERSION {
+        return DispatchOutcome::Respond(encode_error(response, UsartError::UnsupportedVersion));
+    }
 
     let op = match hdr.operation() {
         Ok(op) => op,
@@ -50,11 +57,29 @@ pub fn dispatch_request<B: UsartBackend>(
 
     match op {
         UsartOp::Configure => {
-            let baud = ((hdr.arg1_value() as u32) << 16) | (hdr.arg0_value() as u32);
+            if payload_len != UsartConfigurePayload::SIZE {
+                return DispatchOutcome::Respond(encode_error(response, UsartError::InvalidConfiguration));
+            }
+
+            let Some(cfg_payload) = zerocopy::Ref::<_, UsartConfigurePayload>::from_bytes(payload).ok() else {
+                return DispatchOutcome::Respond(encode_error(response, UsartError::InvalidConfiguration));
+            };
+
+            let parity = match UsartParityWire::try_from(cfg_payload.parity) {
+                Ok(UsartParityWire::None) => usart_api::backend::Parity::None,
+                Ok(UsartParityWire::Even) => usart_api::backend::Parity::Even,
+                Ok(UsartParityWire::Odd) => usart_api::backend::Parity::Odd,
+                Err(e) => return DispatchOutcome::Respond(encode_error(response, e)),
+            };
+
+            if cfg_payload.stop_bits == 0 || cfg_payload.stop_bits > 2 {
+                return DispatchOutcome::Respond(encode_error(response, UsartError::InvalidConfiguration));
+            }
+
             let cfg = usart_api::backend::UsartConfig {
-                baud_rate: baud,
-                parity: usart_api::backend::Parity::None,
-                stop_bits: 1,
+                baud_rate: cfg_payload.baud_rate_value(),
+                parity,
+                stop_bits: cfg_payload.stop_bits,
             };
             match backend.configure(cfg) {
                 Ok(()) => DispatchOutcome::Respond(encode_success(response, &[])),
@@ -101,7 +126,7 @@ pub fn dispatch_request<B: UsartBackend>(
                     // Busy if another TryRead is already pending — UART RX
                     // is a single stream and cannot serve two concurrent
                     // consumers.
-                    if !pending.park(client_channel, req_len) {
+                    if !pending.park_read(client_channel, req_len) {
                         return DispatchOutcome::Respond(encode_error(
                             response,
                             UsartError::Busy,
@@ -118,6 +143,17 @@ pub fn dispatch_request<B: UsartBackend>(
                 }
                 Err(e) => DispatchOutcome::Respond(encode_error(response, e.into())),
             }
+        }
+        UsartOp::Drain => {
+            if !pending.park_drain(client_channel) {
+                return DispatchOutcome::Respond(encode_error(response, UsartError::Busy));
+            }
+
+            if let Err(e) = backend.enable_interrupts(IrqMask::TX_IDLE) {
+                let _ = pending.take();
+                return DispatchOutcome::Respond(encode_error(response, e.into()));
+            }
+            DispatchOutcome::Queued
         }
         UsartOp::GetLineStatus => match backend.line_status() {
             Ok(lsr) => DispatchOutcome::Respond(encode_success(response, &[lsr.0])),
@@ -215,8 +251,8 @@ mod tests {
             try_read_result: Err(BackendError::WouldBlock),
             enable_irq_result: Ok(()),
         };
-        let mut pending = runtime::PendingRead::new();
-        let _ = pending.park(99, 16);
+        let mut pending = runtime::PendingIo::new();
+        let _ = pending.park_read(99, 16);
 
         let hdr = UsartRequestHeader::new(UsartOp::TryRead, 16, 0, 0);
         let mut req = [0u8; UsartRequestHeader::SIZE];
@@ -237,7 +273,7 @@ mod tests {
             try_read_result: Err(BackendError::WouldBlock),
             enable_irq_result: Err(BackendError::InternalError),
         };
-        let mut pending = runtime::PendingRead::new();
+        let mut pending = runtime::PendingIo::new();
 
         let hdr = UsartRequestHeader::new(UsartOp::TryRead, 16, 0, 0);
         let mut req = [0u8; UsartRequestHeader::SIZE];
@@ -256,16 +292,20 @@ mod tests {
     #[test]
     fn configure_path_still_succeeds() {
         let mut backend = MockBackend::default();
-        let mut pending = runtime::PendingRead::new();
-        let _ = UsartConfig {
-            baud_rate: 115200,
-            parity: Parity::None,
-            stop_bits: 1,
-        };
+        let mut pending = runtime::PendingIo::new();
+        let _ = UsartConfig { baud_rate: 115200, parity: Parity::None, stop_bits: 1 };
 
-        let hdr = UsartRequestHeader::new(UsartOp::Configure, 115200u32 as u16, (115200u32 >> 16) as u16, 0);
-        let mut req = [0u8; UsartRequestHeader::SIZE];
-        req.copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        let cfg = UsartConfigurePayload::new(115200, UsartParityWire::None, 1);
+        let hdr = UsartRequestHeader::new(
+            UsartOp::Configure,
+            0,
+            0,
+            UsartConfigurePayload::SIZE as u16,
+        );
+        let mut req = [0u8; UsartRequestHeader::SIZE + UsartConfigurePayload::SIZE];
+        req[..UsartRequestHeader::SIZE].copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        req[UsartRequestHeader::SIZE..UsartRequestHeader::SIZE + UsartConfigurePayload::SIZE]
+            .copy_from_slice(zerocopy::IntoBytes::as_bytes(&cfg));
         let mut resp = [0u8; MAX_RESPONSE_SIZE];
 
         let outcome = dispatch_request(&mut backend, &mut pending, 7, &req, &mut resp);
@@ -274,5 +314,39 @@ mod tests {
             assert_eq!(n, UsartResponseHeader::SIZE);
             assert_eq!(parse_status(&resp), Some(UsartError::Success));
         }
+    }
+
+    #[test]
+    fn version_mismatch_is_rejected() {
+        let mut backend = MockBackend::default();
+        let mut pending = runtime::PendingIo::new();
+
+        let mut hdr = UsartRequestHeader::new(UsartOp::Read, 1, 0, 0);
+        hdr.flags = 1;
+        let mut req = [0u8; UsartRequestHeader::SIZE];
+        req.copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        let mut resp = [0u8; MAX_RESPONSE_SIZE];
+
+        let outcome = dispatch_request(&mut backend, &mut pending, 5, &req, &mut resp);
+        assert!(matches!(outcome, DispatchOutcome::Respond(_)));
+        if let DispatchOutcome::Respond(n) = outcome {
+            assert_eq!(n, UsartResponseHeader::SIZE);
+            assert_eq!(parse_status(&resp), Some(UsartError::UnsupportedVersion));
+        }
+    }
+
+    #[test]
+    fn drain_queues_request() {
+        let mut backend = MockBackend::default();
+        let mut pending = runtime::PendingIo::new();
+
+        let hdr = UsartRequestHeader::new(UsartOp::Drain, 0, 0, 0);
+        let mut req = [0u8; UsartRequestHeader::SIZE];
+        req.copy_from_slice(zerocopy::IntoBytes::as_bytes(&hdr));
+        let mut resp = [0u8; MAX_RESPONSE_SIZE];
+
+        let outcome = dispatch_request(&mut backend, &mut pending, 7, &req, &mut resp);
+        assert!(matches!(outcome, DispatchOutcome::Queued));
+        assert!(pending.is_pending());
     }
 }

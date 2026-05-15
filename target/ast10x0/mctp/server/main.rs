@@ -46,7 +46,7 @@
 use core::{cell::RefCell, ops::DerefMut};
 
 use ast10x0_serial_direct::Ast10x0DirectSerial;
-use embedded_io::Write;
+use embedded_io::{Read, Write};
 use mctp_lib::Sender;
 use openprot_mctp_api::wire::{MctpRequestHeader, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE, MAX_PAYLOAD_SIZE};
 use openprot_mctp_api::ResponseCode;
@@ -61,13 +61,13 @@ use app_mctp_server::{handle, signals};
 
 const OWN_EID: u8 = 8;
 
-struct SerialSender<'a> {
-    serial: &'a RefCell<Ast10x0DirectSerial>,
+struct SerialSender<'a, T> {
+    serial: &'a RefCell<T>,
     serial_handler: mctp_lib::serial::MctpSerialHandler,
 }
 
-impl<'a> SerialSender<'a> {
-    fn new(serial: &'a RefCell<Ast10x0DirectSerial>) -> Self {
+impl<'a, T: Read + Write> SerialSender<'a, T> {
+    fn new(serial: &'a RefCell<T>) -> Self {
         Self {
             serial,
             serial_handler: mctp_lib::serial::MctpSerialHandler::new(),
@@ -75,7 +75,7 @@ impl<'a> SerialSender<'a> {
     }
 }
 
-impl Sender for SerialSender<'_> {
+impl<T: Read + Write> Sender for SerialSender<'_, T> {
     fn send_vectored(
         &mut self,
         mut fragmenter: mctp_lib::fragment::Fragmenter,
@@ -113,7 +113,7 @@ fn mctp_server_loop() -> Result<()> {
     let serial = RefCell::new(Ast10x0DirectSerial::new_uart5());
     serial.borrow().enable_rx_data_available_interrupt();
 
-    let sender = SerialSender::new(&serial);
+    let sender = SerialSender::<Ast10x0DirectSerial>::new(&serial);
     let mut serial_reader = mctp_lib::serial::MctpSerialHandler::new();
     let mut server = openprot_mctp_server::Server::<_, 16>::new(
         mctp::Eid(OWN_EID),
