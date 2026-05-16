@@ -4,6 +4,7 @@
 //! HACE error definitions.
 
 use openprot_hal_blocking::digest::{Error as DigestError, ErrorKind};
+use openprot_hal_blocking::mac::{Error as MacError, ErrorKind as MacErrorKind};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum HaceError {
@@ -24,6 +25,17 @@ impl DigestError for HaceError {
             HaceError::Timeout => ErrorKind::HardwareFailure,
             HaceError::InvalidInput => ErrorKind::InvalidInputLength,
             HaceError::Internal => ErrorKind::HardwareFailure,
+        }
+    }
+}
+
+impl MacError for HaceError {
+    fn kind(&self) -> MacErrorKind {
+        match self {
+            HaceError::Busy => MacErrorKind::Busy,
+            HaceError::Timeout => MacErrorKind::HardwareFailure,
+            HaceError::InvalidInput => MacErrorKind::InvalidInputLength,
+            HaceError::Internal => MacErrorKind::HardwareFailure,
         }
     }
 }

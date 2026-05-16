@@ -15,6 +15,7 @@ rust_library(
         "hace/error.rs",
         "hace/device.rs",
         "hace/helpers.rs",
+        "hace/hmac.rs",
         "hace/mod.rs",
         "hace/registers.rs",
         "i2c/constants.rs",

@@ -9,9 +9,11 @@ mod digest;
 mod error;
 mod device;
 mod helpers;
+mod hmac;
 mod registers;
 
 pub use digest::HaceDigest;
 pub use error::HaceError;
 pub use device::{HaceDevice, HashAlgo};
+pub use hmac::{HaceHmac, HaceHmacCtx, HmacKey, HMAC_KEY_CAP};
 pub use registers::HaceRegisters;

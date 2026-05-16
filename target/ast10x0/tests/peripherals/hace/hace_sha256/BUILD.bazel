@@ -17,14 +17,15 @@ system_image(
     userspace = False,
 )
 
+# Runs on BOTH the QEMU ast1030-evb machine (`--config=virt_ast10x0`, which models
+# the HACE engine) and the physical EVB (`--config=k_ast1060_evb`). No `hardware`
+# or `qemu_only` tag, so it survives both configs' test_tag_filters; standard
+# TARGET_COMPATIBLE_WITH so it builds under the `:qemu` flag too. Mirrors the
+# dual-running pattern in //target/ast10x0/tests/ipc/user.
 system_image_test(
     name = "hace_sha256_test",
     image = ":hace_sha256",
-    tags = ["hardware"],
-    target_compatible_with = select({
-        "//target/ast10x0:qemu_enabled": ["@platforms//:incompatible"],
-        "//conditions:default": [],
-    }),
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
 )
 
 rust_binary_no_panics_test(
@@ -55,7 +56,10 @@ target_linker_script(
 
 rust_binary(
     name = "target",
-    srcs = ["target.rs"],
+    srcs = [
+        "target.rs",
+        "vectors.rs",  # included via include!("vectors.rs")
+    ],
     edition = "2024",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,

@@ -6,10 +6,14 @@
 use core::cell::UnsafeCell;
 
 pub(crate) const SHA256_DIGEST_SIZE: usize = 32;
+pub(crate) const SHA384_DIGEST_SIZE: usize = 48;
+pub(crate) const SHA512_DIGEST_SIZE: usize = 64;
+/// Block size for SHA-1/224/256.
 pub(crate) const HACE_BLOCK_SIZE: usize = 64;
+/// Block size for SHA-384/512.
+pub(crate) const HACE_BLOCK_SIZE_128: usize = 128;
 pub(crate) const HACE_BUFFER_SIZE: usize = 256;
 
-/// Largest input size that still fits in `HACE_BUFFER_SIZE` after SHA-256 padding.
 pub(crate) const SHA256_IV: [u32; 8] = [
     0x67e6_096a,
     0x85ae_67bb,
@@ -19,6 +23,46 @@ pub(crate) const SHA256_IV: [u32; 8] = [
     0x8c68_059b,
     0xabd9_831f,
     0x19cd_e05b,
+];
+
+/// SHA-384 IV, verbatim from the pinned Zephyr `hash_aspeed_priv.h` (`sha384_iv`).
+pub(crate) const SHA384_IV: [u32; 16] = [
+    0x5d9d_bbcb,
+    0xd89e_05c1,
+    0x2a29_9a62,
+    0x07d5_7c36,
+    0x5a01_5991,
+    0x17dd_7030,
+    0xd8ec_2f15,
+    0x3959_0ef7,
+    0x6726_3367,
+    0x310b_c0ff,
+    0x874a_b48e,
+    0x1115_5868,
+    0x0d2e_0cdb,
+    0xa78f_f964,
+    0x1d48_b547,
+    0xa44f_fabe,
+];
+
+/// SHA-512 IV, verbatim from the pinned Zephyr `hash_aspeed_priv.h` (`sha512_iv`).
+pub(crate) const SHA512_IV: [u32; 16] = [
+    0x67e6_096a,
+    0x08c9_bcf3,
+    0x85ae_67bb,
+    0x3ba7_ca84,
+    0x72f3_6e3c,
+    0x2bf8_94fe,
+    0x3af5_4fa5,
+    0xf136_1d5f,
+    0x7f52_0e51,
+    0xd182_e6ad,
+    0x8c68_059b,
+    0x1f6c_3e2b,
+    0xabd9_831f,
+    0x6bbd_41fb,
+    0x19cd_e05b,
+    0x7921_7e13,
 ];
 
 pub(crate) const DIGEST_BUFFER_SIZE: usize = 64;

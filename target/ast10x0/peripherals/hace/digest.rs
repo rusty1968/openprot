@@ -3,12 +3,15 @@
 
 //! Generic HACE Digest HAL adapter for OpenPRoT
 
-use super::context::{HACE_BLOCK_SIZE, HashContext, SHA256_DIGEST_SIZE, SHA256_IV};
+use super::context::{
+    HACE_BLOCK_SIZE, HACE_BLOCK_SIZE_128, HashContext, SHA256_DIGEST_SIZE, SHA256_IV,
+    SHA384_DIGEST_SIZE, SHA384_IV, SHA512_DIGEST_SIZE, SHA512_IV,
+};
 use super::error::HaceError;
 use super::helpers::{fill_padding, load_iv, ptr_to_u32};
-use super::constants::{HACE_SG_LAST, SHA256_HASH_CMD};
+use super::constants::{HACE_SG_LAST, SHA256_HASH_CMD, SHA384_HASH_CMD, SHA512_HASH_CMD};
 use super::registers::HaceRegisters;
-use openprot_hal_blocking::digest::{Digest, DigestAlgorithm, ErrorType, Sha2_256};
+use openprot_hal_blocking::digest::{Digest, DigestAlgorithm, ErrorType, Sha2_256, Sha2_384, Sha2_512};
 use openprot_hal_blocking::digest::scoped::{DigestCtrlReset, DigestInit, DigestOp};
 use zerocopy::IntoBytes;
 use core::marker::PhantomData;
@@ -17,7 +20,7 @@ use core::marker::PhantomData;
 ///
 /// Mirrors the role of `HashAlgo` methods in aspeed-rust: provides the hardware
 /// command word, block size, digest size, and IV for each supported algorithm.
-trait HaceDigestSpec: DigestAlgorithm
+pub(crate) trait HaceDigestSpec: DigestAlgorithm
 where
     Self::Digest: IntoBytes,
 {
@@ -39,6 +42,40 @@ impl HaceDigestSpec for Sha2_256 {
     fn digest_from_context(ctx: &HashContext) -> Self::Digest {
         let mut out = [0u32; SHA256_DIGEST_SIZE / 4];
         for (i, chunk) in ctx.digest[..SHA256_DIGEST_SIZE].chunks_exact(4).enumerate() {
+            out[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        Digest::new(out)
+    }
+}
+
+impl HaceDigestSpec for Sha2_384 {
+    const HASH_CMD: u32 = SHA384_HASH_CMD;
+    const BLOCK_SIZE: usize = HACE_BLOCK_SIZE_128;
+
+    fn iv() -> &'static [u32] {
+        &SHA384_IV
+    }
+
+    fn digest_from_context(ctx: &HashContext) -> Self::Digest {
+        let mut out = [0u32; SHA384_DIGEST_SIZE / 4];
+        for (i, chunk) in ctx.digest[..SHA384_DIGEST_SIZE].chunks_exact(4).enumerate() {
+            out[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        Digest::new(out)
+    }
+}
+
+impl HaceDigestSpec for Sha2_512 {
+    const HASH_CMD: u32 = SHA512_HASH_CMD;
+    const BLOCK_SIZE: usize = HACE_BLOCK_SIZE_128;
+
+    fn iv() -> &'static [u32] {
+        &SHA512_IV
+    }
+
+    fn digest_from_context(ctx: &HashContext) -> Self::Digest {
+        let mut out = [0u32; SHA512_DIGEST_SIZE / 4];
+        for (i, chunk) in ctx.digest[..SHA512_DIGEST_SIZE].chunks_exact(4).enumerate() {
             out[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         Digest::new(out)
@@ -75,6 +112,7 @@ impl<'a, T: DigestAlgorithm> HaceDigest<'a, T> {
         Self::new(device.regs, unsafe { &mut *super::context::shared_ctx_ptr() }, device.poll_budget)
     }
 }
+
 
 impl<'a, T: DigestAlgorithm> ErrorType for HaceDigest<'a, T> {
     type Error = HaceError;
