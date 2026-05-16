@@ -15,8 +15,7 @@ pub struct HaceDevice<Y: FnMut(u32)> {
     pub(crate) regs: HaceRegisters,
     /// Cooperative yield hook invoked between completion polls.
     /// Argument is a suggested wait window in nanoseconds.
-    #[allow(dead_code)]
-    yield_fn: Y,
+    pub(crate) yield_fn: Y,
     pub(crate) poll_budget: u32,
 }
 

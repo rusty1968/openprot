@@ -9,7 +9,7 @@ use super::context::{
 };
 use super::error::HaceError;
 use super::helpers::{fill_padding, load_iv, ptr_to_u32};
-use super::constants::{HACE_SG_LAST, SHA256_HASH_CMD, SHA384_HASH_CMD, SHA512_HASH_CMD};
+use super::constants::{HACE_SG_LAST, POLL_YIELD_NS, SHA256_HASH_CMD, SHA384_HASH_CMD, SHA512_HASH_CMD};
 use super::registers::HaceRegisters;
 use openprot_hal_blocking::digest::{Digest, DigestAlgorithm, ErrorType, Sha2_256, Sha2_384, Sha2_512};
 use openprot_hal_blocking::digest::scoped::{DigestCtrlReset, DigestInit, DigestOp};
@@ -86,16 +86,27 @@ pub struct HaceDigest<'a, T: DigestAlgorithm> {
     pub(crate) regs: HaceRegisters,
     pub(crate) ctx: &'a mut HashContext,
     pub(crate) poll_budget: u32,
+    /// Cooperative yield hook, borrowed from the originating [`HaceDevice`] and
+    /// invoked once between every completion poll. Type-erased so the adapter
+    /// (and the `Digest*` trait impls) need not be generic over the strategy.
+    pub(crate) yield_fn: &'a mut dyn FnMut(u32),
     _algo: PhantomData<T>,
 }
 
 impl<'a, T: DigestAlgorithm> HaceDigest<'a, T> {
-    /// Construct a digest adapter from an existing register handle, context, and poll budget.
-    pub(crate) fn new(regs: HaceRegisters, ctx: &'a mut HashContext, poll_budget: u32) -> Self {
+    /// Construct a digest adapter from an existing register handle, context,
+    /// poll budget, and cooperative yield hook.
+    pub(crate) fn new(
+        regs: HaceRegisters,
+        ctx: &'a mut HashContext,
+        poll_budget: u32,
+        yield_fn: &'a mut dyn FnMut(u32),
+    ) -> Self {
         Self {
             regs,
             ctx,
             poll_budget,
+            yield_fn,
             _algo: PhantomData,
         }
     }
@@ -108,8 +119,13 @@ impl<'a, T: DigestAlgorithm> HaceDigest<'a, T> {
     pub unsafe fn from_device<Y: FnMut(u32)>(
         device: &'a mut super::device::HaceDevice<Y>,
     ) -> Self {
+        // `regs`/`poll_budget` are `Copy`; the only retained borrow is the
+        // disjoint `yield_fn` field, kept for `'a`.
+        let regs = device.regs;
+        let poll_budget = device.poll_budget;
+        let yield_fn: &'a mut dyn FnMut(u32) = &mut device.yield_fn;
         // SAFETY: Caller upholds the exclusivity contract.
-        Self::new(device.regs, unsafe { &mut *super::context::shared_ctx_ptr() }, device.poll_budget)
+        Self::new(regs, unsafe { &mut *super::context::shared_ctx_ptr() }, poll_budget, yield_fn)
     }
 }
 
@@ -141,6 +157,7 @@ where
             regs: self.regs,
             ctx: &mut *self.ctx,
             poll_budget: self.poll_budget,
+            yield_fn: &mut *self.yield_fn,
             _algo: PhantomData,
         })
     }
@@ -209,6 +226,7 @@ where
                 done = true;
                 break;
             }
+            (self.yield_fn)(POLL_YIELD_NS);
         }
         if !done {
             self.regs.stop_hash_operation();
@@ -256,6 +274,7 @@ where
                 this.regs.stop_hash_operation();
                 return Ok(result);
             }
+            (this.yield_fn)(POLL_YIELD_NS);
         }
 
         this.regs.stop_hash_operation();

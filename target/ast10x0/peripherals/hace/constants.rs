@@ -15,3 +15,10 @@ pub const SHA384_HASH_CMD: u32 = HACE_CMD_ACC_MODE | HACE_SHA_BE_EN | HACE_SG_EN
 pub const SHA512_HASH_CMD: u32 = HACE_CMD_ACC_MODE | HACE_SHA_BE_EN | HACE_SG_EN | HACE_ALGO_SHA512;
 
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
+
+/// Suggested wait window, in nanoseconds, passed to the cooperative `yield_fn`
+/// between completion polls. Mirrors the reference HACE driver's 1 µs poll
+/// interval (`reg_read_poll_timeout(..., 1, 3000)`). Advisory only: the
+/// injected strategy decides whether/how to honor it (`spin_loop` ignores it;
+/// an async/RTOS strategy may sleep for it).
+pub const POLL_YIELD_NS: u32 = 1_000;

@@ -299,3 +299,71 @@ GDB watchpoints on the corrupted region, and/or reading the upstream QEMU
   behavioral difference vs. the pinned driver on any reachable input.
 - HMAC: gated by published RFC-4231/-2202 KATs and the RFC-2104-correct
   `> block_size` threshold (§2.1) — not by byte-parity with the driver, by decision.
+
+---
+
+## 5. Architecture decision — user-space driver & SW/HW selection
+
+### 5.1 Vendor constraint (normative)
+
+**ASPEED states the HACE engine cannot support concurrent streaming sessions in
+hardware.** This is consistent with the frozen reference: a single global
+ACC-mode context (`digest`/`buffer`/`digcnt`/`bufcnt`/`method` in one `.ram_nc`
+region) and a single `in_use` flag that *rejects* overlap with `-EBUSY`
+([zephyr-behavior.md](zephyr-behavior.md) §2, `hace_aspeed.c:670-676`). There is
+**no validated way to save/restore partial hash state** to multiplex the engine
+mid-stream.
+
+Consequence: a HW streaming session is an **exclusive lock on the singleton held
+from `begin` to `finish`**. The decisive hazard is not two simultaneous clients —
+it is one client holding a session open *across a yield* (I/O, scheduler quantum,
+another component). That pins the engine for the whole interval.
+
+### 5.2 Decisions
+
+1. **SPDM and any I/O-interleaved or event-driven hashing → software,
+   in-process. Mandatory, not a performance preference.** SPDM transcript hashing
+   spans the entire protocol exchange interleaved with network round-trips;
+   running it on HW would let a remote/slow SPDM peer starve PFR firmware
+   measurement, DICE, and attestation behind it — an availability/DoS exposure on
+   the RoT reachable externally. Software contexts are per-component and naturally
+   concurrent; they *are* the concurrency story. SPDM depends only on the abstract
+   `digest`/`mac` traits and never names a backend.
+
+2. **The user-space HACE driver is a bounded request server, NOT a streaming
+   session server.** It must **not** expose `begin/update/finish` across the IPC
+   boundary — that re-creates the unsupported held-across-yield lock, now spanning
+   processes. It exposes only whole-object, run-to-completion operations the
+   driver completes internally before releasing the engine and replying:
+   - `hash(algo, buffer) -> digest`
+   - `hash_region(algo, flash/mem descriptor) -> digest` (driver runs the page
+     loop itself; engine held briefly, released before reply)
+   - optionally `hash_sg(list of complete segments) -> digest`
+
+   Requests are serialized by a real queue inside the driver — the principled
+   replacement for the reference's `in_use`/`-EBUSY` flag. No session may straddle
+   a client yield.
+
+3. **Streaming stays in-process.** The scoped/owned trait APIs (§1.5, §1.8) remain
+   for in-process, trusted, bounded-loop bulk measurement only — never marshalled
+   across the service boundary.
+
+4. **HW context save/restore is forbidden.** Do not attempt to multiplex the
+   engine by snapshotting the RAM context: the vendor's "no concurrent streaming"
+   means engine state is not guaranteed captured there. It is not a safe basis for
+   any design.
+
+### 5.3 Backend selection policy
+
+| Workload | Backend | Rationale |
+|----------|---------|-----------|
+| SPDM transcript, HKDF, session keys, signatures | **Software, in-process** | Long-lived/interleaved or secret-bearing; HW can't hold it without starving others; isolation |
+| Firmware / image / manifest measurement (large, run-to-completion) | **HW via whole-object RPC** | Bounded, non-yielding, non-secret; IPC amortized over large buffers |
+| Small one-shot non-secret hashes | Either; **default software** | Not worth IPC + serialization unless profiled hot |
+| Fallback when HW busy/unavailable | **Software** (always present) | Correctness must never depend on the singleton; trait makes them substitutable |
+
+Selection is a platform composition concern injected behind the trait, decided by:
+capability filter (algo ∈ HACE set) → run-to-completion & size threshold → trust
+class → else software (the default and correctness baseline). HACE only covers
+SHA-2 (+HMAC); ECDSA/ECDHE/AEAD/DRBG are software regardless, so the stack is
+inherently hybrid and the accelerator is opportunistic for the hash subset only.
