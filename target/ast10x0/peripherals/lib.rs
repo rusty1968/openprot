@@ -3,6 +3,7 @@
 
 #![no_std]
 
+pub mod ecdsa;
 pub mod i2c;
 pub mod scu;
 pub mod uart;

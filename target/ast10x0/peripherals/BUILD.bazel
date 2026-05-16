@@ -9,6 +9,12 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "peripherals",
     srcs = [
+        "ecdsa/constants.rs",
+        "ecdsa/device.rs",
+        "ecdsa/error.rs",
+        "ecdsa/mod.rs",
+        "ecdsa/op.rs",
+        "ecdsa/registers.rs",
         "i2c/constants.rs",
         "i2c/controller.rs",
         "i2c/error.rs",
