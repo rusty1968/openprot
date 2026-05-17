@@ -10,6 +10,7 @@
 mod constants;
 mod device;
 mod error;
+mod hal_impl;
 mod op;
 mod registers;
 

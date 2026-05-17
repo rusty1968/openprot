@@ -1,0 +1,10 @@
+cfe94dc149ffa0af7e1af668a27f57eecf0cd1e9
+AspeedTech-BMC/zephyr @ cfe94dc149ffa0af7e1af668a27f57eecf0cd1e9
+drivers/crypto/{ecdsa_aspeed.c,ecdsa_aspeed_priv.h}
+Frozen 2026-05-16T23:36Z as the normative ECDSA parity reference (goal.md authority).
+Authoritative because this is the model the deployed AST1060 firmware actually
+runs: it is the exact same pinned Zephyr revision already used as the HACE
+authority (hace/plans/zephyr-reference/PINNED_COMMIT.txt) — one deployed Zephyr
+build supplies both the HACE and the ECDSA crypto drivers. Verified verbatim:
+sha256(ecdsa_aspeed.c) = f09b3506346e6889c43b7ada54e920e4806e4579c344b9c2913a4a595d4aac85
+== `git show cfe94dc:drivers/crypto/ecdsa_aspeed.c`.

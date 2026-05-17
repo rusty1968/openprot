@@ -1,0 +1,24 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+#
+# HARDWARE-ONLY scaffold (goal.md §4.B). Non-breaking placeholder.
+#
+# The real test target, when written, MUST be a `system_image_test` tagged
+# `["hardware"]` AND carry the `//target/ast10x0:qemu_enabled` ->
+# @platforms//:incompatible select (see README.md and
+# tests/peripherals/i2c/i2c_init/BUILD.bazel). `.bazelrc:86`'s
+# `-hardware` test_tag_filter then keeps `bazel test --config=virt_ast10x0`
+# and CI from ever running it; the user runs it on AST1060 silicon.
+
+package(default_visibility = ["//visibility:public"])
+
+# `manual` + `hardware`: carries the exclusion convention even as a
+# placeholder so it is never swept into a QEMU/CI test wildcard.
+filegroup(
+    name = "scaffold",
+    srcs = ["README.md"],
+    tags = [
+        "hardware",
+        "manual",
+    ],
+)

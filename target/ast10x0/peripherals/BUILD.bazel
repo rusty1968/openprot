@@ -12,6 +12,7 @@ rust_library(
         "ecdsa/constants.rs",
         "ecdsa/device.rs",
         "ecdsa/error.rs",
+        "ecdsa/hal_impl.rs",
         "ecdsa/mod.rs",
         "ecdsa/op.rs",
         "ecdsa/registers.rs",
@@ -46,6 +47,7 @@ rust_library(
     ],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     deps = [
+        "//hal/blocking:blocking",
         "@ast1060_pac",
         "@rust_crates//:bitflags",
         "@rust_crates//:embedded-hal",

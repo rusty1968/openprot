@@ -3,6 +3,8 @@
 
 //! ECDSA error definitions.
 
+use openprot_hal_blocking::ecdsa::{Error as HalEcdsaError, ErrorKind};
+
 /// Errors surfaced by the ECDSA device layer.
 ///
 /// Only the wait-policy failure (`Timeout`) is defined here: it is the typed,
@@ -12,6 +14,23 @@
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EcdsaError {
-    /// Operation did not complete before the poll budget was exhausted.
+    /// Operation did not complete before the poll budget was exhausted
+    /// (the D3 bounded-timeout path; goal.md §2.1).
     Timeout,
+    /// Engine completed and reported the signature as **invalid**
+    /// (`secure014` bit-20 set, bit-21 clear; goal.md §1.2 step 10).
+    VerificationFailed,
+}
+
+/// Map to the generic HAL kind so the `hal_impl` skin can satisfy
+/// `ErrorType` (goal.md §2.3.3: the trait wants shape; this is the mapping).
+impl HalEcdsaError for EcdsaError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            // Wedged engine / budget exhausted — retryable, like the
+            // authority's `-EBUSY` exhaustion (mirrors the HAL doc example).
+            EcdsaError::Timeout => ErrorKind::Busy,
+            EcdsaError::VerificationFailed => ErrorKind::InvalidSignature,
+        }
+    }
 }

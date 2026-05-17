@@ -55,29 +55,43 @@ impl<'a> EcdsaOp<'a> {
         Self::new(regs, poll_budget, yield_fn)
     }
 
-    /// Wait for the in-flight ECDSA verification to complete, bounded by the
-    /// poll budget.
+    /// Verify one P-384 signature. The internal operation entry — callable
+    /// **without** the HAL trait (ADR-1: the trait skin is `hal_impl`, not
+    /// this driver).
     ///
-    /// This is the *wait-policy seam only*: the bounded loop polls the safe
-    /// façade predicate [`EcdsaRegisters::verify_is_done`], invokes the
-    /// injected strategy once per non-completing poll with an advisory ns
-    /// window, and on budget exhaustion performs façade cleanup then returns a
-    /// typed [`EcdsaError::Timeout`] — never an unbounded spin.
+    /// Reproduces the authority sequence (goal.md §1.2): drive the engine via
+    /// the façade, bounded-poll `verify_is_done` with the injected strategy
+    /// once per non-completing poll, then decode `verify_passed`. The two
+    /// authority settle windows (D2) reuse the same type-erased strategy,
+    /// reborrowed for the pre-trigger phase.
     ///
-    /// The façade predicate is currently a `todo!()` stub (it maps to
-    /// `secure014` bit-20 per `aspeed-rust/src/ecdsa.rs`); the verify *result*
-    /// decode and the trigger sequence land with the verify semantics under
-    /// the `peripheral-parity-port` workflow. This method wires the structural
-    /// seam, not the behavior.
-    pub fn wait_verify_done(&mut self) -> Result<(), EcdsaError> {
+    /// - `Ok(())` — engine completed, signature valid (bit-20 ∧ bit-21).
+    /// - `Err(VerificationFailed)` — completed, invalid (bit-20 ∧ ¬bit-21).
+    /// - `Err(Timeout)` — poll budget exhausted (D3 intentional delta:
+    ///   the authority would hang here); façade fault-cleanup then typed err.
+    pub fn verify_raw(
+        &mut self,
+        qx: &[u8; 48],
+        qy: &[u8; 48],
+        r: &[u8; 48],
+        s: &[u8; 48],
+        m: &[u8; 48],
+    ) -> Result<(), EcdsaError> {
+        // Pre-trigger + trigger; settle delays use the reborrowed strategy.
+        self.regs
+            .start_verify(qx, qy, r, s, m, &mut *self.yield_fn);
+
         for _ in 0..self.poll_budget {
             if self.regs.verify_is_done() {
-                // safe façade predicate
-                return Ok(());
+                return if self.regs.verify_passed() {
+                    Ok(())
+                } else {
+                    Err(EcdsaError::VerificationFailed)
+                };
             }
             (self.yield_fn)(POLL_YIELD_NS); // injected strategy, advisory ns
         }
-        self.regs.clear_status(); // façade cleanup
-        Err(EcdsaError::Timeout) // typed, bounded failure
+        self.regs.clear_status(); // O8: fault-path only
+        Err(EcdsaError::Timeout) // D3: typed, bounded failure
     }
 }

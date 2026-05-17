@@ -1,51 +1,69 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-//! AST10x0 ECDSA low-level register access.
+//! AST10x0 ECDSA low-level register access (Confined-`unsafe` MMIO façade).
 //!
-//! The AST10x0 ECDSA/ECC engine has **no dedicated PAC register block**: it is
-//! part of the Secure Boot Controller (SBC), exposed by `ast1060_pac` as the
-//! `secure` peripheral (`ast1060_pac::secure::RegisterBlock`, base
-//! `0x7e6f_2000`). This is confirmed against the reference driver
-//! `aspeed-rust/src/ecdsa.rs` (`ECDSA_BASE = 0x7e6f_2000 // SBC base address`).
+//! The ECDSA/ECC engine has no dedicated PAC block: it is part of the Secure
+//! Boot Controller, exposed by `ast1060_pac` as the `secure` peripheral
+//! (`secure::RegisterBlock`, base `0x7e6f_2000`). `secure014`/`0b4`/`0bc` are
+//! PAC-named; the mode register `0x7c`, the curve-parameter window
+//! `0xa00–0xac0`, and the engine scratch-RAM (`ECDSA_SRAM_BASE`) are not
+//! modelled by the PAC and are reached by raw confined offset access here and
+//! nowhere else (goal.md P5-OPEN-B).
 //!
-//! This is the Confined-`unsafe` MMIO Façade for that engine. The curated
-//! operation surface is intentionally a stub: the ECDSA API is filled in later
-//! under the `peripheral-parity-port` workflow, once its behavioral spec
-//! exists. No driver and no behavior live here.
+//! Behavior reproduces the pinned authority
+//! `plans/zephyr-reference/ecdsa_aspeed.c @ cfe94dc` (goal.md §1.2). All
+//! `unsafe`, raw offsets, and PAC types stay confined below this façade.
 
 use core::marker::PhantomData;
+use core::ptr::{read_volatile, write_volatile};
 
 use ast1060_pac as device;
 
-/// Safe wrapper around the AST10x0 ECDSA engine register block.
+use super::constants::{ECDSA_SRAM_BASE, RESET_SETTLE_NS, TRIGGER_HOLD_NS};
+
+// Engine MMIO offsets (relative to the SBC `secure` base).
+const OFF_MODE: usize = 0x7c; // mode/gate word (PAC-unmodelled)
+const PAR_GX: usize = 0xa00; // P-384 domain params source window
+const PAR_GY: usize = 0xa40;
+const PAR_P: usize = 0xa80;
+const PAR_N: usize = 0xac0;
+
+// Engine SRAM offsets (relative to `ECDSA_SRAM_BASE`).
+const SR_GX: usize = 0x2000;
+const SR_GY: usize = 0x2040;
+const SR_QX: usize = 0x2080;
+const SR_QY: usize = 0x20c0;
+const SR_P: usize = 0x2100;
+const SR_A: usize = 0x2140;
+const SR_N: usize = 0x2180;
+const SR_R: usize = 0x21c0;
+const SR_S: usize = 0x2200;
+const SR_M: usize = 0x2240;
+const SR_INSTR: usize = 0x23c0;
+
+const SCALAR_LEN: usize = 48; // P-384 / SHA-384: 48-byte (12-word) operands
+
+const STS_DONE: u32 = 1 << 20; // secure014 bit-20: operation complete
+const STS_PASS: u32 = 1 << 21; // secure014 bit-21: verification passed
+
+/// Safe wrapper around the AST10x0 ECDSA (SBC) engine register block.
 ///
-/// The ECDSA engine is hosted by the SBC, so the underlying PAC block is
-/// `device::secure::RegisterBlock`.
-///
-/// This is `Copy`/`Clone` by design: the façade *confines* `unsafe` and
-/// *restricts threading* (`!Send`/`!Sync`); it deliberately does **not**
-/// enforce exclusive access. Serialization/exclusivity is delegated to the
-/// constructor's caller and to a future scoped/owned session layer added on
-/// top under `peripheral-parity-port`.
-// `allow(dead_code)`: the façade currently has no consumer — the driver/session
-// layer lands later under `peripheral-parity-port`. Remove this attribute when
-// the first consumer exists.
-#[allow(dead_code)]
+/// `Copy`/`Clone` by design: the façade confines `unsafe` and restricts
+/// threading (`!Send`/`!Sync`); it does not enforce exclusivity — that is
+/// delegated to the caller and the device/op layer above.
 #[derive(Copy, Clone)]
 pub struct EcdsaRegisters {
     ptr: *mut device::secure::RegisterBlock,
     _not_send: PhantomData<*mut ()>,
 }
 
-#[allow(dead_code)] // see note on `EcdsaRegisters`; drop when a consumer lands.
 impl EcdsaRegisters {
     /// Create a register accessor from a raw SBC/ECDSA register block pointer.
     ///
     /// # Safety
-    /// Caller must ensure:
-    /// - `base` points to a valid SBC (`secure`) register block.
-    /// - access to the ECDSA engine instance is serialized appropriately.
+    /// Caller must ensure `base` points to a valid SBC (`secure`) register
+    /// block and that access to the ECDSA engine is serialized.
     pub const unsafe fn new(base: *const device::secure::RegisterBlock) -> Self {
         Self {
             ptr: base as *mut device::secure::RegisterBlock,
@@ -68,40 +86,131 @@ impl EcdsaRegisters {
         unsafe { &*self.ptr }
     }
 
-    // --- curated, intent-named, safe operations ---
-    //
-    // STUB: deliberately not implemented yet. The ECDSA register-level API is
-    // designed and filled in under the `peripheral-parity-port` workflow once
-    // the behavioral spec is pinned. Each operation will document its own
-    // register-ordering / completion assumptions when added. Raw `.bits()` and
-    // all PAC types stay confined below this line — they never escape the
-    // façade.
+    // --- raw confined accessors (PAC-unmodelled regions only) ---
 
-    /// Trigger an ECDSA signature verification on the engine.
-    ///
-    /// STUB — fill under `peripheral-parity-port` (will document the
-    /// parameter/start-bit ordering it relies on).
     #[inline]
-    pub(crate) fn start_verify(&self) {
-        let _ = self.regs();
-        todo!("ECDSA façade operation not yet implemented")
+    unsafe fn sec_rd(&self, off: usize) -> u32 {
+        // SAFETY: `off` is within the SBC MMIO region of a valid base
+        // (constructor contract); 32-bit aligned by construction.
+        unsafe { read_volatile((self.ptr as *const u8).add(off) as *const u32) }
     }
 
-    /// Report whether the engine has completed the in-flight operation.
+    #[inline]
+    unsafe fn sec_wr(&self, off: usize, val: u32) {
+        // SAFETY: as `sec_rd`.
+        unsafe { write_volatile((self.ptr as *mut u8).add(off) as *mut u32, val) }
+    }
+
+    #[inline]
+    unsafe fn sram_wr(&self, off: usize, val: u32) {
+        // SAFETY: ECDSA_SRAM_BASE is the engine scratch region (P5-OPEN-A);
+        // `off` is a 32-bit-aligned operand slot < 0x2400.
+        unsafe { write_volatile((ECDSA_SRAM_BASE + off) as *mut u32, val) }
+    }
+
+    /// Copy one 48-byte domain parameter from the engine MMIO window to SRAM.
+    #[inline]
+    unsafe fn copy_param(&self, par_off: usize, sram_off: usize) {
+        let mut i = 0;
+        while i < SCALAR_LEN {
+            // SAFETY: confined raw access, see `sec_rd`/`sram_wr`.
+            unsafe { self.sram_wr(sram_off + i, self.sec_rd(par_off + i)) };
+            i += 4;
+        }
+    }
+
+    /// Write one 48-byte operand into SRAM as 12 native-endian words.
     ///
-    /// STUB — fill under `peripheral-parity-port`.
+    /// Mirrors the authority's `*(uint32_t *)(buf + i)` reinterpret with **no
+    /// byte-swap** (goal.md §1.1): operand byte-convention is the caller's.
+    #[inline]
+    unsafe fn load_operand(&self, buf: &[u8; SCALAR_LEN], sram_off: usize) {
+        let mut i = 0;
+        while i < SCALAR_LEN {
+            let w = u32::from_ne_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+            // SAFETY: confined raw access, see `sram_wr`.
+            unsafe { self.sram_wr(sram_off + i, w) };
+            i += 4;
+        }
+    }
+
+    // --- curated, intent-named, safe operations (goal.md §1.2) ---
+
+    /// Run the full pre-trigger + trigger sequence for one P-384 verify.
+    ///
+    /// Reproduces `zephyr-reference/ecdsa_aspeed.c:54-112` in exact order.
+    /// `delay_ns` is the injected cooperative strategy used for the two
+    /// authority settle windows (deltas D2). Completion polling and result
+    /// decode are the caller's (`verify_is_done`/`verify_passed`).
+    ///
+    /// HZ1: the trigger is the **literal value `2`** written raw to `0xbc`,
+    /// never the PAC `sec_boot_ecceng_trigger_reg` bit-0 setter (that is the
+    /// rejected buggy `aspeed-rust` form).
+    pub(crate) fn start_verify(
+        &self,
+        qx: &[u8; SCALAR_LEN],
+        qy: &[u8; SCALAR_LEN],
+        r: &[u8; SCALAR_LEN],
+        s: &[u8; SCALAR_LEN],
+        m: &[u8; SCALAR_LEN],
+        delay_ns: &mut dyn FnMut(u32),
+    ) {
+        // SAFETY: all raw/PAC access is confined to this block; pointer
+        // validity is the constructor contract; offsets/values are the
+        // authority's (goal.md §1.2, cited per step).
+        unsafe {
+            self.sec_wr(OFF_MODE, 0x0100_f00b); // :54 step 1
+            // :57-59 step 2 — reset ECC engine, 1 ms settle (D2)
+            self.regs().secure0b4().write(|w| w.bits(0));
+            self.regs().secure0b4().write(|w| w.bits(1));
+            delay_ns(RESET_SETTLE_NS);
+            // :63-80 step 3 — P-384 domain params MMIO → SRAM, a = 0
+            self.copy_param(PAR_GX, SR_GX);
+            self.copy_param(PAR_GY, SR_GY);
+            self.copy_param(PAR_P, SR_P);
+            self.copy_param(PAR_N, SR_N);
+            let mut i = 0;
+            while i < SCALAR_LEN {
+                self.sram_wr(SR_A + i, 0);
+                i += 4;
+            }
+            self.sec_wr(OFF_MODE, 0x0300_f00b); // :82 step 4
+            // :84-102 step 5 — public key, signature, message digest
+            self.load_operand(qx, SR_QX);
+            self.load_operand(qy, SR_QY);
+            self.load_operand(r, SR_R);
+            self.load_operand(s, SR_S);
+            self.load_operand(m, SR_M);
+            self.sec_wr(OFF_MODE, 0x0); // :104 step 6
+            self.sram_wr(SR_INSTR, 1); // :107 step 7 — instruction word
+            // :110-112 step 8 — trigger (HZ1: raw 2), 5 ms hold, de-assert
+            self.regs().secure0bc().write(|w| w.bits(2));
+            delay_ns(TRIGGER_HOLD_NS);
+            self.regs().secure0bc().write(|w| w.bits(0));
+        }
+    }
+
+    /// Engine completed the in-flight operation (`secure014` bit-20).
     #[inline]
     pub(crate) fn verify_is_done(&self) -> bool {
-        let _ = self.regs();
-        todo!("ECDSA façade operation not yet implemented")
+        self.regs().secure014().read().bits() & STS_DONE != 0
     }
 
-    /// Clear the engine status/interrupt flags.
+    /// Verification passed (`secure014` bit-21). Only meaningful once
+    /// [`Self::verify_is_done`] is true (goal.md §1.2 step 10).
+    #[inline]
+    pub(crate) fn verify_passed(&self) -> bool {
+        self.regs().secure014().read().bits() & STS_PASS != 0
+    }
+
+    /// Fault-path-only defensive teardown: de-assert the trigger register.
     ///
-    /// STUB — fill under `peripheral-parity-port`.
+    /// O8 (goal.md §2.2): the authority performs **no** status-clear on the
+    /// reachable valid/invalid paths. This is invoked **only** on the D3
+    /// timeout path; it reuses the authority's own trigger-de-assert write
+    /// (`ecdsa_aspeed.c:112`) and must never run on a reachable verdict path.
     #[inline]
     pub(crate) fn clear_status(&self) {
-        let _ = self.regs();
-        todo!("ECDSA façade operation not yet implemented")
+        self.regs().secure0bc().write(|w| unsafe { w.bits(0) });
     }
 }
