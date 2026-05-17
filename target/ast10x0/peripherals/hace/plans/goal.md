@@ -471,12 +471,23 @@ for AES is (a)+(b).
      completion poll on `crypto_int` reusing the `cooperative-yield-bounded-
      poll-device` strategy + `poll_budget` → `HaceError::Timeout` (parity with
      the driver's bounded 3000-ms wait, §1.9.1; same conformance basis as D1).
-   - Implement the openprot `CipherInit<M>`/`CipherOp<M>` for `Ecb`/`Cbc`
-     marker modes (§2.4): `init(&key, &nonce, mode)` → context (nonce → IV);
-     one-shot `encrypt`/`decrypt`. Ciphertext buffer is **plain `CT`** (no
-     in-band IV — delta A2). Zeroize key/IV on drop (delta A3). Reject
-     non-block-multiple `in_len` with typed `InvalidInput` before triggering
-     (delta A4).
+   - **API shape — ADR-A1 (decided, mirrors the SBC port's ADR-1).** The
+     driver core is a **trait-free, slice-based** entry on the borrow-
+     arbitrated op — `AesCipher::{encrypt_raw,decrypt_raw}(&[u8], &mut [u8])`
+     — exactly as `SbcOp::{verify_raw,modexp}` are trait-free slice entries.
+     The openprot `CipherInit<M>`/`CipherOp<M>` is a **separate, optional thin
+     skin** (a `hal_impl`-style wrapper over fixed buffers), *not* the driver
+     core: the trait's single fixed `PlainText`/`CipherText` associated types
+     cannot express the ≥ 4 KB streaming-DMA path (§3 item 7) and goal.md §2.4
+     already records the trait as shape-only. `Ecb`/`Cbc` are port-defined
+     zero-size marker types (`impl CipherMode + BlockCipherMode`; the hal
+     defines no concrete modes). The skin: `init(&key, &nonce, mode)` →
+     context (nonce → IV); one-shot `encrypt`/`decrypt` delegating to the raw
+     core. Ciphertext buffer is **plain `CT`** (no in-band IV — delta A2).
+     Zeroize key/IV on drop (delta A3). Reject non-block-multiple `in_len`
+     with typed `InvalidInput` before triggering (delta A4). Add
+     `impl cipher::Error for HaceError` (`error.rs`), alongside the existing
+     `DigestError`/`MacError` impls.
    - DMA discipline: context/`src`/`dst` are `.ram_nc` (no `cache_data_invd_all`
      needed — non-cached, mirrors the §1.3 HashContext placement and the same
      layout-sensitivity caution as §2.2).

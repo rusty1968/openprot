@@ -9,6 +9,7 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "peripherals",
     srcs = [
+        "hace/aes.rs",
         "hace/constants.rs",
         "hace/context.rs",
         "hace/digest.rs",

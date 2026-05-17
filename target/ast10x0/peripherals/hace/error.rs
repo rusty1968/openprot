@@ -3,6 +3,7 @@
 
 //! HACE error definitions.
 
+use openprot_hal_blocking::cipher::{Error as CipherError, ErrorKind as CipherErrorKind};
 use openprot_hal_blocking::digest::{Error as DigestError, ErrorKind};
 use openprot_hal_blocking::mac::{Error as MacError, ErrorKind as MacErrorKind};
 
@@ -36,6 +37,17 @@ impl MacError for HaceError {
             HaceError::Timeout => MacErrorKind::HardwareFailure,
             HaceError::InvalidInput => MacErrorKind::InvalidInputLength,
             HaceError::Internal => MacErrorKind::HardwareFailure,
+        }
+    }
+}
+
+impl CipherError for HaceError {
+    fn kind(&self) -> CipherErrorKind {
+        match self {
+            HaceError::Busy => CipherErrorKind::HardwareFailure,
+            HaceError::Timeout => CipherErrorKind::HardwareFailure,
+            HaceError::InvalidInput => CipherErrorKind::InvalidInput,
+            HaceError::Internal => CipherErrorKind::HardwareFailure,
         }
     }
 }

@@ -161,3 +161,73 @@ static SHARED_HASH_CTX: SectionPlacedContext = SectionPlacedContext::new();
 pub(crate) unsafe fn acquire_shared_ctx() -> *mut HashContext {
     SHARED_HASH_CTX.get()
 }
+
+// ----- AES (crypto sub-engine) context ----------------------------------
+//
+// Mirrors the pinned authority `struct aspeed_crypto_ctx`
+// (`zephyr-reference/crypto_aspeed_priv.h:20-24`; goal.md §1.9.3): a 64-byte
+// engine context (`ctx[0..16)` = IV for CBC, `ctx[16..]` = raw key), plus the
+// source/destination SG descriptors and the command word. `ctx`, `src`, `dst`
+// are DMA targets handed to the engine by physical address — same `.ram_nc`,
+// `#[repr(C, align(64))]`, single-in-flight discipline (and the same
+// layout-sensitivity caution, goal.md §2.2) as `HashContext`.
+
+#[repr(C, align(64))]
+pub(crate) struct CryptoContext {
+    /// Engine context buffer: `[0..16)` IV (CBC), `[16..16+keylen)` raw key
+    /// (`hace_aspeed.c:114`, `:186`/`:200`).
+    pub(crate) ctx: [u8; 64],
+    /// Source SG descriptor (`addr` = data, `len = bytes | HACE_SG_LAST`).
+    pub(crate) src: Sg,
+    /// Destination SG descriptor.
+    pub(crate) dst: Sg,
+    /// Command word composed per goal.md §1.9.2 (unused as engine input — the
+    /// driver writes it to HACE10 directly — kept for parity of layout/debug).
+    pub(crate) cmd: u32,
+}
+
+impl CryptoContext {
+    pub const fn new() -> Self {
+        Self {
+            ctx: [0; 64],
+            src: Sg::new(),
+            dst: Sg::new(),
+            cmd: 0,
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct SectionPlacedCrypto(UnsafeCell<CryptoContext>);
+
+// SAFETY: HACE is owned by a single-threaded driver; access is serialized by
+// the caller (the `unsafe fn new*` single-instance contract).
+unsafe impl Sync for SectionPlacedCrypto {}
+
+impl SectionPlacedCrypto {
+    pub const fn new() -> Self {
+        Self(UnsafeCell::new(CryptoContext::new()))
+    }
+
+    pub fn get(&self) -> *mut CryptoContext {
+        self.0.get()
+    }
+}
+
+#[unsafe(link_section = ".ram_nc")]
+static SHARED_CRYPTO_CTX: SectionPlacedCrypto = SectionPlacedCrypto::new();
+
+/// Acquire the raw pointer to the section-placed crypto context, held as
+/// private state by the one [`HaceDevice`](super::device::HaceDevice). Exactly
+/// the [`acquire_shared_ctx`] discipline, for the AES path: no free accessor;
+/// the live `&mut` is reached only *through* the borrowed device
+/// (`borrow-arbitrated-engine-exclusivity`, goal.md §2.3 delta A1). AES is the
+/// engine's third operation; it shares the same single-in-flight constraint
+/// (goal.md §5.1) as digest/HMAC.
+///
+/// # Safety
+/// Same single-instance/non-reentrancy contract as [`acquire_shared_ctx`]: at
+/// most one live `HaceDevice`, hence at most one live `&mut` from this pointer.
+pub(crate) unsafe fn acquire_crypto_ctx() -> *mut CryptoContext {
+    SHARED_CRYPTO_CTX.get()
+}

@@ -4,7 +4,7 @@
 //! HACE device binding with cooperative yield.
 
 use super::constants::DEFAULT_POLL_BUDGET;
-use super::context::{HashContext, acquire_shared_ctx};
+use super::context::{CryptoContext, HashContext, acquire_crypto_ctx, acquire_shared_ctx};
 use super::registers::HaceRegisters;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -43,6 +43,12 @@ pub struct HaceDevice<Y: FnMut(u32)> {
     /// (a disjoint-field split alongside `yield_fn`); never aliased outside
     /// the device.
     pub(crate) ctx: *mut HashContext,
+    /// Sole pointer to the section-placed [`CryptoContext`] (AES path). Same
+    /// discipline as `ctx`: reborrowed as a transient `&mut` through
+    /// `&mut self` by `AesCipher::from_device` (disjoint-field split alongside
+    /// `yield_fn`); never aliased outside the device. AES is the engine's
+    /// third borrow-arbitrated operation (goal.md §2.3 delta A1 / §5.1).
+    pub(crate) crypto_ctx: *mut CryptoContext,
     /// Cooperative yield hook invoked between completion polls.
     /// Argument is a suggested wait window in nanoseconds.
     pub(crate) yield_fn: Y,
@@ -64,8 +70,9 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
             // SAFETY: Caller upholds register-pointer validity/ownership.
             regs: unsafe { HaceRegisters::new(base) },
             // SAFETY: the `unsafe fn new*` single-instance contract makes this
-            // the sole live device, hence the sole holder of this pointer.
+            // the sole live device, hence the sole holder of these pointers.
             ctx: unsafe { acquire_shared_ctx() },
+            crypto_ctx: unsafe { acquire_crypto_ctx() },
             yield_fn,
             poll_budget: DEFAULT_POLL_BUDGET,
         }
@@ -92,8 +99,9 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
             // SAFETY: Caller coordinates singleton access.
             regs: unsafe { HaceRegisters::new_global() },
             // SAFETY: the `unsafe fn new*` single-instance contract makes this
-            // the sole live device, hence the sole holder of this pointer.
+            // the sole live device, hence the sole holder of these pointers.
             ctx: unsafe { acquire_shared_ctx() },
+            crypto_ctx: unsafe { acquire_crypto_ctx() },
             yield_fn,
             poll_budget: DEFAULT_POLL_BUDGET,
         }
