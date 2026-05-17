@@ -13,7 +13,7 @@ mod helpers;
 mod hmac;
 mod registers;
 
-pub use aes::{AES_BLOCK, AesCipher};
+pub use aes::{AES_BLOCK, AesCipher, AesKey, AesOp, AesSkin, Cbc, Ecb};
 pub use digest::HaceDigest;
 pub use error::HaceError;
 pub use device::{HaceDevice, HashAlgo};

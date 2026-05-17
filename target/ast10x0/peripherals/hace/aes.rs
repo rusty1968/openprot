@@ -31,9 +31,14 @@ use super::constants::{
     HACE_SG_LAST, POLL_YIELD_NS,
 };
 use super::context::CryptoContext;
+use super::device::HaceDevice;
 use super::error::HaceError;
 use super::helpers::ptr_to_u32;
 use super::registers::HaceRegisters;
+use core::marker::PhantomData;
+use openprot_hal_blocking::cipher::{
+    BlockCipherMode, CipherInit, CipherMode, CipherOp, ErrorType, SymmetricCipher,
+};
 
 /// The AES block size, in bytes. ECB/CBC inputs must be a multiple of this
 /// (delta A4).
@@ -222,5 +227,160 @@ impl Drop for AesCipher<'_> {
     fn drop(&mut self) {
         // Delta A3 (defensive): no key/IV residue past the op's scope.
         self.ctx.ctx = [0u8; 64];
+    }
+}
+
+// ===== Optional openprot cipher-trait skin (ADR-A1) =====================
+//
+// A *thin, optional, fixed-`N`-buffer* wrapper over the raw core above — the
+// `hal_impl`-style skin ADR-A1 (goal.md §3 item 6) keeps separate from the
+// driver core, because the openprot `SymmetricCipher` trait has single fixed
+// `PlainText`/`CipherText` associated types (it cannot express the ≥ 4 KB
+// streaming-DMA path; use the raw `AesCipher` methods for that). `N` must be a
+// non-zero multiple of `AES_BLOCK`; a bad length surfaces as the raw core's
+// typed `HaceError::InvalidInput` (delta A4). NIST-unverified until run on
+// real silicon (goal.md §2.5) — same caveat as the core.
+
+/// AES-ECB mode marker (port-defined; the hal declares no concrete modes).
+#[derive(Debug, Clone, Copy)]
+pub struct Ecb;
+/// AES-CBC mode marker.
+#[derive(Debug, Clone, Copy)]
+pub struct Cbc;
+
+impl CipherMode for Ecb {}
+impl BlockCipherMode for Ecb {}
+impl CipherMode for Cbc {}
+impl BlockCipherMode for Cbc {}
+
+/// Owned AES key for the trait skin (raw-key path only — the OTP/secret-vault
+/// path is out of scope, goal.md §2.3 delta A5). The size *is* the AES variant
+/// (16 → AES-128, 32 → AES-256).
+#[derive(Clone)]
+pub enum AesKey {
+    Aes128([u8; 16]),
+    Aes256([u8; 32]),
+}
+
+impl AesKey {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            AesKey::Aes128(k) => k,
+            AesKey::Aes256(k) => k,
+        }
+    }
+}
+
+/// Fixed-`N`-byte-buffer openprot cipher-trait skin bound to the one owned
+/// [`HaceDevice`]. Every operation context it hands out is a borrow-arbitrated
+/// [`AesCipher`] (delta A1 still holds — overlap is a borrow-check error).
+pub struct AesSkin<'d, Y: FnMut(u32), const N: usize> {
+    dev: &'d mut HaceDevice<Y>,
+}
+
+impl<'d, Y: FnMut(u32), const N: usize> AesSkin<'d, Y, N> {
+    /// Bind the cipher skin to the device.
+    ///
+    /// # Safety
+    /// Same gate-delegated non-reentrancy contract as
+    /// [`AesCipher::from_device`]: no concurrent/reentrant HACE access for the
+    /// lifetime of this skin or any context it produces.
+    pub unsafe fn new(dev: &'d mut HaceDevice<Y>) -> Self {
+        Self { dev }
+    }
+}
+
+/// In-flight trait-skin operation: the borrow-arbitrated core plus the
+/// session key/IV, parameterized by the mode marker `M`.
+pub struct AesOp<'a, const N: usize, M> {
+    core: AesCipher<'a>,
+    key: AesKey,
+    iv: [u8; AES_BLOCK],
+    _m: PhantomData<M>,
+}
+
+impl<'d, Y: FnMut(u32), const N: usize> ErrorType for AesSkin<'d, Y, N> {
+    type Error = HaceError;
+}
+
+impl<'d, Y: FnMut(u32), const N: usize> SymmetricCipher for AesSkin<'d, Y, N> {
+    type Key = AesKey;
+    type Nonce = [u8; AES_BLOCK];
+    type PlainText = [u8; N];
+    type CipherText = [u8; N];
+}
+
+impl<'a, const N: usize, M> ErrorType for AesOp<'a, N, M> {
+    type Error = HaceError;
+}
+
+impl<'a, const N: usize, M> SymmetricCipher for AesOp<'a, N, M> {
+    type Key = AesKey;
+    type Nonce = [u8; AES_BLOCK];
+    type PlainText = [u8; N];
+    type CipherText = [u8; N];
+}
+
+macro_rules! cipher_init {
+    ($mode:ty) => {
+        impl<'d, Y: FnMut(u32), const N: usize> CipherInit<$mode> for AesSkin<'d, Y, N> {
+            type CipherContext<'a>
+                = AesOp<'a, N, $mode>
+            where
+                Self: 'a;
+
+            fn init<'a>(
+                &'a mut self,
+                key: &Self::Key,
+                nonce: &Self::Nonce,
+                _mode: $mode,
+            ) -> Result<Self::CipherContext<'a>, Self::Error> {
+                // SAFETY: `AesSkin::new`'s non-reentrancy contract covers every
+                // context derived from it; the reborrow of `*self.dev` is the
+                // exclusive `&mut` borrow-split (delta A1).
+                let core = unsafe { AesCipher::from_device(&mut *self.dev) };
+                Ok(AesOp {
+                    core,
+                    key: key.clone(),
+                    iv: *nonce,
+                    _m: PhantomData,
+                })
+            }
+        }
+    };
+}
+cipher_init!(Ecb);
+cipher_init!(Cbc);
+
+impl<'a, const N: usize> CipherOp<Ecb> for AesOp<'a, N, Ecb> {
+    fn encrypt(&mut self, plaintext: [u8; N]) -> Result<[u8; N], HaceError> {
+        let mut ct = [0u8; N];
+        self.core
+            .ecb_encrypt(self.key.as_slice(), &plaintext, &mut ct)?;
+        Ok(ct)
+    }
+
+    fn decrypt(&mut self, ciphertext: [u8; N]) -> Result<[u8; N], HaceError> {
+        let mut pt = [0u8; N];
+        self.core
+            .ecb_decrypt(self.key.as_slice(), &ciphertext, &mut pt)?;
+        Ok(pt)
+    }
+}
+
+impl<'a, const N: usize> CipherOp<Cbc> for AesOp<'a, N, Cbc> {
+    fn encrypt(&mut self, plaintext: [u8; N]) -> Result<[u8; N], HaceError> {
+        let mut ct = [0u8; N];
+        self.core
+            .cbc_encrypt(self.key.as_slice(), &self.iv, &plaintext, &mut ct)?;
+        Ok(ct)
+    }
+
+    fn decrypt(&mut self, ciphertext: [u8; N]) -> Result<[u8; N], HaceError> {
+        let mut pt = [0u8; N];
+        self.core
+            .cbc_decrypt(self.key.as_slice(), &self.iv, &ciphertext, &mut pt)?;
+        Ok(pt)
     }
 }
