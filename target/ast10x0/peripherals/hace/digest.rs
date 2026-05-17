@@ -119,13 +119,24 @@ impl<'a, T: DigestAlgorithm> HaceDigest<'a, T> {
     pub unsafe fn from_device<Y: FnMut(u32)>(
         device: &'a mut super::device::HaceDevice<Y>,
     ) -> Self {
-        // `regs`/`poll_budget` are `Copy`; the only retained borrow is the
-        // disjoint `yield_fn` field, kept for `'a`.
+        // Borrow split. `regs`/`poll_budget`/`ctx` are `Copy`d out; the
+        // retained `&'a mut device.yield_fn` reborrow pins `&'a mut HaceDevice`
+        // for the whole life of the returned op — that is the arbiter: a
+        // second `HaceDigest`/`HaceHmac` needs `&mut device` again and is a
+        // borrow-check error while this one lives. The context is no longer
+        // minted by a `shared_ctx_ptr()` free accessor at each call; it is the
+        // device's sole pointer, so its transient `&mut` is reached only
+        // *through* that exclusive device borrow
+        // (`borrow-arbitrated-engine-exclusivity`, Checklist box 2/4).
         let regs = device.regs;
         let poll_budget = device.poll_budget;
+        // SAFETY: the device holds the sole pointer to this `.ram_nc` context
+        // (acquired once at its `unsafe fn new*` single-instance gate); the
+        // caller upholds non-reentrancy and the live `&'a mut device` (pinned
+        // by `yield_fn` below) gates it, so no other `&mut` to it is live.
+        let ctx: &'a mut HashContext = unsafe { &mut *device.ctx };
         let yield_fn: &'a mut dyn FnMut(u32) = &mut device.yield_fn;
-        // SAFETY: Caller upholds the exclusivity contract.
-        Self::new(regs, unsafe { &mut *super::context::shared_ctx_ptr() }, poll_budget, yield_fn)
+        Self::new(regs, ctx, poll_budget, yield_fn)
     }
 }
 

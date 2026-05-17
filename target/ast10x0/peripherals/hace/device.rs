@@ -4,6 +4,7 @@
 //! HACE device binding with cooperative yield.
 
 use super::constants::DEFAULT_POLL_BUDGET;
+use super::context::{HashContext, acquire_shared_ctx};
 use super::registers::HaceRegisters;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -11,8 +12,37 @@ pub enum HashAlgo {
     Sha256,
 }
 
+/// The one owned binding over the HACE engine.
+///
+/// Exclusivity member of the *owned-peripheral* family (`design-patterns` ::
+/// `borrow-arbitrated-engine-exclusivity`): this value is **not**
+/// `Copy`/`Clone` (the `*mut HashContext` field also makes it structurally
+/// move-only), and every operation handle — `HaceDigest`, `HaceHmac` — is
+/// produced *only* by an exclusive `&mut HaceDevice` borrow-split. Two
+/// concurrent ops of the one engine, of any kind, are therefore a borrow-check
+/// error: the Rust `&mut`-exclusivity rule is the arbiter, replacing the Zephyr
+/// reference's `in_use`/`-EBUSY` caller-serialization discipline. No runtime
+/// busy flag and no hardware busy-bit read exists anywhere in this driver.
+///
+/// `ctx` is the engine's operation state. It must be a `.ram_nc`,
+/// `#[repr(C, align(64))]` static (DMA targets — SG list / `buffer` /
+/// `digest`; `goal.md` §1.3/§5.1) so it cannot be an inline by-value field of
+/// this (stack-placeable) device; instead the device holds the *sole* pointer
+/// to it, acquired once at the construction gate via
+/// [`acquire_shared_ctx`](super::context::acquire_shared_ctx) — there is no
+/// free accessor handing it out elsewhere (Checklist box 2). The live
+/// `&mut HashContext` exists *only* transiently inside an operation, reborrowed
+/// through the device's `&mut`. Single-instance-per-engine is gate-delegated to
+/// the documented `unsafe fn new*` contract (Checklist box 3), as in the
+/// sibling SBC port; that residual static is the pattern's stated hardware
+/// liability, not a soundness gap.
 pub struct HaceDevice<Y: FnMut(u32)> {
     pub(crate) regs: HaceRegisters,
+    /// Sole pointer to the section-placed [`HashContext`]. Reborrowed as a
+    /// transient `&mut` through `&mut self` by each operation's `from_device`
+    /// (a disjoint-field split alongside `yield_fn`); never aliased outside
+    /// the device.
+    pub(crate) ctx: *mut HashContext,
     /// Cooperative yield hook invoked between completion polls.
     /// Argument is a suggested wait window in nanoseconds.
     pub(crate) yield_fn: Y,
@@ -33,6 +63,9 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
         Self {
             // SAFETY: Caller upholds register-pointer validity/ownership.
             regs: unsafe { HaceRegisters::new(base) },
+            // SAFETY: the `unsafe fn new*` single-instance contract makes this
+            // the sole live device, hence the sole holder of this pointer.
+            ctx: unsafe { acquire_shared_ctx() },
             yield_fn,
             poll_budget: DEFAULT_POLL_BUDGET,
         }
@@ -58,6 +91,9 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
         Self {
             // SAFETY: Caller coordinates singleton access.
             regs: unsafe { HaceRegisters::new_global() },
+            // SAFETY: the `unsafe fn new*` single-instance contract makes this
+            // the sole live device, hence the sole holder of this pointer.
+            ctx: unsafe { acquire_shared_ctx() },
             yield_fn,
             poll_budget: DEFAULT_POLL_BUDGET,
         }

@@ -135,10 +135,29 @@ impl SectionPlacedContext {
 #[unsafe(link_section = ".ram_nc")]
 static SHARED_HASH_CTX: SectionPlacedContext = SectionPlacedContext::new();
 
-/// Returns a raw pointer to the section-placed shared hash context.
+/// Acquire the raw pointer to the section-placed hash context, to be held as
+/// private state by the one [`HaceDevice`](super::device::HaceDevice).
+///
+/// This is the *only* path to the context. There is deliberately no free
+/// accessor that hands the pointer to arbitrary call sites: the operation
+/// state is reached exclusively *through* the borrowed device (every
+/// `HaceDigest`/`HaceHmac` reborrows it under the device's `&mut`), which is
+/// what makes engine exclusivity borrow-arbitrated rather than caller
+/// discipline (`design-patterns` :: `borrow-arbitrated-engine-exclusivity`,
+/// Checklist box 2).
+///
+/// The context must remain a `.ram_nc`, `#[repr(C, align(64))]` static — it
+/// holds the SG list / `buffer` / `digest` DMA targets and cannot live on a
+/// stack-placed device value (`goal.md` §1.3/§5.1). That residual static is
+/// the pattern's stated hardware liability ("language fiction, not a hardware
+/// lock"); single-instance is gate-delegated to the `unsafe fn new*` contract
+/// below (Checklist box 3), exactly as the sibling SBC port does.
 ///
 /// # Safety
-/// Caller must ensure exclusive access — no concurrent or reentrant use.
-pub(crate) fn shared_ctx_ptr() -> *mut HashContext {
+/// The HACE engine is a hardware singleton. The caller (the `HaceDevice`
+/// construction gate) must uphold the same single-instance/non-reentrancy
+/// contract as `HaceRegisters::new*`: at most one live `HaceDevice`, hence at
+/// most one live `&mut` minted from this pointer, at a time.
+pub(crate) unsafe fn acquire_shared_ctx() -> *mut HashContext {
     SHARED_HASH_CTX.get()
 }
