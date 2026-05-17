@@ -1,0 +1,13 @@
+NIST CAVP — CAVS 11.0 "SigVer" — FIPS 186-3 ECDSA test vectors
+Section: [P-384,SHA-384]  (15 records: 3 valid, 12 invalid)
+Source file: csrc.nist.gov/groups/STM/cavp/documents/dss/186-3ecdsatestvectors/SigVer.rsp
+Retrieved: 2026-05-16 via raw mirror
+  https://raw.githubusercontent.com/coruus/nist-testvectors/master/csrc.nist.gov/groups/STM/cavp/documents/dss/186-3ecdsatestvectors/SigVer.rsp
+sha256(full SigVer.rsp) = e9841c3d12e323042751460d0b8ef4bc59c2640105ec7da4852775f80ab10191
+sha256(vendored [P-384,SHA-384] section) = bc59dcdbb020c6d3e79d9a4fcd9444023d6eec350c23d3f8fb5957fe700980e9
+Generated-on (per file header): Wed Mar 16 16:16:55 2011
+
+Independent correctness authority (goal.md Phase 4 / §2.3.2) — NOT the parity
+reference. NIST gives the raw Msg; our engine consumes a SHA-384 digest, so
+the table's `m` = SHA-384(hex-decode(Msg)), computed at vendoring time
+(standard, reproducible). Qx/Qy/R/S are verbatim NIST. Result P->true, F->false.

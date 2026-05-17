@@ -45,5 +45,7 @@ so the timeout firing *is* the assertion).
 - **`qemu/` — IMPLEMENTED & PASSING.** Real pw_kernel `system_image_test`;
   green under `--config=virt_ast10x0` (operand-order pin, structural reject,
   D3 bounded-timeout).
-- **`evb/` — scaffold + README only**, hardware-tagged; bodies are the
-  user's to write & run on AST1060 silicon (NIST KAT / verdict parity).
+- **`evb/` — IMPLEMENTED, hardware-only.** pw_kernel firmware driving the
+  pinned NIST CAVP P-384/SHA-384 SigVer vectors (15) through the real ECC
+  engine; builds clean (`--config=k_ast1060_evb`), `hardware`-tagged +
+  qemu-incompatible. The **user runs it on an AST1060 EVB** (no board here).

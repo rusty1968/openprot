@@ -1,7 +1,8 @@
 # ECDSA Behavioral Parity Goal (AST1060)
 
 > **Status: Phases 0–5 done; code implemented; Phase 6 §4.A QEMU tests
-> IMPLEMENTED & PASSING. §4.B (HW NIST KAT) + Phase 8 ADR-3 remain.**
+> PASSING; §4.B NIST KAT firmware IMPLEMENTED (builds, user-run on EVB).
+> Phase 8 ADR-3 remains; §4.B silicon run pending (user).**
 > Authority pinned (§0), spec reverse-engineered (§1), parity standard decided
 > (§Objective), deltas ledger built with the lone intentional delta discharged
 > (§2), three authorities separated (§2.3), skin/HAL ADRs recorded (§5), the
@@ -380,13 +381,21 @@ question and is satisfied separately.
    every reachable input (§1.2). Sole intentional deviation = D3 (bounded
    timeout), discharged §2.1.
 
-2. **Correctness authority** — *independent* published P-384 ECDSA known-answer
-   tests: **NIST CAVP "186-4 ECDSA" signature-verification vectors, curve
-   P-384 with SHA-384** (`SigVer.rsp`, FIPS 186-4 ECDSA2VS). Question: *"is the
+2. **Correctness authority — PINNED.** *Independent* published P-384 ECDSA
+   known-answer tests: **NIST CAVP CAVS 11.0 FIPS 186-3 ECDSA `SigVer.rsp`,
+   section `[P-384,SHA-384]`, all 15 records** (3 valid + 12 invalid:
+   Message/R/S/Q changed). Vendored verbatim + pinned (URL, retrieval date,
+   sha256 of full file and section) at
+   `tests/peripherals/ecdsa/evb/nist-reference/` (`PINNED.txt`); the device
+   table is generated to `evb/vectors.rs` (`Qx/Qy/R/S` verbatim NIST;
+   `m = SHA-384(Msg)` computed at vendoring time, since NIST gives the raw
+   message and the engine consumes the digest). Question: *"is the
    accept/reject verdict mathematically correct per the standard?"*
-   Deliberately **non-overlapping** with parity: parity proves equivalence to
-   the deployed driver, these prove the verdict itself is correct. Vector
-   selection/vendoring is Phase 6, not assumed here.
+   Deliberately **non-overlapping** with parity (Zephyr) — these prove the
+   verdict itself is correct, not equivalence to the deployed driver. The
+   earlier "aspeed-rust embedded vectors" were rejected as the authority
+   (informative ref, half hand-mutated) — normative-over-convenient at the
+   vector level.
 
 3. **Interface authority** — `EcdsaVerify<P384>`
    ([../../../../../hal/blocking/src/ecdsa.rs](../../../../../hal/blocking/src/ecdsa.rs)).
@@ -526,15 +535,19 @@ them later on silicon.** The three §2.3 authorities are gated as follows.
   the bounded-poll/timeout path (the lone intentional delta), and the *only*
   end-to-end behavior QEMU can exercise.
 
-### 4.B HARDWARE-ONLY — tagged, user-executed later (NOT automatable on QEMU)
-> Tag: `#[ignore]` / `cfg(hardware_kat)` — **do not run in CI/QEMU; the user
-> runs these on real AST1060 silicon.** Rationale: ADR-4.
-- **Parity (HW):** P-384/SHA-384 verify (valid + invalid vectors) produces the
-  same verdict + register transaction as the pinned Zephyr driver on every
-  reachable input. Also discharges P5-OPEN-A behaviorally (SRAM base) and the
-  poll-budget tuning obligation (§2.1 residual).
-- **Correctness (HW):** the same verdicts match the NIST CAVP 186-4
-  P-384/SHA-384 `SigVer` vectors (§2.3.2).
+### 4.B HARDWARE-ONLY — IMPLEMENTED, user-executed on silicon (not QEMU)
+> `tests/peripherals/ecdsa/evb/` — pw_kernel firmware, `hardware`-tagged +
+> `qemu_enabled`-incompatible (excluded from `--config=virt_ast10x0`/CI per
+> ADR-4). Builds clean (`--config=k_ast1060_evb`); the **user runs it on an
+> AST1060 EVB**. One run satisfies all three of:
+- **Correctness (HW):** all 15 pinned NIST CAVP P-384/SHA-384 `SigVer`
+  verdicts match (§2.3.2) — the independent correctness authority.
+- **Parity (HW):** the same accept/reject outcomes are what the pinned Zephyr
+  driver's register sequence (§1.2) produces on these inputs — verdict-level
+  parity confirmation (the by-construction sequence, now exercised).
+- **P5-OPEN-A + budget:** a green run proves the SRAM base is actually
+  consumed correctly and the poll budget exceeds real verify latency
+  (§2.1 residual); a wrong base / wedge surfaces as an `engine timeout` line.
 
 Until 4.B is run on hardware, behavioral parity remains **by-construction
 only** (cited line-for-line vs `zephyr-reference/`); this is stated, not
