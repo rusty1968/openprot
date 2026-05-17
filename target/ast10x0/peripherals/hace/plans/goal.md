@@ -30,6 +30,23 @@ recorded as the lone *intentional delta* (D2). Everything else is strict identit
 
 Scope is AST1060 only (little-endian Cortex-M). No other target is considered.
 
+**AES (symmetric crypto) scope — added 2026-05-16.** The HACE engine is also a
+symmetric block-cipher engine; the *same* pinned driver file is unified hash +
+crypto. The AES authority is therefore the **same commit**, `hace_aspeed.c` @
+`cfe94dc`, plus `hace_aspeed.h` and the now-vendored `crypto_aspeed_priv.h`
+(crypto session context) — all in [zephyr-reference/](zephyr-reference/), read
+directly. No informative second port exists for AES (`aspeed-rust` has no AES),
+so the pinned driver is the sole reference. Decided forks (Phase 2):
+
+- **Parity standard: same as digest** — observable byte-for-byte parity on
+  every reachable input; keep correctness fixes for latent defects no reachable
+  consumer triggers, recorded as intentional deltas.
+- **Surface in scope: AES-128 / AES-256, ECB and CBC, raw key only.**
+  Out of scope **by decision** (recorded in §2.3, not silently dropped):
+  CFB/OFB/CTR, AES-192, DES/3DES, and the OTP/secret-vault sideloaded-key path.
+- AES correctness authority is independent published **NIST AESAVS/CAVP KATs**
+  (§2.4) — distinct from parity, exactly as RFC-4231 is for HMAC.
+
 ---
 
 ## 1. Reference behavior to replicate
@@ -134,6 +151,112 @@ owned context; `finalize` returns `(digest, controller)`; `cancel` cleans up and
 returns the controller. On an exact block boundary the owned path sets `bufcnt = 0`
 (see Delta D2 — the port adopts this for the scoped path too).
 
+### 1.9 AES (symmetric crypto) reference behavior
+
+All claims grounded in the frozen [zephyr-reference/](zephyr-reference/) copy
+@ `cfe94dc`, read directly: `hace_aspeed.c` (unified hash+crypto driver),
+`hace_aspeed.h` (crypto register/command bits), `crypto_aspeed_priv.h`
+(session context). The crypto path is a **distinct hardware sub-engine** from
+the hash path: different registers, different status bit, its own context — but
+the same physical HACE engine and the same single-in-flight constraint (§5.1).
+
+#### 1.9.1 Hardware contract (crypto sub-engine)
+
+A crypto pass is driven via the crypto register file (`hace_aspeed.h`, crypto
+control regs from `ASPEED_HACE_CMD 0x10`; `hace_aspeed.h:15`). Sequence per
+`crypto_trigger` (`hace_aspeed.c:78–103`), in this exact order:
+
+1. If `hace_sts.crypto_engine_sts` set → engine busy, return `-EBUSY`
+   (`hace_aspeed.c:83–87`). *(This is the crypto analogue of the hash
+   `in_use`/`-EBUSY`; see §2.3-A1 / §5.1.)*
+2. `hace_sts = HACE_CRYPTO_ISR` (`BIT(12)`) — clear the completion latch
+   (`hace_aspeed.c:88`; `hace_aspeed.h:39`).
+3. `crypto_data_src = &src_sg` (`hace_aspeed.c:90`).
+4. `crypto_data_dst = &dst_sg` (`hace_aspeed.c:91`).
+5. `crypto_ctx_base = data->ctx` (`hace_aspeed.c:92`).
+6. `crypto_data_len = src_sg.len` (`hace_aspeed.c:93`).
+7. `crypto_cmd_reg = data->cmd` — **this write starts the engine**
+   (`hace_aspeed.c:94`).
+
+Completion = poll `hace_sts.crypto_int == 1`, bounded `timeout_ms = 3000`
+(`aspeed_crypto_wait_completion`, `hace_aspeed.c:63–76`, called at
+`hace_aspeed.c:102`); timeout → error return (no partial output). After a
+successful pass the driver issues `cache_data_invd_all()`
+(`hace_aspeed.c:140`) — DMA coherency for `dst`.
+
+#### 1.9.2 Command word (`data->cmd`)
+
+Composed in `aspeed_crypto_session_setup` (`hace_aspeed.c:242–365`). Base:
+`HACE_CMD_DES_SG_CTRL | HACE_CMD_SRC_SG_CTRL | HACE_CMD_MBUS_REQ_SYNC_EN`
+(`hace_aspeed.c:264`; bits `BIT(19)|BIT(18)|BIT(20)`, `hace_aspeed.h:18,19,17`).
+For `CRYPTO_CIPHER_ALGO_AES`: `|= HACE_CMD_AES_KEY_HW_EXP | HACE_CMD_AES_SELECT`
+(`hace_aspeed.c:269`; `BIT(13)` hardware key expansion, `AES_SELECT == 0`,
+`hace_aspeed.h:25,22`). Key length (`hace_aspeed.c:289–301`): `keylen` 16 →
+`HACE_CMD_AES128 (0)`, 24 → `HACE_CMD_AES192 (1<<2)`, 32 →
+`HACE_CMD_AES256 (2<<2)`, else `-EINVAL` (`hace_aspeed.h:34–36`). Mode
+(`hace_aspeed.c:303–356`): `HACE_CMD_ECB (0)` / `HACE_CMD_CBC (1<<4)`
+(`hace_aspeed.h:29,30`). Direction: encrypt `|= HACE_CMD_ENCRYPT (BIT(7))`,
+decrypt `|= HACE_CMD_DECRYPT (0)` (`hace_aspeed.h:28,27`). `cmd` is fixed at
+session-setup time and reused for every block op of the session.
+
+#### 1.9.3 Session context & memory model
+
+`struct aspeed_crypto_ctx { uint8_t ctx[64]; struct aspeed_sg src_sg;
+struct aspeed_sg dst_sg; uint32_t cmd; }` (`crypto_aspeed_priv.h:20–24`); held
+in `aspeed_crypto_drv_state { data; bool in_use; }` (`:26–29`). Layout of the
+64-byte `ctx`:
+
+- `ctx[0..16)` — the **IV** (CBC only; `memcpy(data->ctx, iv, 16)`,
+  `hace_aspeed.c:186,200`). ECB never writes it.
+- `ctx[16..16+keylen)` — the **raw key**
+  (`memcpy(data->ctx + 16, ctx->key.bit_stream, ctx->keylen)`,
+  `hace_aspeed.c:114`).
+
+`src_sg`/`dst_sg`/`ctx` are DMA targets handed to the engine by physical
+address (`hace_aspeed.c:90–92`); `src_sg.len` and `dst_sg.len` are the byte
+length **OR'd with `BIT(31)`** (single/last SG entry terminator,
+`hace_aspeed.c:130–133`). Exactly one crypto op in flight (§5.1).
+
+#### 1.9.4 Operation state machine (one-shot, per block call)
+
+There is **no init/update/finalize streaming** for crypto: a session is set up
+once, then each `cipher_pkt` is a complete run-to-completion op.
+
+- **session setup** (`aspeed_crypto_session_setup`, `hace_aspeed.c:242–365`):
+  reject if `state->in_use` → `-EBUSY` (`:254–256`); require `CAP_SYNC_OPS`,
+  else `-EINVAL` (async unsupported, `:259–262`); compose `cmd` (§1.9.2);
+  bind the ECB/CBC op handler; `state->in_use = true` (`:363`);
+  `ctx->ops.cipher_mode = mode` (`:361`).
+- **core crypt** (`aspeed_aes_crypt`, `hace_aspeed.c:105–141`): copy raw key to
+  `ctx[16..]` (`:114`); `src_sg.addr = in_buf`, `dst_sg.addr = out_buf`,
+  `src_sg.len = dst_sg.len = in_len | BIT(31)` (`:130–133`);
+  `crypto_trigger` (§1.9.1); on success `cache_data_invd_all()` (`:140`),
+  return 0. **No input-length / block-multiple validation** in the driver —
+  the engine consumes `in_len` bytes as given (relied-upon, see §2.3-A4).
+- **ECB** (`aspeed_aes_crypt_ecb`, `hace_aspeed.c:170–178`):
+  `pkt->out_len = pkt->in_len`; crypt `in_buf → out_buf`. No IV.
+- **CBC encrypt** (`aspeed_aes_encrypt_cbc`, `hace_aspeed.c:180–192`):
+  `memcpy(ctx, iv, 16)`; **`memcpy(pkt->out_buf, iv, 16)`** — the IV is
+  emitted in-band as the first 16 output bytes; `pkt->out_len = in_len + 16`;
+  ciphertext written at `out_buf + 16`. **Observable output = `IV ‖ CT`.**
+- **CBC decrypt** (`aspeed_aes_decrypt_cbc`, `hace_aspeed.c:194–205`):
+  `memcpy(ctx, iv, 16)`; `pkt->out_len = in_len - 16`; the engine consumes
+  `in_buf + 16` for `in_len - 16` bytes. **Expected input = `IV ‖ CT`**; the
+  leading 16 bytes are skipped, not decrypted.
+- **session free** (`aspeed_crypto_session_free`, `hace_aspeed.c:370–377`):
+  `state->in_use = false`. (No key/ctx zeroization — see §2.3-A3.)
+
+#### 1.9.5 Capabilities & registration
+
+`query_hw_caps` returns `HACE_CAPS_SUPPORT = CAP_OPAQUE_KEY_HNDL | CAP_RAW_KEY |
+CAP_SEPARATE_IO_BUFS | CAP_SYNC_OPS` (`hace_aspeed.c:60–61,767–769`). Driver
+registered via `crypto_funcs` (`hace_aspeed.c:796–803`):
+`cipher_begin_session = aspeed_crypto_session_setup`,
+`cipher_free_session = aspeed_crypto_session_free`,
+`cipher_async_callback_set = NULL` (sync-only). The cryptographic core (the
+AES-128/256 ECB/CBC transform itself) is standard AES — the engine emits
+exactly the NIST-defined ciphertext for the given key/IV/mode (§2.4).
+
 ---
 
 ## 2. Deltas vs. the authoritative driver (source-verified @ cfe94dc)
@@ -220,6 +343,51 @@ GDB watchpoints on the corrupted region, and/or reading the upstream QEMU
 `aspeed-hace` model for SG-DMA addressing/length constraints on 128-byte-block
 (SHA-384/512) operations — not further speculative edits.
 
+### 2.3 AES deltas vs. the authoritative driver (source-verified @ cfe94dc)
+
+Parity standard = observable byte-for-byte on every reachable input, keep
+fixes. The **cryptographic output is standard AES** (NIST-gated, §2.4); the
+rows below are about *framing / lifecycle / scope*, not the cipher transform.
+
+| ID | Pinned Zephyr driver (verbatim + `file:line`) | Port behavior | Classification |
+|----|-----------------------------------------------|---------------|----------------|
+| A1 | Crypto exclusivity is a runtime flag: `aspeed_crypto_session_setup` rejects overlap with `-EBUSY` if `state->in_use` (`hace_aspeed.c:254–256`), plus a HW busy-bit check `hace_sts.crypto_engine_sts` in `crypto_trigger` (`:83–87`) | No `in_use` flag, no busy-bit read; AES is the **3rd operation** of the one owned `HaceDevice`, obtained only by an exclusive `&mut` borrow-split (`design-patterns :: borrow-arbitrated-engine-exclusivity`) | **Intentional structural delta (decided).** Same replacement, and the same classification, already applied to the digest/HMAC ops (see the resolved `goal-tech-debt.md`); overlap becomes a compile error. Output-identical; the `-EBUSY` return is unreachable when exclusivity is structural. Recorded as the intentional structural delta, mirroring SBC. |
+| A2 | CBC framing is **IV in-band**: encrypt prepends the 16-byte IV to the output (`out = IV ‖ CT`, `out_len = in_len + 16`; `hace_aspeed.c:186–191`); decrypt expects `in = IV ‖ CT` and skips the first 16 bytes (`:200–205`) | The openprot cipher trait carries the nonce/IV **separately** (`CipherInit::init(key, nonce, mode)`, see §2.4); the port maps `nonce → ctx[0..16]` and the ciphertext buffer is **just `CT`** (no in-band IV prefix/strip) | **Intentional delta (decided: follow the trait shape).** The AES-CBC *ciphertext bytes are byte-identical* to the driver (and to NIST CAVS) for the same key/IV — only the driver's in-band IV *framing convention* differs, an I/O wrapper, not the transform. Directly analogous to D4 (canonical-digest framing). Reachability: the openprot consumers drive the typed `cipher` trait with a separate `Nonce`; none expect a driver-style `IV ‖ CT` blob. A KAT asserts port `CT` == NIST `CT`. |
+| A3 | `aspeed_crypto_session_free` clears only `in_use`; the raw key in `ctx[16..]` and the IV in `ctx[0..16]` are **not zeroized** (`hace_aspeed.c:370–377`) | Port zeroizes the key/IV region of the context on session/op drop | **Intentional delta (decided: keep the fix; security).** Leaving key material resident in a `.ram_nc` DMA buffer on a RoT is a defect no consumer relies on; zeroizing changes no cipher output. Safer on every input; observable only as cleared scratch. |
+| A4 | `aspeed_aes_crypt` performs **no input-length / block-multiple validation**; `in_len` is passed to the engine as-is (`hace_aspeed.c:130–135`) | Port rejects non-16-byte-multiple `in_len` for ECB/CBC with a typed `InvalidInput` before programming the engine | **Intentional delta (decided: keep the fix; safety).** Adds a bound the C omits; cannot change output for any valid (block-aligned) input — the only reachable production case. Mirrors the SBC port's "Rust-side bound the C omits" deltas. |
+| A5 | Driver also wires **CFB/OFB/CTR** (via the CBC IV-prepend handlers, `hace_aspeed.c:325–356`), **AES-192** (`:294`), **DES/TDES** (`:272–281`), and an **OTP/secret-vault key** path (`SELECT_VAL_KEY_1/2`, `AES_KEY_FROM_OTP`, `hace_aspeed.c:114–128`, `hace_aspeed.h:193–199`) | Not implemented | **Out of scope by decision (Phase 2).** Not a defect — deliberately deferred. CFB/OFB/CTR-via-CBC-handler in particular is a behaviorally surprising path; if a later increment adds it, its parity classification is re-opened then. Recorded here so the omission is explicit, not silent. |
+
+A1/A3/A4 are the intentional deltas; A2 is framing-only (ciphertext identical);
+A5 is scoped-out. No row changes the AES *transform* output on any in-scope,
+reachable input — that is NIST-identical (§2.4).
+
+### 2.4 AES correctness & interface authorities (separate by deliberate choice)
+
+As with HMAC (§2.1), do not conflate the authorities:
+
+- **Algorithm-correctness authority = published NIST KATs only.** AES-128/256
+  ECB and CBC validated against **NIST AESAVS / CAVP** known-answer vectors
+  (FIPS-197 / SP 800-38A). The pinned driver is the *behavioral/framing* model
+  (register/cmd sequence, ctx layout, lifecycle) — **not** the cipher-vector
+  oracle. The engine's transform is standard AES; parity-vs-driver on the
+  ciphertext bytes and NIST-correctness coincide, but the gate is the NIST KAT.
+- **Interface authority = the openprot cipher trait**
+  ([hal/blocking/src/cipher.rs](../../../../../hal/blocking/src/cipher.rs)).
+  **Verified (read directly):** `SymmetricCipher` + `CipherInit<M>` /
+  `CipherOp<M>` constrain only the *shape* — `init(&key, &nonce, mode) -> ctx`,
+  then one-shot `encrypt(PlainText) -> CipherText` / `decrypt(CipherText) ->
+  PlainText`; `CipherMode`/`BlockCipherMode` are algorithm-agnostic markers; no
+  AES/NIST semantics are mandated. The nonce is a **separate** associated type
+  from plaintext/ciphertext — this is the trait basis for delta A2. The trait's
+  one-shot (non-streaming) `encrypt`/`decrypt` matches the driver's one-shot
+  crypt exactly (§1.9.4) — no streaming adapter is needed.
+
+Three independent obligations: (a) ciphertext matches NIST AESAVS/CAVP;
+(b) register/ctx/lifecycle behavior matches the pinned driver per §1.9 modulo
+the §2.3 deltas; (c) the openprot cipher trait interface is satisfied. AES
+parity-vs-driver on the *transform* is implied by (a); the goal's parity gate
+for AES is (a)+(b).
+
 ---
 
 ## 3. Implementation plan
@@ -284,6 +452,56 @@ GDB watchpoints on the corrupted region, and/or reading the upstream QEMU
    - D1/D4 require no divergence assertions — they are conformance (§2).
    - HMAC KATs live in the HMAC component's harness (§2.1), not here.
 
+6. **AES module** (new `aes.rs` + `mod.rs` export) — **governed by §1.9 / §2.3
+   / §2.4.** Scope: AES-128/256, ECB + CBC, raw key.
+   - Add a `.ram_nc`, `#[repr(C, align(64))]` crypto context mirroring
+     `aspeed_crypto_ctx` (§1.9.3): `ctx[64]` (`[0..16)` IV, `[16..]` key),
+     `src_sg`/`dst_sg` (`addr`, `len|BIT(31)`), `cmd`. **Reuse the
+     borrow-arbitrated single-owned-device model** — `AesCipher` is obtained
+     only by an exclusive `&mut HaceDevice` borrow-split, exactly like
+     `HaceDigest`/`HaceHmac` (delta A1; the engine cannot do concurrent
+     crypto+hash, §5.1). No `in_use` flag, no `crypto_engine_sts` busy read.
+   - `cmd` composition (§1.9.2): base
+     `DES_SG_CTRL|SRC_SG_CTRL|MBUS_REQ_SYNC_EN`, `AES_KEY_HW_EXP|AES_SELECT`,
+     keylen→`AES128/256`, mode→`ECB/CBC`, dir→`ENCRYPT`/`DECRYPT (0)`.
+   - Drive the crypto register file in the exact §1.9.1 order via the
+     confined-`unsafe` `HaceRegisters` façade (extend it with the crypto regs:
+     `crypto_data_src/dst`, `crypto_ctx_base`, `crypto_data_len`,
+     `crypto_cmd_reg`, `crypto_int`/`crypto_engine_sts` on `hace_sts`); bounded
+     completion poll on `crypto_int` reusing the `cooperative-yield-bounded-
+     poll-device` strategy + `poll_budget` → `HaceError::Timeout` (parity with
+     the driver's bounded 3000-ms wait, §1.9.1; same conformance basis as D1).
+   - Implement the openprot `CipherInit<M>`/`CipherOp<M>` for `Ecb`/`Cbc`
+     marker modes (§2.4): `init(&key, &nonce, mode)` → context (nonce → IV);
+     one-shot `encrypt`/`decrypt`. Ciphertext buffer is **plain `CT`** (no
+     in-band IV — delta A2). Zeroize key/IV on drop (delta A3). Reject
+     non-block-multiple `in_len` with typed `InvalidInput` before triggering
+     (delta A4).
+   - DMA discipline: context/`src`/`dst` are `.ram_nc` (no `cache_data_invd_all`
+     needed — non-cached, mirrors the §1.3 HashContext placement and the same
+     layout-sensitivity caution as §2.2).
+   - Acceptance: AES-128 and AES-256, ECB and CBC, encrypt and decrypt produce
+     the NIST AESAVS/CAVP KAT ciphertext/plaintext byte-for-byte; a second
+     concurrent AES/hash op is a borrow-check error (delta A1); a
+     non-block-multiple input returns `InvalidInput` (delta A4).
+
+7. **AES parity / KAT harness** (extend the QEMU `ast1030-evb` suite)
+   - **Correctness gate**: NIST AESAVS/CAVP vectors for AES-128/256 ECB and CBC
+     (KAT + a multi-block MMT-style case), encrypt and decrypt, asserted
+     byte-equal. This is the AES parity gate (§2.4 — equals the driver's
+     transform output by construction).
+   - **Production-dominant pattern**: a multi-block (≥ 4 KB) CBC encrypt→decrypt
+     round-trip equals the plaintext, exercising the real SG-DMA length path
+     (`len|BIT(31)`), not just a single 16-byte block.
+   - **Delta A2 test**: assert the port's ciphertext buffer is exactly `CT`
+     (length `in_len`, no leading IV) while the same key/IV/plaintext yields
+     the NIST `CT` — documents the driver's `IV ‖ CT` framing divergence.
+   - **Delta A4 test**: a 17-byte (non-block-multiple) input returns typed
+     `InvalidInput`, no engine programming.
+   - A1/A3 need no divergence vector (structural / cleared-scratch); A1 is
+     covered by a compile-fail doc-test if the harness has one, else asserted
+     by construction. A5 (out of scope) gets no test.
+
 ## 4. Done criteria
 
 - SHA-256/384/512 digest: byte-identical to the **pinned Zephyr driver**
@@ -293,12 +511,25 @@ GDB watchpoints on the corrupted region, and/or reading the upstream QEMU
 - Owned API: emits the same canonical digest as the scoped API (= Zephyr output);
   the `aspeed-rust` owned-API `from_be_bytes` byte-swap is **not** reproduced (D4
   conformance).
-- D2 is the **only** intentional delta — covered by a positive test (port = correct
-  SHA) plus a documented note that the authority diverges on the unreachable
-  pathological pattern. D1/D4 are conformance, no divergence tests needed. No other
-  behavioral difference vs. the pinned driver on any reachable input.
+- D2 is the **only** intentional delta **for the digest path** — covered by a
+  positive test (port = correct SHA) plus a documented note that the authority
+  diverges on the unreachable pathological pattern. D1/D4 are conformance, no
+  divergence tests needed. No other behavioral difference vs. the pinned driver
+  on any reachable digest input. (AES has its own intentional deltas A1/A3/A4,
+  tracked separately in §2.3 with their own tests, §3 item 7.)
 - HMAC: gated by published RFC-4231/-2202 KATs and the RFC-2104-correct
   `> block_size` threshold (§2.1) — not by byte-parity with the driver, by decision.
+- AES (ECB/CBC, 128/256, raw key): ciphertext/plaintext byte-identical to NIST
+  AESAVS/CAVP vectors for encrypt and decrypt (§2.4), including a
+  production-dominant ≥ 4 KB multi-block CBC round-trip. Register/ctx/lifecycle
+  behavior matches §1.9 modulo the §2.3 deltas. Intentional deltas A1
+  (structural exclusivity — AES routes through the one owned `HaceDevice`,
+  overlap is a compile error), A3 (key/IV zeroized on drop), A4
+  (non-block-multiple input → typed `InvalidInput`) each covered per §3 item 7;
+  A2 (no in-band IV framing) asserted ciphertext-identical to NIST. A5 surface
+  is out of scope by decision (§2.3) — its absence is not a failing criterion.
+  Not gated by byte-parity with the driver's `IV ‖ CT` framing, by decision
+  (A2); gated by NIST-correctness + §1.9 behavioral parity.
 
 ---
 
@@ -318,6 +549,19 @@ Consequence: a HW streaming session is an **exclusive lock on the singleton held
 from `begin` to `finish`**. The decisive hazard is not two simultaneous clients —
 it is one client holding a session open *across a yield* (I/O, scheduler quantum,
 another component). That pins the engine for the whole interval.
+
+**AES is the engine's third operation, not a second engine.** The crypto path
+uses a distinct register file and status bit (§1.9.1) but is the *same physical
+HACE engine*: hash and AES cannot run concurrently, and the driver enforces
+this with the same `in_use`/busy-bit discipline as hash
+(`hace_aspeed.c:254–256,83–87`; delta A1). The port therefore makes AES the
+**third operation arbitrated by the one owned `HaceDevice`** — `AesCipher`,
+like `HaceDigest`/`HaceHmac`, is obtained only by an exclusive `&mut` device
+borrow (`design-patterns :: borrow-arbitrated-engine-exclusivity`, the pattern
+landed in the resolved `goal-tech-debt.md`). Hash⇄AES mutual exclusion is thus
+a compile error, replacing the reference's two independent runtime flags — and
+crypto, being one-shot and run-to-completion, never holds the engine across a
+yield (it is the well-behaved case for §5.3's HW-RPC path).
 
 ### 5.2 Decisions
 
@@ -360,10 +604,16 @@ another component). That pins the engine for the whole interval.
 | SPDM transcript, HKDF, session keys, signatures | **Software, in-process** | Long-lived/interleaved or secret-bearing; HW can't hold it without starving others; isolation |
 | Firmware / image / manifest measurement (large, run-to-completion) | **HW via whole-object RPC** | Bounded, non-yielding, non-secret; IPC amortized over large buffers |
 | Small one-shot non-secret hashes | Either; **default software** | Not worth IPC + serialization unless profiled hot |
+| Bulk AES-ECB/CBC of non-secret-keyed data (large, run-to-completion) | **HW via whole-object RPC** | One-shot, non-yielding (§1.9.4); IPC amortized over large buffers; same shape as bulk measurement |
+| AES with secret/session keys, or interleaved with a protocol | **Software, in-process** | Secret-bearing or long-lived/interleaved; HW path resident-keys in `.ram_nc` and serializes the shared engine |
 | Fallback when HW busy/unavailable | **Software** (always present) | Correctness must never depend on the singleton; trait makes them substitutable |
 
 Selection is a platform composition concern injected behind the trait, decided by:
 capability filter (algo ∈ HACE set) → run-to-completion & size threshold → trust
-class → else software (the default and correctness baseline). HACE only covers
-SHA-2 (+HMAC); ECDSA/ECDHE/AEAD/DRBG are software regardless, so the stack is
-inherently hybrid and the accelerator is opportunistic for the hash subset only.
+class → else software (the default and correctness baseline). HACE covers
+SHA-2 (+HMAC) **and AES-ECB/CBC-128/256** (this goal's crypto scope, §1.9/§2.3);
+AES-192/CFB/OFB/CTR, DES/3DES, ECDSA/ECDHE/AEAD/DRBG are software regardless, so
+the stack stays inherently hybrid and the accelerator is opportunistic for the
+SHA-2 + AES-ECB/CBC subset only. All HACE ops (SHA, HMAC sub-hashes, AES) share
+the one owned device, so backend selection never has to reason about
+intra-engine concurrency — exclusivity is structural (§5.1, delta A1).

@@ -1,4 +1,9 @@
 cfe94dc149ffa0af7e1af668a27f57eecf0cd1e9
 AspeedTech-BMC/zephyr @ cfe94dc149ffa0af7e1af668a27f57eecf0cd1e9
-drivers/crypto/{hace_aspeed.c,hace_aspeed.h,hash_aspeed_priv.h}
+drivers/crypto/{hace_aspeed.c,hace_aspeed.h,hash_aspeed_priv.h,crypto_aspeed_priv.h}
 Frozen 2026-05-16T04:44Z as the normative HACE parity reference (goal.md authority).
+crypto_aspeed_priv.h added 2026-05-16T21:29Z (same pinned rev) for the AES/crypto
+parity scope: hace_aspeed.c is the *unified* hash+crypto driver, so the AES path
+is the same already-pinned commit; crypto_aspeed_priv.h holds the crypto session
+context (`struct aspeed_crypto_ctx`). Vendored verbatim from the pinned git blob
+(byte-verified == cfe94dc:drivers/crypto/crypto_aspeed_priv.h).
