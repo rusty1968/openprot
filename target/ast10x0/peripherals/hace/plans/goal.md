@@ -343,6 +343,18 @@ GDB watchpoints on the corrupted region, and/or reading the upstream QEMU
 `aspeed-hace` model for SG-DMA addressing/length constraints on 128-byte-block
 (SHA-384/512) operations — not further speculative edits.
 
+**Fresh layout-sensitivity confirmation (2026-05-16, AES work).** Adding the
+AES `.ram_nc` `CryptoContext` static (`SHARED_CRYPTO_CTX`) and the
+`HaceDevice.crypto_ctx` field shifted this fault's signature: the
+`hmac-sha512 rfc4231-6` wrong tag moved from `actual[0..8]=5a6e818a5a40625b
+last4=693158be` (pre-AES) to `be109eb6a7012d1f last4=a208e5b9` (post-AES), with
+**the full 32-case green set and the failing case both unchanged** (only the
+victim *value* moved). This is exactly the predicted "victim shifts with
+memory layout" behavior — independent corroboration that §2.2 is a
+memory/DMA/aliasing fault, not a SHA-512 algorithm error. It is **not** a
+regression of the AES change (no green case lost; the gate is the green set,
+which held) and debugging it remains out of scope here.
+
 ### 2.3 AES deltas vs. the authoritative driver (source-verified @ cfe94dc)
 
 Parity standard = observable byte-for-byte on every reachable input, keep
@@ -387,6 +399,52 @@ Three independent obligations: (a) ciphertext matches NIST AESAVS/CAVP;
 the §2.3 deltas; (c) the openprot cipher trait interface is satisfied. AES
 parity-vs-driver on the *transform* is implied by (a); the goal's parity gate
 for AES is (a)+(b).
+
+### 2.5 OPEN ISSUE — AES KAT cannot run on the QEMU model (env, not code)
+
+Status as of 2026-05-16 (stop-and-instrument; QEMU `ast1030-evb`,
+`qemu-ast10x0-i2c` @ `73c48a0`):
+
+- **Green:** the AES core compiles and links into the QEMU image; all
+  SHA-2/HMAC KATs still pass (no regression from the AES/façade/context/device
+  changes).
+- **Failing:** every AES KAT case — first case `ecb-128 encrypt` returns
+  `Ok` with an **all-zero** `dst` (expected `3ad77bb4…`). Deterministic.
+
+Root cause — **observed in the emulator source, not inferred**: the upstream
+QEMU aspeed HACE model `hw/misc/aspeed_hace.c` implements **hash only**. It has
+no crypto data registers (only `R_HASH_SRC/DIGEST/KEY_BUFF/SRC_LEN`); the
+`R_CRYPT_CMD` handler (offset `0x10`, = our HACE10 start write) is literally:
+
+```c
+case R_CRYPT_CMD:
+    qemu_log_mask(LOG_UNIMP, "%s: Crypt commands not implemented\n", __func__);
+    if (ahc->raise_crypt_interrupt_workaround) { s->regs[R_STATUS] |= CRYPT_IRQ; ... }
+```
+
+So HACE00/04/08/0C writes fall through `default: break` (dropped) and HACE10
+merely sets `CRYPT_IRQ` without performing AES — exactly the observed
+"completes instantly, zero output." This **bisects decisively**: the fault is
+the emulator's scope, **not** the port's register/command code (cf. §2.2,
+which *was* a real layout-sensitive code fault; this is the opposite — an
+environment limitation, classified per the `stop-and-instrument` matrix as
+"out of this layer's scope, hand off with evidence").
+
+Consequences / decisions:
+
+- The AES core stays **compiled + spec-faithful but UNVERIFIED**. The NIST
+  AESAVS/CAVP correctness gate (§2.4, §3 item 7) is **blocked on real
+  hardware** — the physical AST1060 EVB (`--config=k_ast1060_evb`), or a QEMU
+  build that models HACE crypto. No code edit can pass it under
+  `--config=virt_ast10x0`; speculative edits are explicitly *not* the next
+  step (the engine being validated against does not exist in QEMU).
+- `hace_aes_test` must therefore be **hardware-only** — tagged so it does not
+  run (and falsely fail) under the QEMU config, mirroring the repo's
+  hardware-only test handling. Pending that gating decision it is a known,
+  documented red on QEMU, not a regression of any previously-green case.
+- A QEMU-side option (out of this goal's scope, recorded for completeness):
+  extend `aspeed_hace.c` to model the crypto path, or run against a vendor
+  QEMU that does. Not undertaken here.
 
 ---
 
