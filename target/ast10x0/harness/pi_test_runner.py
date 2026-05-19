@@ -13,7 +13,9 @@ stderr. Runs locally or is SCP'd to the Pi for remote test execution.
 import argparse
 import subprocess
 import sys
+import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 try:
@@ -75,11 +77,13 @@ def _upload_firmware(port: serial.Serial, firmware_path: Path) -> None:
     print(f"Uploaded {size} bytes ({padding} bytes padding)", file=sys.stderr)
 
 
+_stdout_lock = threading.Lock()
+
 _SUCCESS_SENTINEL = b"TEST_RESULT:PASS"
 _FAILURE_SENTINELS = [b"TEST_RESULT:FAIL", b"panic"]
 
 
-def _stream_uart(port: serial.Serial, timeout: int) -> bool:
+def _stream_uart(port: serial.Serial, timeout: int, lock=None) -> bool:
     port.timeout = 1.0
     deadline = time.time() + timeout if timeout else None
     buf = b""
@@ -90,8 +94,9 @@ def _stream_uart(port: serial.Serial, timeout: int) -> bool:
         data = port.read(1024)
         if data:
             try:
-                sys.stdout.buffer.write(data)
-                sys.stdout.buffer.flush()
+                with (lock or nullcontext()):
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
             except (BrokenPipeError, OSError):
                 return False
             buf += data
@@ -101,6 +106,63 @@ def _stream_uart(port: serial.Serial, timeout: int) -> bool:
                 if s in buf:
                     return False
             buf = buf[-256:]
+
+
+def _run_paired(args, firmware_path: Path, slave_firmware_path: Path) -> bool:
+    try:
+        port_b = serial.Serial(
+            args.slave_uart_device,
+            baudrate=args.baudrate,
+            timeout=1.0,
+            write_timeout=1.0,
+        )
+    except serial.SerialException as e:
+        print(f"Error: could not open {args.slave_uart_device}: {e}", file=sys.stderr)
+        return False
+
+    try:
+        port_a = serial.Serial(
+            args.uart_device,
+            baudrate=args.baudrate,
+            timeout=1.0,
+            write_timeout=1.0,
+        )
+    except serial.SerialException as e:
+        port_b.close()
+        print(f"Error: could not open {args.uart_device}: {e}", file=sys.stderr)
+        return False
+
+    try:
+        _sequence_to_fwspick_mode(args.slave_srst_pin, args.slave_fwspick_pin, port_b)
+        if not _wait_for_uart_ready(port_b):
+            return False
+        _upload_firmware(port_b, slave_firmware_path)
+
+        _sequence_to_fwspick_mode(args.srst_pin, args.fwspick_pin, port_a)
+        if not _wait_for_uart_ready(port_a):
+            return False
+        _upload_firmware(port_a, firmware_path)
+
+        results = [None, None]
+
+        def _monitor(idx, port):
+            results[idx] = _stream_uart(port, args.timeout, _stdout_lock)
+
+        threads = [
+            threading.Thread(target=_monitor, args=(0, port_a)),
+            threading.Thread(target=_monitor, args=(1, port_b)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        return bool(results[0] and results[1])
+    except KeyboardInterrupt:
+        return False
+    finally:
+        port_a.close()
+        port_b.close()
 
 
 def main() -> int:
@@ -145,6 +207,28 @@ def main() -> int:
         action="store_true",
         help="Skip GPIO sequences and firmware upload; stream raw UART bytes only",
     )
+    parser.add_argument(
+        "--slave-firmware",
+        default=None,
+        help="Slave firmware binary. When present, enables paired two-device mode.",
+    )
+    parser.add_argument(
+        "--slave-uart-device",
+        default=None,
+        help="Serial port for device B (e.g. /dev/ttyUSB1)",
+    )
+    parser.add_argument(
+        "--slave-srst-pin",
+        type=int,
+        default=None,
+        help="BCM GPIO pin connected to device B SRST",
+    )
+    parser.add_argument(
+        "--slave-fwspick-pin",
+        type=int,
+        default=None,
+        help="BCM GPIO pin connected to device B FWSPICK",
+    )
     args = parser.parse_args()
 
     if not args.stream_only:
@@ -156,6 +240,24 @@ def main() -> int:
             return 1
     else:
         firmware_path = None
+
+    if args.slave_firmware:
+        missing = [
+            name
+            for name, val in [
+                ("--slave-uart-device", args.slave_uart_device),
+                ("--slave-srst-pin", args.slave_srst_pin),
+                ("--slave-fwspick-pin", args.slave_fwspick_pin),
+            ]
+            if val is None
+        ]
+        if missing:
+            parser.error(f"paired mode requires: {', '.join(missing)}")
+        slave_firmware_path = Path(args.slave_firmware)
+        if not slave_firmware_path.exists():
+            print(f"Error: slave firmware not found: {slave_firmware_path}", file=sys.stderr)
+            return 1
+        return 0 if _run_paired(args, firmware_path, slave_firmware_path) else 1
 
     try:
         port = serial.Serial(

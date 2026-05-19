@@ -127,13 +127,12 @@ def _touch_lock_forever(host: str, stop: threading.Event) -> None:
 class UartMonitor:
     """Detokenizes and displays raw UART bytes. Pass/fail is determined by pi_test_runner.py exit code."""
 
-    def __init__(self, args: argparse.Namespace, elf_path: Path) -> None:
-        # elf_path is always derived on the host from firmware path; caller
-        # validates existence before constructing this object.
+    def __init__(self, args: argparse.Namespace, *elf_paths: Path) -> None:
         self.args = args
         self.log_file_handle = open(args.log_file, "w") if args.log_file else None
+        elf_args = [str(p) for p in elf_paths if p is not None]
         self.detokenizer = (
-            Detokenizer(str(elf_path)) if _PW_TOKENIZER_AVAILABLE else None
+            Detokenizer(*elf_args) if _PW_TOKENIZER_AVAILABLE and elf_args else None
         )
         self._token_parser = NestedMessageParser() if _PW_TOKENIZER_AVAILABLE else None
 
@@ -257,6 +256,15 @@ def _run_remote(
     else:
         remote_fw = None
 
+    remote_slave_fw = None
+    if args.slave_firmware:
+        slave_firmware_path = Path(args.slave_firmware)
+        remote_slave_fw = f"{remote_dir}/{slave_firmware_path.name}"
+        subprocess.run(
+            ["scp", "-q", str(slave_firmware_path), f"{host}:{remote_slave_fw}"],
+            check=True,
+        )
+
     remote_cmd = f"python3 -u {remote_dir}/pi_test_runner.py {uart_device}"
     if not args.parse_only:
         remote_cmd += f" {remote_fw}"
@@ -268,6 +276,14 @@ def _run_remote(
     )
     if args.parse_only:
         remote_cmd += " --stream-only"
+    if remote_slave_fw:
+        device_b = config["device_b"]
+        remote_cmd += (
+            f" --slave-firmware {remote_slave_fw}"
+            f" --slave-uart-device {device_b['serial_port']}"
+            f" --slave-srst-pin {device_b['srst_pin']}"
+            f" --slave-fwspick-pin {device_b['fwspick_pin']}"
+        )
 
     proc = _ssh_stream(host, remote_cmd)
     try:
@@ -348,8 +364,21 @@ def main() -> int:
     # When invoked via --run_under on a system_image_test, Bazel passes the
     # no-suffix symlink (e.g. threads_test → threads.elf); resolve it first.
     image = Path(args.firmware)
+
+    # When invoked via --run_under the firmware path has no suffix (it is the
+    # test-name symlink).  The system_image_test rule places a companion
+    # <name>.slave.elf symlink alongside it when slave_image is set; detecting
+    # that file is how we enter paired mode without any extra CLI arguments.
+    args.slave_firmware = None
+    slave_elf_path = None
     if not image.suffix:
+        slave_symlink = image.parent / (image.name + ".slave.elf")
+        if slave_symlink.exists():
+            slave_elf = slave_symlink.resolve()
+            slave_elf_path = slave_elf
+            args.slave_firmware = str(slave_elf.with_suffix(".bin"))
         image = image.resolve()
+
     elf_path = image.with_suffix(".elf")
     args.firmware = str(image.with_suffix(".bin"))
     if not elf_path.exists():
@@ -359,7 +388,7 @@ def main() -> int:
     args.pi_host = os.environ.get(AST1060_EVB_PI_HOST) or args.pi_host
 
     runner = Path(__file__).parent / "pi_test_runner.py"
-    monitor = UartMonitor(args, elf_path)
+    monitor = UartMonitor(args, elf_path, slave_elf_path)
 
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(130))
 
