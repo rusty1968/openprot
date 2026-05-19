@@ -537,8 +537,20 @@ paste! {
     gen_pin_pairs!(SCU6B0, 0x6B0, 31);
 }
 
-/// I2C1 pin group: SCL/SDA mux selection on SCU414[30:31].
+/// I2C1 pin group: SCL2/SDA2 mux selection on SCU414[30:31].
+///
+/// The SVD names these EnblSCL2FnPin/EnblSDA2FnPin, but they correspond to
+/// PAC peripheral I2c1 (controller 1, base 0x7e7b_0100). The SVD uses
+/// 1-based naming where "2" means "second bus", matching PAC I2c1.
 pub const PINCTRL_I2C1: &[PinctrlPin] = &[PIN_SCU414_30, PIN_SCU414_31];
+
+/// I2C2 pin group: SCL3/SDA3 mux selection on SCU418[0:1].
+///
+/// The SVD names these EnblSCL3FnPin/EnblSDA3FnPin, corresponding to
+/// PAC peripheral I2c2 (controller 2, base 0x7e7b_0180). On the Test
+/// Harness board, these pins are exposed on J15 and used for inter-device
+/// I2C communication between the two AST1060 daughter cards.
+pub const PINCTRL_I2C2: &[PinctrlPin] = &[PIN_SCU418_0, PIN_SCU418_1];
 
 /// Macro to safely modify a register bit (set or clear).
 macro_rules! modify_reg {

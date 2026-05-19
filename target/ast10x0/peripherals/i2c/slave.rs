@@ -127,11 +127,14 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
         if self.xfer_mode == I2cXferMode::DmaMode {
             self.regs().i2cs4c().read().dmarx_actual_len_byte().bits() as usize
         } else {
+            // Hardware includes the I2C address byte in the buffer count (packet mode,
+            // I2CC00 bit 20). Subtract 1 to report only the payload byte count.
             self.regs()
                 .i2cc0c()
                 .read()
                 .actual_rxd_pool_buffer_size()
-                .bits() as usize
+                .bits()
+                .saturating_sub(1) as usize
         }
     }
 
@@ -561,12 +564,17 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 });
             } else if sts == constants::AST_I2CS_TX_NAK | constants::AST_I2CS_STOP
                 || sts == constants::AST_I2CS_STOP
+                || sts
+                    == constants::AST_I2CS_SLAVE_MATCH
+                        | constants::AST_I2CS_TX_NAK
+                        | constants::AST_I2CS_STOP
             {
-                // S: (TX_NAK)|P
+                // S: (Sr) (TX_NAK)|P — master read completed with NAK then STOP
                 self.arm_slave_receive(&mut cmd);
                 unsafe {
                     self.regs().i2cs28().write(|w| w.bits(cmd));
                 }
+                return Some(SlaveEvent::Stop);
             } else {
                 // TODO packet slave sts
             }
