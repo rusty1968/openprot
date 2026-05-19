@@ -94,7 +94,7 @@ def _stream_uart(port: serial.Serial, timeout: int, lock=None) -> bool:
         data = port.read(1024)
         if data:
             try:
-                with (lock or nullcontext()):
+                with lock or nullcontext():
                     sys.stdout.buffer.write(data)
                     sys.stdout.buffer.flush()
             except (BrokenPipeError, OSError):
@@ -255,7 +255,10 @@ def main() -> int:
             parser.error(f"paired mode requires: {', '.join(missing)}")
         slave_firmware_path = Path(args.slave_firmware)
         if not slave_firmware_path.exists():
-            print(f"Error: slave firmware not found: {slave_firmware_path}", file=sys.stderr)
+            print(
+                f"Error: slave firmware not found: {slave_firmware_path}",
+                file=sys.stderr,
+            )
             return 1
         return 0 if _run_paired(args, firmware_path, slave_firmware_path) else 1
 

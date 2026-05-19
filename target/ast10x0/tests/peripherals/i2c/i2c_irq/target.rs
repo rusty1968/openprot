@@ -82,11 +82,12 @@ fn run_master() -> Result<(), &'static str> {
     master
         .read(SLAVE_ADDR, &mut rx)
         .map_err(|_| "test 2: master read failed")?;
-    if rx[0] != 0x55 {
-        pw_log::error!("test 2: got 0x{:02x}, expected 0x55", rx[0] as u32);
+    let [rx_byte] = rx;
+    if rx_byte != 0x55 {
+        pw_log::error!("test 2: got 0x{:02x}, expected 0x55", rx_byte as u32);
         return Err("test 2: rx data mismatch");
     }
-    pw_log::info!("Test 2 passed: rx=0x{:02x}", rx[0] as u32);
+    pw_log::info!("Test 2 passed: rx=0x{:02x}", rx_byte as u32);
 
     // ------------------------------------------------------------------
     // Test 3: single-byte write → slave Stop event after packet done

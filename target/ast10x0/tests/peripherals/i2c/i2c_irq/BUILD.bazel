@@ -53,7 +53,10 @@ rust_binary(
     edition = "2024",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = [":codegen", ":linker_script"] + COMMON_DEPS,
+    deps = [
+        ":codegen",
+        ":linker_script",
+    ] + COMMON_DEPS,
 )
 
 system_image(
@@ -113,7 +116,10 @@ rust_binary(
     edition = "2024",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = [":slave_codegen", ":slave_linker_script"] + COMMON_DEPS,
+    deps = [
+        ":slave_codegen",
+        ":slave_linker_script",
+    ] + COMMON_DEPS,
 )
 
 system_image(
