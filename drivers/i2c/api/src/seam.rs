@@ -3,12 +3,11 @@
 
 //! The abstract seam.
 //!
-//! The consumer-facing contract is **`embedded_hal::i2c::I2c`** — the
-//! canonical embedded-hal 1.0 bus-master trait. We deliberately do *not*
-//! reinvent a bespoke read/write trait: the client implements `I2c`, and the
-//! server's backend is any real platform driver that already implements `I2c`
-//! (`embedded_hal::i2c::I2c` is byte/slice-oriented, so a runtime-decoded wire
-//! request can drive it directly — no typestate-impedance shim needed).
+//! This seam covers both sides of I2C.
+//! Clients use **`embedded_hal::i2c::I2c`** for controller-side transfers, and
+//! target-side support is re-exported below from `openprot_hal_blocking`.
+//! That keeps the API small and reuses the standard traits and platform
+//! drivers we already have.
 //!
 //! Re-exported here so the server and per-target backend crates depend on this
 //! one seam definition rather than pinning `embedded-hal` independently.
@@ -18,10 +17,8 @@ pub use embedded_hal::i2c::{
     SevenBitAddress, TenBitAddress,
 };
 
-// The **target/slave seam** is reused verbatim from `openprot-hal-blocking`
-// — same principle as the master seam above: do not reinvent. The
-// server-runtime is generic over these (configure address / enable / drain);
-// the per-target backend implements them by delegating to the SoC driver.
+// Target-side traits are re-exported from `openprot_hal_blocking`.
+// The runtime stays generic, and each backend forwards to its platform driver.
 pub use openprot_hal_blocking::i2c_hardware::slave::{
     I2cSEvent, I2cSlaveBuffer, I2cSlaveCore, I2cSlaveInterrupts, SlaveStatus,
 };
@@ -29,14 +26,14 @@ pub use openprot_hal_blocking::i2c_hardware::{I2cBusRecovery, I2cHardwareCore};
 
 use crate::protocol::I2cError;
 
-/// Extension trait for slave-mode event polling with full event kind.
+/// Extension trait for fetching the next slave event with its full event kind.
 /// Enables backends to return both the hardware event kind (ReadRequest, Stop, etc.)
 /// alongside the rx length, so the server-runtime can propagate correct metadata.
 /// Default impl delegates to `poll_slave_data()` for backward compatibility.
 pub trait I2cSlaveEvent: I2cSlaveBuffer {
-    /// Poll slave interrupt; return both event kind and rx length (if data received).
+    /// Return the next slave event and rx length, if any.
     /// Default impl uses `poll_slave_data()` and reports DataReceived kind.
-    fn poll_slave_event(&mut self) -> Result<Option<(I2cSEvent, usize)>, Self::Error> {
+    fn try_next_slave_event(&mut self) -> Result<Option<(I2cSEvent, usize)>, Self::Error> {
         Ok(self.poll_slave_data()?.map(|n| (I2cSEvent::SlaveWrRecvd, n)))
     }
 }

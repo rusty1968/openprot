@@ -114,11 +114,11 @@ impl<Y: FnMut(u32)> I2cSlaveBuffer<SevenBitAddress> for Ast1060I2c<'_, Y> {
 }
 
 impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
-    /// Poll slave interrupt and return both event kind and rx length (if any).
+    /// Return the next slave event and rx length, if any.
     /// This exposes the full hardware event (ReadRequest, Stop, etc.) alongside
     /// the receive count, so the server-runtime can store the actual event kind
     /// rather than always hardcoding DataReceived.
-    pub fn poll_slave_event(&mut self) -> Result<Option<(I2cSEvent, usize)>, I2cError> {
+    pub fn try_next_slave_event(&mut self) -> Result<Option<(I2cSEvent, usize)>, I2cError> {
         let Some(ev) = self.handle_slave_interrupt() else {
             return Ok(None);
         };

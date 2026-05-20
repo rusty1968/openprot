@@ -121,7 +121,7 @@ where
             let acked = w.pending_signals & irq_signals;
             if let Some(bus) = buses.iter_mut().find(|b| b.irq == irq) {
                 if bus.notif_enabled {
-                    match bus.driver.poll_slave_event() {
+                    match bus.driver.try_next_slave_event() {
                         Ok(Some((kind, _))) => {
                             // Store the actual hardware event kind
                             bus.rx_event_kind = match kind {
@@ -158,7 +158,7 @@ where
                             pw_log::debug!("slave IRQ fired but no data ready — spurious or non-data event");
                         }
                         Err(_) => {
-                            pw_log::error!("poll_slave_event failed");
+                            pw_log::error!("try_next_slave_event failed");
                         }
                     }
                 }
