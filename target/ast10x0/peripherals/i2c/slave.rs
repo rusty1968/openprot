@@ -351,7 +351,11 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
 
             if let Some(dma_buf) = self.slave_dma_buf.as_deref() {
                 let src_len = to_read.min(dma_buf.len().saturating_sub(1));
-                buffer[..src_len].copy_from_slice(&dma_buf[1..1 + src_len]);
+                if let (Some(src), Some(dst)) =
+                    (dma_buf.get(1..1 + src_len), buffer.get_mut(..src_len))
+                {
+                    dst.copy_from_slice(src);
+                }
             }
 
             // Re-arm slave DMA for next receive
@@ -381,7 +385,10 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
             Ok(to_read)
         } else {
             // byte mode
-            buffer[0] = self.regs().i2cc08().read().rx_byte_buffer().bits();
+            let byte = self.regs().i2cc08().read().rx_byte_buffer().bits();
+            if let Some(slot) = buffer.get_mut(0) {
+                *slot = byte;
+            }
 
             let cmd = constants::AST_I2CS_ACTIVE_ALL;
             self.regs().i2cs28().write(|w| unsafe { w.bits(cmd) });
