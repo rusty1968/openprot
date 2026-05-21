@@ -72,6 +72,7 @@ rust_app(
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     deps = [
         "//services/mctp/api:mctp_api",
+        "//services/mctp/echo:mctp_echo",
         "//services/mctp/client:mctp_client",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",

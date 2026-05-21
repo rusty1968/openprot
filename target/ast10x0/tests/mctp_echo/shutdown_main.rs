@@ -8,7 +8,7 @@ use userspace::entry;
 use userspace::syscall;
 
 #[entry]
-fn entry() -> ! {
+fn entry() {
     let _ = syscall::debug_shutdown(Ok(()));
     loop {}
 }

@@ -7,7 +7,7 @@
 use userspace::entry;
 
 #[entry]
-fn entry() -> ! {
+fn entry() {
     pw_log::info!("mctp_echo test server app started");
     loop {}
 }
