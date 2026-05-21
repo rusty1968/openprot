@@ -37,21 +37,21 @@
 //!
 //! # Handle Binding
 //!
-//! The IPC handle is provided by the `app_package` Bazel rule, which generates
-//! `app_mctp_server::handle::MCTP` from the system configuration.
+//! The IPC handles are provided by the `app_package` Bazel rule, which
+//! generates `app_mctp_server::handle::*` from the system configuration.
 
 #![no_main]
 #![no_std]
 
-use core::{cell::RefCell, ops::DerefMut};
-
-use ast10x0_serial_direct::Ast10x0DirectSerial;
-use embedded_io::{Read, Write};
-use mctp_lib::Sender;
+use i2c_api::SlaveEventKind;
+use i2c_client::I2cClient;
+use i2c_client_ipc::IpcTransport;
 use openprot_mctp_api::wire::{MctpRequestHeader, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE, MAX_PAYLOAD_SIZE};
 use openprot_mctp_api::ResponseCode;
 use openprot_mctp_server::dispatch;
+use openprot_mctp_transport_i2c::{I2cSender, MctpI2cReceiver};
 
+use pw_status::Error;
 use pw_status::Result;
 use userspace::entry;
 use userspace::syscall::{self, Signals};
@@ -60,48 +60,9 @@ use userspace::time::Instant;
 use app_mctp_server::{handle, signals};
 
 const OWN_EID: u8 = 8;
-
-struct SerialSender<'a, T> {
-    serial: &'a RefCell<T>,
-    serial_handler: mctp_lib::serial::MctpSerialHandler,
-}
-
-impl<'a, T: Read + Write> SerialSender<'a, T> {
-    fn new(serial: &'a RefCell<T>) -> Self {
-        Self {
-            serial,
-            serial_handler: mctp_lib::serial::MctpSerialHandler::new(),
-        }
-    }
-}
-
-impl<T: Read + Write> Sender for SerialSender<'_, T> {
-    fn send_vectored(
-        &mut self,
-        mut fragmenter: mctp_lib::fragment::Fragmenter,
-        payload: &[&[u8]],
-    ) -> mctp::Result<mctp::Tag> {
-        loop {
-            let mut pkt = [0u8; mctp_lib::serial::MTU_MAX];
-            match fragmenter.fragment_vectored(payload, &mut pkt) {
-                mctp_lib::fragment::SendOutput::Packet(p) => {
-                    self.serial_handler
-                        .send_sync(p, &mut self.serial.borrow_mut().deref_mut())?;
-                    self.serial
-                        .borrow_mut()
-                        .flush()
-                        .map_err(|_| mctp::Error::TxFailure)?;
-                }
-                mctp_lib::fragment::SendOutput::Complete { tag, .. } => break Ok(tag),
-                mctp_lib::fragment::SendOutput::Error { err, .. } => break Err(err),
-            }
-        }
-    }
-
-    fn get_mtu(&self) -> usize {
-        mctp_lib::serial::MTU_MAX
-    }
-}
+const OWN_I2C_ADDR: u8 = 0x10;
+const REMOTE_I2C_ADDR: u8 = 0x42;
+const I2C_RX_MAX: usize = MAX_PAYLOAD_SIZE;
 
 // ---------------------------------------------------------------------------
 // Server loop
@@ -109,12 +70,27 @@ impl<T: Read + Write> Sender for SerialSender<'_, T> {
 
 fn mctp_server_loop() -> Result<()> {
     pw_log::info!("MCTP server starting");
+    let sender = I2cSender::new(
+        I2cClient::new(IpcTransport::new(handle::I2C)),
+        OWN_I2C_ADDR,
+        REMOTE_I2C_ADDR,
+    );
+    let mut i2c_rx_client = I2cClient::new(IpcTransport::new(handle::I2C));
+    let i2c_receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
 
-    let serial = RefCell::new(Ast10x0DirectSerial::new_uart5());
-    serial.borrow().enable_rx_data_available_interrupt();
+    if i2c_rx_client.configure_slave(OWN_I2C_ADDR).is_err() {
+        pw_log::error!("configure_slave failed");
+        return Err(Error::Internal);
+    }
+    if i2c_rx_client.enable_slave().is_err() {
+        pw_log::error!("enable_slave failed");
+        return Err(Error::Internal);
+    }
+    if i2c_rx_client.enable_notification().is_err() {
+        pw_log::error!("enable_notification failed");
+        return Err(Error::Internal);
+    }
 
-    let sender = SerialSender::<Ast10x0DirectSerial>::new(&serial);
-    let mut serial_reader = mctp_lib::serial::MctpSerialHandler::new();
     let mut server = openprot_mctp_server::Server::<_, 16>::new(
         mctp::Eid(OWN_EID),
         0,
@@ -124,20 +100,32 @@ fn mctp_server_loop() -> Result<()> {
     let mut request_buf = [0u8; MAX_REQUEST_SIZE];
     let mut response_buf = [0u8; MAX_RESPONSE_SIZE];
     let mut recv_buf = [0u8; MAX_PAYLOAD_SIZE];
+    let mut i2c_rx_buf = [0u8; I2C_RX_MAX];
 
     // Register event sources with the WaitGroup.
     // user_data=0 → IPC from a client  (MCTP channel READABLE)
-    // user_data=1 → UART interrupt notification (SERIAL IRQ)
+    // user_data=1 → I2C USER signal (slave data latched by i2c server)
     syscall::wait_group_add(handle::WG, handle::MCTP, Signals::READABLE, 0usize)?;
-    syscall::wait_group_add(handle::WG, handle::UART_IRQ, signals::UART, 1usize)?;
+    syscall::wait_group_add(handle::WG, handle::I2C, Signals::USER, 1usize)?;
 
     loop {
-        let ev = syscall::object_wait(handle::WG, Signals::READABLE, Instant::MAX)?;
+        let ev = syscall::object_wait(handle::WG, Signals::READABLE | Signals::USER, Instant::MAX)?;
 
         if ev.user_data == 1 {
-            // Inbound serial data: parse framed packet and feed to router.
-            if let Ok(pkt) = serial_reader.recv_sync(&mut serial.borrow_mut().deref_mut()) {
-                let _ = server.inbound(pkt);
+            // Inbound i2c data: fetch latched payload + metadata and feed to router.
+            match i2c_rx_client.slave_receive_with_metadata(&mut i2c_rx_buf) {
+                Ok(event) => {
+                    if event.kind == SlaveEventKind::DataReceived && event.data_len > 0 {
+                        if let Ok((pkt, _)) = i2c_receiver.decode(&i2c_rx_buf[..event.data_len]) {
+                            let _ = server.inbound(pkt);
+                        } else {
+                            pw_log::error!("i2c frame decode failed");
+                        }
+                    }
+                }
+                Err(_) => {
+                    pw_log::error!("slave_receive_with_metadata failed");
+                }
             }
         } else {
             // IPC from a client — channel_read is non-blocking here because

@@ -3,11 +3,10 @@
 
 // AST10x0 MCTP Server Configuration
 //
-// Single-app configuration for building the MCTP server runtime wrapper.
-// The process exposes:
-// - `mctp` channel handler for MCTP client requests
-// - `uart_irq` interrupt handle for serial RX notifications
-// - `wg` wait group used by the server event loop
+// Multi-app configuration:
+// - i2c_server: owns i2c hardware and runs i2c_server_runtime
+// - mctp_server: uses i2c transport over IPC + serves MCTP control channel
+// - mctp_echo: sample client
 {
     arch: {
         type: "armv7m",
@@ -21,6 +20,50 @@
         ram_size_bytes: 131072,
     },
     apps: [
+        {
+            name: "i2c_server",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "i2c_server_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "i2c",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "i2c2_irq",
+                            type: "interrupt",
+                            irqs: [
+                                {
+                                    name: "i2c2",
+                                    number: 112,
+                                },
+                            ],
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            name: "i2c_regs",
+                            type: "device",
+                            start_address: 0x7e7b0000,
+                            size_bytes: 0x4000,
+                        },
+                    ],
+                    threads: [
+                        {
+                            name: "i2c_server_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
+                    ],
+                },
+            ],
+        },
         {
             name: "mctp_server",
             flash_size_bytes: 196608,
@@ -38,22 +81,10 @@
                             type: "channel_handler",
                         },
                         {
-                            name: "uart_irq",
-                            type: "interrupt",
-                            irqs: [
-                                {
-                                    name: "uart",
-                                    number: 8,
-                                },
-                            ],
-                        },
-                    ],
-                    memory_mappings: [
-                        {
-                            name: "uart5",
-                            type: "device",
-                            start_address: 0x7e784000,
-                            size_bytes: 0x1000,
+                            name: "i2c",
+                            type: "channel_initiator",
+                            handler_process: "i2c_server_process",
+                            handler_object_name: "i2c",
                         },
                     ],
                     threads: [

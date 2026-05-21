@@ -20,16 +20,36 @@ rust_app(
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     visibility = ["//visibility:public"],
     deps = [
+        "//drivers/i2c/api:i2c_api",
+        "//drivers/i2c/client:i2c_client",
+        "//drivers/i2c/client-ipc:i2c_client_ipc",
         "//services/mctp/server:mctp_server_lib",
         "//services/mctp/api:mctp_api",
-        "//target/ast10x0/serial:ast10x0_serial_direct",
+        "//services/mctp/transport-i2c:mctp_transport_i2c",
         "@rust_crates//:mctp",
         "@rust_crates//:mctp-lib",
-        "@rust_crates//:embedded-io",
         "@pigweed//pw_kernel/syscall:syscall_user",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",
+    ],
+)
+
+rust_app(
+    name = "i2c_server",
+    srcs = ["i2c_server_main.rs"],
+    codegen_crate_name = "app_i2c_server",
+    edition = "2024",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//drivers/i2c/server-runtime:i2c_server_runtime",
+        "//target/ast10x0/backend/i2c:i2c_backend_ast10x0",
+        "//target/ast10x0/peripherals",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
     ],
 )
 
