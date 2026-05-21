@@ -8,7 +8,7 @@ use userspace::entry;
 use userspace::syscall;
 
 #[entry]
-fn entry() -> ! {
+fn entry() {
     // Smoke-test completion condition: if userspace reached this point,
     // the system image booted and app startup succeeded.
     let _ = syscall::debug_shutdown(Ok(()));
