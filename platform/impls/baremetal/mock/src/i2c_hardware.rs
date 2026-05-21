@@ -165,7 +165,7 @@
 //! ```
 
 use embedded_hal::i2c::{ErrorType, Operation, SevenBitAddress};
-use openprot_hal_blocking::i2c_hardware::{I2cHardwareCore, I2cMaster};
+use openprot_hal_blocking::i2c_hardware::{I2cBusRecovery, I2cHardwareCore, I2cMaster};
 
 /// Mock error type for I2C operations
 ///
@@ -592,7 +592,9 @@ impl I2cHardwareCore for MockI2cHardware {
     fn handle_interrupt(&mut self) {
         // No-op for mock
     }
+}
 
+impl I2cBusRecovery for MockI2cHardware {
     /// Recover the I2C bus from error conditions
     ///
     /// Attempts to recover the I2C bus from stuck or error conditions
@@ -613,7 +615,7 @@ impl I2cHardwareCore for MockI2cHardware {
     ///
     /// ```text
     /// use openprot_platform_mock::i2c_hardware::MockI2cHardware;
-    /// use openprot_hal_blocking::i2c_hardware::I2cHardwareCore;
+    /// use openprot_hal_blocking::i2c_hardware::I2cBusRecovery;
     ///
     /// let mut mock = MockI2cHardware::new();
     /// assert!(mock.recover_bus().is_ok());
@@ -622,9 +624,6 @@ impl I2cHardwareCore for MockI2cHardware {
     /// let mut failing_mock = MockI2cHardware::new_failing();
     /// assert!(failing_mock.recover_bus().is_err());
     /// ```
-}
-
-impl I2cBusRecovery for MockI2cHardware {
     fn recover_bus(&mut self) -> Result<(), Self::Error> {
         self.check_success()
     }
@@ -1116,7 +1115,7 @@ where
         ResetId = crate::system_control::MockResetId,
     >,
 {
-    fn recover_bus(&mut self) -> Result<(), Self::Error> {
+    fn recover_bus(&mut self) -> Result<(), <Self as ErrorType>::Error> {
         self.base_hardware.recover_bus()
     }
 }
