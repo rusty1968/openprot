@@ -169,8 +169,8 @@ rust_binary(
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",
-        "@rust_crates//:pldm-common",
-        "@rust_crates//:pldm-interface",
+        "@pldm_lib//pldm-common",
+        "@pldm_lib//pldm-interface",
     ],
 )
 
@@ -212,7 +212,7 @@ rust_binary(
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",
-        "@rust_crates//:pldm-common",
-        "@rust_crates//:pldm-interface",
+        "@pldm_lib//pldm-common",
+        "@pldm_lib//pldm-interface",
     ],
 )

@@ -12,8 +12,8 @@ rust_library(
     edition = "2024",
     deps = [
         "//services/mctp/api:mctp_api",
-        "@rust_crates//:pldm-common",
-        "@rust_crates//:pldm-interface",
+        "@pldm_lib//pldm-common",
+        "@pldm_lib//pldm-interface",
     ],
 )
 
