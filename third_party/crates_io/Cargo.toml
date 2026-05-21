@@ -53,6 +53,10 @@ openprot-hal-blocking = { git = "https://github.com/rusty1968/openprot.git", rev
 heapless = { version = "0.9", default-features = false }
 mctp = { git = "https://github.com/CodeConstruct/mctp-rs.git" }
 mctp-lib = { git = "https://github.com/OpenPRoT/mctp-lib.git", branch = "9e-buildup" }
+pldm-lib = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
+pldm-common = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
+pldm-interface = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
+nb = "1.0"
 # Pin to match Hubris ecosystem
 rand_core = { version = "0.9", default-features = false }
 sec1 = { version = "0.7.3" }
