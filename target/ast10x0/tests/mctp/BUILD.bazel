@@ -59,6 +59,7 @@ rust_app(
     deps = [
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
+        "@pigweed//pw_status/rust:pw_status",
     ],
 )
 
@@ -92,5 +93,6 @@ system_image(
 system_image_test(
     name = "mctp_boot_test",
     image = ":mctp_boot",
+    tags = ["qemu_only"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
 )

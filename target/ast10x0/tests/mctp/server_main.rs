@@ -5,6 +5,7 @@
 #![no_std]
 
 use app_mctp_server_boot::handle;
+use pw_status::Error;
 use userspace::entry;
 use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
@@ -13,8 +14,13 @@ use userspace::time::Instant;
 fn entry() {
     pw_log::info!("mctp_server boot smoke app started");
 
-    if syscall::wait_group_add(handle::WG, handle::MCTP, Signals::READABLE, 0usize).is_err() {
-        pw_log::error!("wait_group_add failed");
+    if syscall::wait_group_add(handle::WG, handle::MCTP, Signals::READABLE, 0usize)
+        .inspect_err(|_e| {
+            pw_log::error!("wait_group_add failed");
+            let _ = syscall::debug_shutdown(Err(Error::Internal));
+        })
+        .is_err()
+    {
         loop {}
     }
 
