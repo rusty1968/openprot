@@ -57,7 +57,7 @@ use userspace::entry;
 use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
 
-use app_mctp_server::{handle, signals};
+use app_mctp_server::handle;
 
 const OWN_EID: u8 = 8;
 const OWN_I2C_ADDR: u8 = 0x10;
@@ -113,7 +113,7 @@ fn mctp_server_loop() -> Result<()> {
 
         if ev.user_data == 1 {
             // Inbound i2c data: fetch latched payload + metadata and feed to router.
-            match i2c_rx_client.slave_receive_with_metadata(&mut i2c_rx_buf) {
+            match i2c_rx_client.slave_receive(&mut i2c_rx_buf) {
                 Ok(event) => {
                     if event.kind == SlaveEventKind::DataReceived && event.data_len > 0 {
                         if let Ok((pkt, _)) = i2c_receiver.decode(&i2c_rx_buf[..event.data_len]) {
@@ -124,7 +124,7 @@ fn mctp_server_loop() -> Result<()> {
                     }
                 }
                 Err(_) => {
-                    pw_log::error!("slave_receive_with_metadata failed");
+                    pw_log::error!("slave_receive failed");
                 }
             }
         } else {
@@ -161,9 +161,10 @@ fn mctp_server_loop() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[entry]
-fn entry() -> ! {
+fn entry() {
     if let Err(e) = mctp_server_loop() {
-        ast10x0_userspace_runtime::fail_stop("mctp_server", e as u32);
+        pw_log::error!("mctp_server exiting with error");
+        let _ = syscall::process_exit(e as u32);
     }
     loop {}
 }
