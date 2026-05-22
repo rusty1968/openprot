@@ -6,7 +6,7 @@
 
 use openprot_mctp_api::Stack;
 use openprot_mctp_echo::{prepare_listener, run};
-use openprot_mctp_client::IpcMctpClient;
+use openprot_mctp_client_ipc::IpcMctpClient;
 use pw_status::Error;
 use userspace::{entry, syscall};
 
@@ -16,7 +16,7 @@ fn entry() {
     let mut listener = match prepare_listener(&stack) {
         Ok(listener) => listener,
         Err(e) => {
-            pw_log::error!("echo setup failed: code={}", e.code as u8);
+            pw_log::error!("echo setup failed: code={}", e.code as u32);
             let _ = syscall::debug_shutdown(Err(Error::Internal));
             loop {}
         }

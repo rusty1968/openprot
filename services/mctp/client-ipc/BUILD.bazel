@@ -4,10 +4,11 @@
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 rust_library(
-    name = "mctp_client",
+    name = "mctp_client_ipc",
     srcs = ["src/lib.rs"],
-    crate_name = "openprot_mctp_client",
+    crate_name = "openprot_mctp_client_ipc",
     edition = "2024",
+    tags = ["kernel"],
     visibility = ["//visibility:public"],
     deps = [
         "//services/mctp/api:mctp_api",

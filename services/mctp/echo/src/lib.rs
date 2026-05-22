@@ -36,7 +36,7 @@ where
                 let _ = resp.send(msg);
             }
             Err(e) => {
-                pw_log::error!("echo recv failed: code={}", e.code as u8);
+                pw_log::error!("echo recv failed: code={}", e.code as u32);
             }
         }
     }

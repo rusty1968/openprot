@@ -9,7 +9,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use openprot_mctp_client::IpcMctpClient;
+//! use openprot_mctp_client_ipc::IpcMctpClient;
 //! use openprot_mctp_api::MctpClient;
 //!
 //! let client = IpcMctpClient::new(handle::MCTP);
@@ -87,8 +87,6 @@ impl IpcMctpClient {
         if req_len > MAX_REQUEST_SIZE {
             return Err(MctpError::from_code(ResponseCode::InternalError));
         }
-        // Copy request to a local buffer to avoid split-borrow when passing
-        // both an immutable send slice and mutable receive slice from `inner`.
         let req_copy = {
             let inner = self.inner.borrow();
             let mut buf = [0u8; MAX_REQUEST_SIZE];
@@ -104,7 +102,6 @@ impl IpcMctpClient {
         )
         .map_err(|_| MctpError::from_code(ResponseCode::InternalError))
     }
-
 }
 
 impl MctpClient for IpcMctpClient {

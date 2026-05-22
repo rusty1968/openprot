@@ -73,7 +73,7 @@ rust_app(
     deps = [
         "//services/mctp/api:mctp_api",
         "//services/mctp/echo:mctp_echo",
-        "//services/mctp/client:mctp_client",
+        "//services/mctp/client-ipc:mctp_client_ipc",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",

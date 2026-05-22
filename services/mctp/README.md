@@ -8,8 +8,8 @@ This directory contains the OpenPRoT MCTP service stack: API traits and wire pro
   - Crate: `openprot_mctp_api`
   - Defines shared MCTP types, error model, traits, and wire format.
   - Includes the high-level `Stack` facade in `api/src/stack.rs`.
-- `client/`:
-  - Crate: `openprot_mctp_client`
+- `client-ipc/`:
+  - Crate: `openprot_mctp_client_ipc`
   - Pigweed IPC implementation of the `MctpClient` trait.
 - `server/`:
   - Crate: `openprot_mctp_server`
@@ -31,7 +31,7 @@ openprot_mctp_api::Stack<C>
   |
   | C: MctpClient
   v
-openprot_mctp_client::IpcMctpClient (or another MctpClient impl)
+openprot_mctp_client_ipc::IpcMctpClient (or another MctpClient impl)
   |
   | IPC request/response wire protocol
   v
@@ -61,8 +61,8 @@ Transport (serial/I2C/etc.)
   - `StackReqChannel`
   - `StackRespChannel`
 
-### `client` (`//services/mctp/client:mctp_client`)
-- Implements `MctpClient` as `IpcMctpClient`.
+### `client-ipc` (`//services/mctp/client-ipc:mctp_client_ipc`)
+- Implements `MctpClient` as `IpcMctpClient` over Pigweed IPC.
 - Uses Pigweed `channel_transact` for synchronous IPC.
 - Encodes requests and decodes responses with `openprot_mctp_api::wire`.
 
@@ -84,7 +84,7 @@ From workspace root:
 ```sh
 # Build core crates
 bazel build //services/mctp/api:mctp_api \
-            //services/mctp/client:mctp_client \
+            //services/mctp/client-ipc:mctp_client_ipc \
             //services/mctp/server:mctp_server_lib \
             //services/mctp/transport-serial:mctp_transport_serial
 
