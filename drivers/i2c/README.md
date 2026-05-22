@@ -188,7 +188,7 @@ loop {
   responder cannot distinguish `Stop` event (transaction boundary)
 - ❌ Source address extraction — `rx_source` hardcoded to `0xFF`; responder
   cannot identify which requester sent the message
-- ❌ `poll_slave_event()` missing from HAL — backend must return event kind
+- ❌ `try_next_slave_event()` missing from HAL — backend must return event kind
   alongside rx length so server-runtime can store it
 
 **Post-demo (not blocking):**
