@@ -1,44 +1,9 @@
 // Licensed under the Apache-2.0 license
 
-//! MCTP Server — IPC Dispatch Loop
+//! MCTP Server — IPC Dispatch Loop (peer role)
 //!
-//! Userspace service that receives MCTP requests over a Pigweed IPC channel,
-//! dispatches them to the MCTP server core, and responds with results.
-//!
-//! # Architecture
-//!
-//! ```text
-//! ┌─ Client ──────────────────────────┐
-//! │ channel_transact(request)         │
-//! └──────────────┬────────────────────┘
-//!                │ IPC channel
-//!                ▼
-//! ┌─ This Server ─────────────────────┐
-//! │ object_wait(READABLE)             │
-//! │ channel_read → MctpRequestHeader  │
-//! │ dispatch_mctp_op(op, server)      │
-//! │ channel_respond ← MctpRespHeader  │
-//! └──────────────┬────────────────────┘
-//!                │ mctp-stack Router
-//!                ▼
-//! ┌─ I2C Transport ──────────────────┐
-//! │ I2cSender → I2C Server IPC      │
-//! └──────────────────────────────────┘
-//! ```
-//!
-//! # IPC Pattern
-//!
-//! Follows the same loop as `services/i2c/server/src/main.rs`:
-//!
-//! 1. `object_wait(handle, READABLE)` — block until a client sends a request
-//! 2. `channel_read(handle)` — read the raw request bytes
-//! 3. Parse `MctpRequestHeader`, dispatch via `dispatch_mctp_op`
-//! 4. `channel_respond(handle)` — send response header + data
-//!
-//! # Handle Binding
-//!
-//! The IPC handles are provided by the `app_package` Bazel rule, which
-//! generates `app_mctp_server::handle::*` from the system configuration.
+//! Same service behavior as `main.rs`, but with complementary I2C addressing
+//! for the second board in dual-EVB tests.
 
 #![no_main]
 #![no_std]
@@ -46,8 +11,8 @@
 use i2c_api::SlaveEventKind;
 use i2c_client::I2cClient;
 use i2c_client_ipc::IpcTransport;
-use openprot_mctp_api::wire::{self, MctpOp, MctpRequestHeader, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE, MAX_PAYLOAD_SIZE};
-use openprot_mctp_api::{Handle, ResponseCode};
+use openprot_mctp_api::wire::{self, MctpRequestHeader, MAX_PAYLOAD_SIZE, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE};
+use openprot_mctp_api::ResponseCode;
 use openprot_mctp_server::dispatch;
 use openprot_mctp_transport_i2c::{I2cSender, MctpI2cReceiver};
 
@@ -57,19 +22,15 @@ use userspace::entry;
 use userspace::syscall::{self, Signals};
 use userspace::time::{Clock, Duration, Instant, SystemClock};
 
-use app_mctp_server::handle;
+use app_mctp_server_peer::handle;
 
-const OWN_EID: u8 = 8;
-const OWN_I2C_ADDR: u8 = 0x10;
-const REMOTE_I2C_ADDR: u8 = 0x42;
+const OWN_EID: u8 = 9;
+const OWN_I2C_ADDR: u8 = 0x42;
+const REMOTE_I2C_ADDR: u8 = 0x10;
 const I2C_RX_MAX: usize = MAX_PAYLOAD_SIZE;
 
-// ---------------------------------------------------------------------------
-// Server loop
-// ---------------------------------------------------------------------------
-
 fn mctp_server_loop() -> Result<()> {
-    pw_log::info!("MCTP server starting");
+    pw_log::info!("MCTP server peer starting");
     let sender = I2cSender::new(
         I2cClient::new(IpcTransport::new(handle::I2C)),
         OWN_I2C_ADDR,
@@ -91,30 +52,22 @@ fn mctp_server_loop() -> Result<()> {
         return Err(Error::Internal);
     }
 
-    let mut server = openprot_mctp_server::Server::<_, 16>::new(
-        mctp::Eid(OWN_EID),
-        0,
-        sender,
-    );
+    let mut server = openprot_mctp_server::Server::<_, 16>::new(mctp::Eid(OWN_EID), 0, sender);
 
     let mut request_buf = [0u8; MAX_REQUEST_SIZE];
     let mut response_buf = [0u8; MAX_RESPONSE_SIZE];
     let mut recv_buf = [0u8; MAX_PAYLOAD_SIZE];
     let mut i2c_rx_buf = [0u8; I2C_RX_MAX];
+
+    syscall::wait_group_add(handle::WG, handle::MCTP, Signals::READABLE, 0usize)?;
+    syscall::wait_group_add(handle::WG, handle::I2C, Signals::USER, 1usize)?;
+
     struct PendingRecv {
         handle: Handle,
         deadline: Instant,
     }
 
-    // Pending blocking-recv: holds the MCTP handle whose IPC reply is deferred
-    // until I2C data arrives, or until its timeout deadline expires.
     let mut pending_recv: Option<PendingRecv> = None;
-
-    // Register event sources with the WaitGroup.
-    // user_data=0 → IPC from a client  (MCTP channel READABLE)
-    // user_data=1 → I2C USER signal (slave data latched by i2c server)
-    syscall::wait_group_add(handle::WG, handle::MCTP, Signals::READABLE, 0usize)?;
-    syscall::wait_group_add(handle::WG, handle::I2C, Signals::USER, 1usize)?;
 
     loop {
         let wait_deadline = pending_recv.as_ref().map(|pending| pending.deadline).unwrap_or(Instant::MAX);
@@ -136,7 +89,6 @@ fn mctp_server_loop() -> Result<()> {
         };
 
         if ev.user_data == 1 {
-            // Inbound i2c data: fetch latched payload + metadata and feed to router.
             match i2c_rx_client.slave_receive(&mut i2c_rx_buf) {
                 Ok(event) => {
                     if event.kind == SlaveEventKind::DataReceived && event.data_len > 0 {
@@ -151,36 +103,10 @@ fn mctp_server_loop() -> Result<()> {
                     pw_log::error!("slave_receive failed");
                 }
             }
-            // Satisfy any deferred blocking-recv now that inbound data was processed.
-            if let Some(pending) = pending_recv.as_ref() {
-                if let Some(meta) = server.try_recv(pending.handle, &mut recv_buf) {
-                    let payload = &recv_buf[..meta.payload_size];
-                    let response_len = openprot_mctp_api::wire::encode_recv_response(
-                        &mut response_buf,
-                        meta.msg_type,
-                        meta.msg_ic,
-                        meta.remote_eid,
-                        meta.msg_tag,
-                        payload,
-                    )
-                    .unwrap_or_else(|_| {
-                        openprot_mctp_api::wire::encode_error_response(
-                            &mut response_buf,
-                            ResponseCode::InternalError,
-                        )
-                        .unwrap_or(0)
-                    });
-                    syscall::channel_respond(handle::MCTP, &response_buf[..response_len])?;
-                    pending_recv = None;
-                }
-            }
         } else {
-            // IPC from a client — channel_read is non-blocking here because
-            // the WaitGroup only fires after READABLE is set.
             let len = syscall::channel_read(handle::MCTP, 0, &mut request_buf)?;
 
             if len < MctpRequestHeader::SIZE {
-                // Truncated request — respond with error
                 let resp = openprot_mctp_api::wire::MctpResponseHeader::error(ResponseCode::BadArgument);
                 response_buf[..openprot_mctp_api::wire::MctpResponseHeader::SIZE]
                     .copy_from_slice(&resp.to_bytes());
@@ -191,7 +117,6 @@ fn mctp_server_loop() -> Result<()> {
                 continue;
             }
 
-            // Recv op: try immediately; defer response if no message is ready.
             if MctpRequestHeader::from_bytes(&request_buf[..len])
                 .and_then(|h| h.operation())
                 .map_or(false, |op| matches!(op, MctpOp::Recv))
@@ -239,7 +164,6 @@ fn mctp_server_loop() -> Result<()> {
                                 .checked_add_duration(Duration::from_millis(timeout_millis as i64))
                                 .unwrap_or(Instant::MAX)
                         };
-                        // No message yet — defer the response until a message arrives or the deadline expires.
                         pending_recv = Some(PendingRecv {
                             handle: recv_handle,
                             deadline,
@@ -247,7 +171,6 @@ fn mctp_server_loop() -> Result<()> {
                     }
                 }
             } else {
-                // All other ops: dispatch and respond immediately.
                 let response_len = dispatch::dispatch_mctp_op(
                     &request_buf[..len],
                     &mut response_buf,
@@ -260,14 +183,10 @@ fn mctp_server_loop() -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
 #[entry]
 fn entry() {
     if let Err(e) = mctp_server_loop() {
-        pw_log::error!("mctp_server exiting with error");
+        pw_log::error!("mctp_server peer exiting with error");
         let _ = syscall::process_exit(e as u32);
     }
     loop {}

@@ -1,11 +1,7 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-// AST10x0 MCTP Server Configuration
-//
-// Multi-app configuration:
-// - i2c_server: owns i2c hardware and runs i2c_server_runtime
-// - mctp_server: uses i2c transport over IPC + serves MCTP control channel
+// AST10x0 MCTP Server Configuration (peer image)
 {
     arch: {
         type: "armv7m",
@@ -20,11 +16,11 @@
     },
     apps: [
         {
-            name: "i2c_server",
+            name: "i2c_server_peer",
             flash_size_bytes: 65536,
             processes: [
                 {
-                    name: "i2c_server_process",
+                    name: "i2c_server_peer_process",
                     ram_size_bytes: 65536,
                     objects: [
                         {
@@ -56,7 +52,7 @@
                     ],
                     threads: [
                         {
-                            name: "i2c_server_thread",
+                            name: "i2c_server_peer_thread",
                             kernel_stack_size_bytes: 4096,
                         },
                     ],
@@ -64,11 +60,11 @@
             ],
         },
         {
-            name: "mctp_server",
+            name: "mctp_server_peer",
             flash_size_bytes: 131072,
             processes: [
                 {
-                    name: "mctp_server_process",
+                    name: "mctp_server_peer_process",
                     ram_size_bytes: 65536,
                     objects: [
                         {
@@ -82,13 +78,13 @@
                         {
                             name: "i2c",
                             type: "channel_initiator",
-                            handler_process: "i2c_server_process",
+                            handler_process: "i2c_server_peer_process",
                             handler_object_name: "i2c",
                         },
                     ],
                     threads: [
                         {
-                            name: "mctp_server_thread",
+                            name: "mctp_server_peer_thread",
                             kernel_stack_size_bytes: 4096,
                         },
                     ],
@@ -96,23 +92,23 @@
             ],
         },
         {
-            name: "mctp_echo_client",
+            name: "mctp_echo_client_peer",
             flash_size_bytes: 65536,
             processes: [
                 {
-                    name: "mctp_echo_client_process",
+                    name: "mctp_echo_client_peer_process",
                     ram_size_bytes: 32768,
                     objects: [
                         {
                             name: "mctp",
                             type: "channel_initiator",
-                            handler_process: "mctp_server_process",
+                            handler_process: "mctp_server_peer_process",
                             handler_object_name: "mctp",
                         },
                     ],
                     threads: [
                         {
-                            name: "mctp_echo_client_thread",
+                            name: "mctp_echo_client_peer_thread",
                             kernel_stack_size_bytes: 2048,
                         },
                     ],
@@ -120,16 +116,16 @@
             ],
         },
         {
-            name: "mctp_shutdown_app",
+            name: "mctp_shutdown_app_peer",
             flash_size_bytes: 32768,
             processes: [
                 {
-                    name: "mctp_shutdown_process",
+                    name: "mctp_shutdown_peer_process",
                     ram_size_bytes: 16384,
                     objects: [],
                     threads: [
                         {
-                            name: "mctp_shutdown_thread",
+                            name: "mctp_shutdown_peer_thread",
                             kernel_stack_size_bytes: 2048,
                         },
                     ],

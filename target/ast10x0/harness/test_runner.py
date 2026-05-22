@@ -259,7 +259,8 @@ def _run_remote(
     remote_slave_fw = None
     if args.slave_firmware:
         slave_firmware_path = Path(args.slave_firmware)
-        remote_slave_fw = f"{remote_dir}/{slave_firmware_path.name}"
+        # Keep slave firmware path distinct even when both images share basename.
+        remote_slave_fw = f"{remote_dir}/slave_{slave_firmware_path.name}"
         subprocess.run(
             ["scp", "-q", str(slave_firmware_path), f"{host}:{remote_slave_fw}"],
             check=True,
@@ -369,18 +370,31 @@ def main() -> int:
     # test-name symlink).  The system_image_test rule places a companion
     # <name>.slave.elf symlink alongside it when slave_image is set; detecting
     # that file is how we enter paired mode without any extra CLI arguments.
+    # The ast10x0 wrapper also provides <name>.bin and <name>.slave.bin
+    # symlinks, which we prefer when present.
     args.slave_firmware = None
     slave_elf_path = None
     if not image.suffix:
+        bin_symlink = image.parent / (image.name + ".bin")
         slave_symlink = image.parent / (image.name + ".slave.elf")
+        slave_bin_symlink = image.parent / (image.name + ".slave.bin")
         if slave_symlink.exists():
             slave_elf = slave_symlink.resolve()
             slave_elf_path = slave_elf
-            args.slave_firmware = str(slave_elf.with_suffix(".bin"))
+            if slave_bin_symlink.exists():
+                args.slave_firmware = str(slave_bin_symlink.resolve())
+            else:
+                args.slave_firmware = str(slave_elf.with_suffix(".bin"))
         image = image.resolve()
 
     elf_path = image.with_suffix(".elf")
-    args.firmware = str(image.with_suffix(".bin"))
+    if not Path(args.firmware).suffix:
+        if bin_symlink.exists():
+            args.firmware = str(bin_symlink.resolve())
+        else:
+            args.firmware = str(image.with_suffix(".bin"))
+    else:
+        args.firmware = str(image.with_suffix(".bin"))
     if not elf_path.exists():
         print(f"Error: ELF not found at {elf_path}", file=sys.stderr)
         return 1
