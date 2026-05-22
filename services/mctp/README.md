@@ -82,22 +82,14 @@ Transport (serial/I2C/etc.)
 From workspace root:
 
 ```sh
-# Build core crates
-bazel build //services/mctp/api:mctp_api \
-            //services/mctp/client-ipc:mctp_client_ipc \
-            //services/mctp/server:mctp_server_lib \
-            //services/mctp/transport-serial:mctp_transport_serial
+# Embedded-safe MCTP production crates
+bazelisk build --config=virt_ast10x0 //services/mctp:mctp_embedded_all
 
-# API unit tests
-bazel test //services/mctp/api:mctp_api_test
-
-# Server tests
-bazel test //services/mctp/server:mctp_server_test \
-           //services/mctp/server:mctp_server_echo_test \
-           //services/mctp/server:mctp_server_dispatch_test \
-           //services/mctp/server:mctp_server_unit_test \
-           //services/mctp/server:mctp_server_integration_test
+# Host-side MCTP tests
+bazelisk test //services/mctp:mctp_host_tests
 ```
+
+Avoid using a broad wildcard with embedded config (for example, `//services/mctp/...`) because that can include host `rust_test` targets that require `std`/`test`.
 
 ## Integration Notes
 
