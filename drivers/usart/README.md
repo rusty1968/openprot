@@ -59,14 +59,18 @@ target-agnostic way.
 
 Operations are identified by a 1-byte opcode in `UsartRequestHeader` (8 bytes, `repr(C, packed)`):
 
+- `flags` low nibble carries protocol version (`0` currently).
+
 | Op | Value | Args |
 |---|---|---|
-| `Configure` | 0x01 | baud_rate split across `arg0`/`arg1` |
-| `Write` | 0x02 | payload bytes |
+| `Configure` | 0x01 | payload = `{ baud_rate: u32, parity: u8, stop_bits: u8, reserved: u16 }` |
+| `Write` | 0x02 | payload bytes (submitted, not guaranteed drained) |
 | `Read` | 0x03 | `arg0` = max bytes to read |
 | `GetLineStatus` | 0x04 | — |
-| `EnableInterrupts` | 0x05 | `arg0` = `IrqMask` bits |
-| `DisableInterrupts` | 0x06 | `arg0` = `IrqMask` bits |
+| `EnableInterrupts` | 0x05 | `arg0` = `IrqMask` bits — **server-internal**, not exposed by `UsartClient` |
+| `DisableInterrupts` | 0x06 | `arg0` = `IrqMask` bits — **server-internal**, not exposed by `UsartClient` |
+| `TryRead` | 0x07 | `arg0` = max bytes to read (non-blocking backend read with IRQ-assisted completion) |
+| `Drain` | 0x08 | wait for TX idle completion (IRQ-assisted) |
 
 `UsartResponseHeader` (4 bytes) carries a `UsartError` status code plus a payload length.
 All structures implement `zerocopy` traits for zero-copy serialization.
@@ -78,6 +82,7 @@ pub trait UsartBackend {
     fn configure(&mut self, config: UsartConfig) -> Result<(), BackendError>;
     fn write(&mut self, data: &[u8]) -> Result<usize, BackendError>;
     fn read(&mut self, out: &mut [u8]) -> Result<usize, BackendError>;
+  fn try_read(&mut self, out: &mut [u8]) -> Result<usize, BackendError>;
     fn line_status(&self) -> Result<LineStatus, BackendError>;
     fn enable_interrupts(&mut self, mask: IrqMask) -> Result<(), BackendError>;
     fn disable_interrupts(&mut self, mask: IrqMask) -> Result<(), BackendError>;
@@ -134,8 +139,10 @@ let mut backend = Backend::new();
 
 Two pieces, both platform-binding-agnostic within Pigweed kernel targets:
 
-- `dispatch_request<B: UsartBackend>(backend, request, response) -> usize` —
-  pure protocol→backend translator. No IPC, no OS dependency.
+- `dispatch_request<B: UsartBackend>(...) -> DispatchOutcome` —
+  pure protocol→backend translator. No IPC, no OS dependency. Returns either
+  an immediate response length or `Queued` when a `TryRead` request is parked
+  pending an RX interrupt.
 - `runtime::run<B>(backend, wg, irq, irq_signals) -> !` — the dispatch loop.
   Topology-agnostic: the binary registers each channel with its handle as
   `user_data`, and the loop derives the channel handle from
