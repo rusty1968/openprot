@@ -78,18 +78,22 @@ fn mctp_server_loop() -> Result<()> {
     let mut i2c_rx_client = I2cClient::new(IpcTransport::new(handle::I2C));
     let i2c_receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
 
-    if i2c_rx_client.configure_slave(OWN_I2C_ADDR).is_err() {
-        pw_log::error!("configure_slave failed");
-        return Err(Error::Internal);
-    }
-    if i2c_rx_client.enable_slave().is_err() {
+    i2c_rx_client
+        .configure_slave(OWN_I2C_ADDR)
+        .map_err(|_| {
+            pw_log::error!("configure_slave failed");
+            Error::Internal
+        })?;
+
+    i2c_rx_client.enable_slave().map_err(|_| {
         pw_log::error!("enable_slave failed");
-        return Err(Error::Internal);
-    }
-    if i2c_rx_client.enable_notification().is_err() {
+        Error::Internal
+    })?;
+
+    i2c_rx_client.enable_notification().map_err(|_| {
         pw_log::error!("enable_notification failed");
-        return Err(Error::Internal);
-    }
+        Error::Internal
+    })?;
 
     let mut server = openprot_mctp_server::Server::<_, 16>::new(
         mctp::Eid(OWN_EID),
