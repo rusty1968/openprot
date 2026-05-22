@@ -1,0 +1,35 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 1280,
+    },
+    kernel: {
+        flash_start_address: 0x00000500,
+        flash_size_bytes: 129792,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "nop_shutdown_app",
+            flash_size_bytes: 32768,
+            processes: [
+                {
+                    name: "nop_shutdown_process",
+                    ram_size_bytes: 16384,
+                    objects: [],
+                    threads: [
+                        {
+                            name: "nop_shutdown_thread",
+                            kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                },
+            ],
+        },
+    ],
+}
