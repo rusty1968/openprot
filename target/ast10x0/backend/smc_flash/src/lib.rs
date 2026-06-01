@@ -1,7 +1,10 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
+
+#[cfg(test)]
+extern crate std;
 
 use core::num::NonZero;
 

@@ -1,8 +1,29 @@
 # Licensed under the Apache-2.0 license
 # SPDX-License-Identifier: Apache-2.0
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
+
+rust_library(
+    name = "smc_flash_fsm_ast10x0",
+    srcs = ["src/fsm.rs"],
+    crate_name = "smc_flash_fsm",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//util/error",
+        "//util/types",
+    ],
+)
+
+rust_test(
+    name = "smc_flash_fsm_ast10x0_test",
+    crate = ":smc_flash_fsm_ast10x0",
+    target_compatible_with = select({
+        "//target/ast10x0:target_ast10x0": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
 
 rust_library(
     name = "smc_flash_backend_ast10x0",
