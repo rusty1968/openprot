@@ -157,15 +157,8 @@ impl<TNotifier: SmcNotify> Flash for SmcFlashMux<TNotifier> {
     fn erase(&mut self, addr: FlashAddress, size: PowerOf2Usize) -> Result<(), ErrorCode> {
         let (cfg, off) = self.resolve(addr, size.get())?;
         match cfg.controller {
-            SmcController::Fmc => {
-                let fmc = self
-                    .fmc
-                    .as_mut()
-                    .ok_or(error::FLASH_GENERIC_INVALID_SIZE)?;
-                let mut flash =
-                    SpiNorFlash::from_fmc_cs(fmc, cfg.cfg, cfg.cs).map_err(smc_to_error)?;
-                flash.erase_range(off, size.get()).map_err(smc_to_error)
-            }
+            // TODO: Enable FMC erase once policy and safety requirements are finalized.
+            SmcController::Fmc => Err(error::FLASH_SMC_WRITE_PROTECTED),
             SmcController::Spi1 => {
                 let spi = self
                     .spi1
@@ -190,15 +183,8 @@ impl<TNotifier: SmcNotify> Flash for SmcFlashMux<TNotifier> {
     fn program(&mut self, addr: FlashAddress, data: &[u8]) -> Result<(), ErrorCode> {
         let (cfg, off) = self.resolve(addr, data.len())?;
         match cfg.controller {
-            SmcController::Fmc => {
-                let fmc = self
-                    .fmc
-                    .as_mut()
-                    .ok_or(error::FLASH_GENERIC_INVALID_SIZE)?;
-                let mut flash =
-                    SpiNorFlash::from_fmc_cs(fmc, cfg.cfg, cfg.cs).map_err(smc_to_error)?;
-                flash.program(off, data).map(|_| ()).map_err(smc_to_error)
-            }
+            // TODO: Enable FMC program once policy and safety requirements are finalized.
+            SmcController::Fmc => Err(error::FLASH_SMC_WRITE_PROTECTED),
             SmcController::Spi1 => {
                 let spi = self
                     .spi1
