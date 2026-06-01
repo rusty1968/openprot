@@ -171,6 +171,13 @@ enum FlashBackend<'a> {
     Spi(&'a SpiReady),
 }
 
+fn writes_allowed_for_backend(is_fmc: bool) -> Result<(), SmcError> {
+    if is_fmc {
+        return Err(SmcError::WriteProtected);
+    }
+    Ok(())
+}
+
 /// Decoded JEDEC identifier returned by `READ_ID` (`0x9F`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JedecId {
@@ -294,14 +301,19 @@ impl<'a> SpiNorFlash<'a> {
         }
 
         let page_size = self.cfg.page_size as usize;
-        if page_size == 0 || (offset as usize) % page_size != 0 {
+        if page_size == 0 {
             return Err(SmcError::InvalidCapacity);
         }
         self.validate_range(offset, data.len())?;
 
         let mut written = 0usize;
         while written < data.len() {
-            let chunk_len = core::cmp::min(page_size, data.len() - written);
+            let chunk_offset = offset
+                .checked_add(written as u32)
+                .ok_or(SmcError::InvalidCapacity)?;
+            let off_in_page = (chunk_offset as usize) % page_size;
+            let page_remaining = page_size - off_in_page;
+            let chunk_len = core::cmp::min(page_remaining, data.len() - written);
             let chunk_offset = offset
                 .checked_add(written as u32)
                 .ok_or(SmcError::InvalidCapacity)?;
@@ -420,13 +432,23 @@ impl<'a> SpiNorFlash<'a> {
 
     fn validate_page_program(&self, offset: u32, data: &[u8]) -> Result<(), SmcError> {
         let page_size = self.cfg.page_size as usize;
-        if page_size == 0 || data.is_empty() || data.len() > page_size {
-            return Err(SmcError::InvalidCapacity);
-        }
-        if (offset as usize) % page_size != 0 {
-            return Err(SmcError::InvalidCapacity);
-        }
+        Self::check_page_program(page_size, offset, data.len())?;
         self.validate_range(offset, data.len())
+    }
+
+    fn check_page_program(page_size: usize, offset: u32, len: usize) -> Result<(), SmcError> {
+        if page_size == 0 || len == 0 || len > page_size {
+            return Err(SmcError::InvalidCapacity);
+        }
+        let off_in_page = (offset as usize) % page_size;
+        if off_in_page
+            .checked_add(len)
+            .ok_or(SmcError::InvalidCapacity)?
+            > page_size
+        {
+            return Err(SmcError::InvalidCapacity);
+        }
+        Ok(())
     }
 
     fn issue_command(&mut self, cmd: &[u8], payload: &[u8]) -> Result<(), SmcError> {
@@ -480,6 +502,10 @@ impl<'a> SpiNorFlash<'a> {
         }
         Err(SmcError::Timeout)
     }
+
+    fn ensure_writes_allowed(&self) -> Result<(), SmcError> {
+        writes_allowed_for_backend(matches!(self.backend, FlashBackend::Fmc(_)))
+    }
 }
 
 impl SpiNorFlashDevice for SpiNorFlash<'_> {
@@ -503,6 +529,7 @@ impl SpiNorFlashDevice for SpiNorFlash<'_> {
     }
 
     fn erase_sector(&mut self, offset: u32) -> Result<(), SmcError> {
+        self.ensure_writes_allowed()?;
         self.validate_sector_erase(offset)?;
 
         let profile = self.command_profile();
@@ -514,6 +541,7 @@ impl SpiNorFlashDevice for SpiNorFlash<'_> {
     }
 
     fn program_page(&mut self, offset: u32, data: &[u8]) -> Result<usize, SmcError> {
+        self.ensure_writes_allowed()?;
         self.validate_page_program(offset, data)?;
 
         let profile = self.command_profile();
@@ -668,5 +696,36 @@ mod tests {
         let expected = JedecId::from_bytes([0xEF, 0x40, 0x18]);
         let actual = JedecId::from_bytes([0xC2, 0x20, 0x19]);
         assert_eq!(expect_jedec_match(actual, expected), Err(SmcError::HardwareError));
+    }
+
+    #[test]
+    fn writes_allowed_policy_rejects_fmc() {
+        assert_eq!(writes_allowed_for_backend(true), Err(SmcError::WriteProtected));
+    }
+
+    #[test]
+    fn writes_allowed_policy_accepts_spi() {
+        assert_eq!(writes_allowed_for_backend(false), Ok(()));
+    }
+
+    #[test]
+    fn check_page_program_accepts_unaligned_within_page() {
+        assert_eq!(SpiNorFlash::check_page_program(256, 0x40, 0x20), Ok(()));
+    }
+
+    #[test]
+    fn check_page_program_rejects_crossing_page_boundary() {
+        assert_eq!(
+            SpiNorFlash::check_page_program(256, 0xF0, 0x40),
+            Err(SmcError::InvalidCapacity)
+        );
+    }
+
+    #[test]
+    fn check_page_program_rejects_zero_length() {
+        assert_eq!(
+            SpiNorFlash::check_page_program(256, 0x00, 0),
+            Err(SmcError::InvalidCapacity)
+        );
     }
 }
