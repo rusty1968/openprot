@@ -373,9 +373,12 @@ mod tests {
 
     // FMC window base for tests: 0x8000_0000; SPI_DMA_FLASH_MAP_BASE: 0x6000_0000
     // Expected fmc084 for CS0 offset 0x1000: 0x8000_0000 - 0x6000_0000 + 0x1000 = 0x2000_1000
-    const TEST_WINDOW: [usize; 2] = [0x8000_0000, 0x8100_0000]; // CS0=16MB, CS1 starts at +16MB
+    //
+    // `validate_dma_read` takes a single CS-local window base + that CS's
+    // capacity; the caller selects the chip select before calling. These tests
+    // therefore pass a scalar base (CS0 base unless noted).
+    const TEST_WINDOW: usize = 0x8000_0000;
     const TEST_CS0_CAP: usize = 16 * 1024 * 1024;
-    //const TEST_CAP: usize = 16 * 1024 * 1024;
 
     #[test]
     fn test_validate_dma_read_accepts_valid_request() {
@@ -388,13 +391,12 @@ mod tests {
 
     #[test]
     fn test_validate_dma_read_cs1_region() {
-        // Offset falls in CS1 region (past 16 MB CS0) on a 32 MB dual-CS controller.
-        const DUAL_WINDOW: [usize; 2] = [0x8000_0000, 0x8100_0000];
-        const CS0_CAP: usize = 16 * 1024 * 1024;
-        const TOTAL_CAP: usize = 32 * 1024 * 1024;
-        let cs1_offset = CS0_CAP + 0x1000;
+        // Caller has selected CS1: it passes the CS1 window base and a CS1-local
+        // offset (the function no longer derives the CS from the offset).
+        const CS1_WINDOW_BASE: usize = 0x8100_0000;
+        const CS1_CAP: usize = 16 * 1024 * 1024;
         let validated =
-            validate_dma_read(cs1_offset as u32, DUAL_WINDOW, CS0_CAP, 0x0008_0000, 512).unwrap();
+            validate_dma_read(0x1000, CS1_WINDOW_BASE, CS1_CAP, 0x0008_0000, 512).unwrap();
         // fmc084 = 0x8100_0000 - 0x6000_0000 + 0x1000 = 0x2100_1000
         assert_eq!(validated.flash_start, 0x2100_1000);
         assert_eq!(validated.dma_len_reg, 511);
