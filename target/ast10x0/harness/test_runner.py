@@ -101,11 +101,28 @@ def _acquire_lock(host: str, timeout: int = _LOCK_ACQUIRE_TIMEOUT) -> bool:
         f"[ $(( now - mtime )) -gt {_LOCK_STALE_THRESHOLD} ] && "
         f"rm -f {_LOCK_PATH}"
     )
+    attempt = 0
     while time.time() < deadline:
+        attempt += 1
         r = _ssh(host, create, capture_output=True)
         if r.returncode == 0:
+            print(f"[lock] acquired on attempt {attempt}", file=sys.stderr)
             return True
-        _ssh(host, stale_check, capture_output=True)
+        stderr_text = r.stderr.decode("utf-8", errors="replace").strip()
+        stdout_text = r.stdout.decode("utf-8", errors="replace").strip()
+        print(
+            f"[lock] attempt {attempt} failed (rc={r.returncode})"
+            + (f": stderr={stderr_text!r}" if stderr_text else "")
+            + (f" stdout={stdout_text!r}" if stdout_text else ""),
+            file=sys.stderr,
+        )
+        sr = _ssh(host, stale_check, capture_output=True)
+        if sr.returncode == 0:
+            print("[lock] stale lock removed", file=sys.stderr)
+        # Show current lock owner
+        owner = _ssh(host, f"cat {_LOCK_PATH} 2>/dev/null", capture_output=True)
+        if owner.returncode == 0 and owner.stdout.strip():
+            print(f"[lock] held by pid {owner.stdout.decode().strip()}", file=sys.stderr)
         time.sleep(2)
     print(f"Timeout acquiring Pi lock after {timeout}s", file=sys.stderr)
     return False
