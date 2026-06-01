@@ -56,22 +56,136 @@ use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
 
 use app_mctp_loopback_server::handle;
+use test_config::{REQUESTER_EID, RESPONDER_EID};
 
-/// EID for the requester's MCTP endpoint
-const REQUESTER_EID: u8 = 8;
+/// A parked `Recv` IPC: `channel_read` was called but `channel_respond` was
+/// deferred because the inbox was empty.  The WG entry for the channel has
+/// been removed to prevent the handler's persistent READABLE signal from
+/// causing the WG to spin.
+struct PendingRecv {
+    handle: Handle,
+}
 
-/// EID for the responder's MCTP endpoint
-const RESPONDER_EID: u8 = 42;
+/// Transfer all packets from a buffer into a server's inbound path, then clear.
+///
+/// This is the core loopback mechanism: packets that one server sent outbound
+/// get fed into the other server as inbound packets.
+fn transfer_and_clear<S: openprot_mctp_server::Sender, const N: usize>(
+    packets: &RefCell<PacketBuffer>,
+    dest: &mut openprot_mctp_server::Server<S, N>,
+) {
+    let pkts = packets.borrow();
+    pw_log::debug!("transfer_and_clear: {} packet(s)", pkts.len() as u32);
+    for pkt in pkts.iter() {
+        match dest.inbound(pkt) {
+            Ok(Some(cookie)) => {
+                pw_log::debug!("transfer_and_clear: pkt delivered to cookie {}", cookie.0 as u32);
+            }
+            Ok(None) => {
+                pw_log::debug!("transfer_and_clear: pkt discarded (no handler)");
+            }
+            Err(e) => {
+                pw_log::error!("transfer_and_clear: inbound failed: {}", e.code as u32);
+            }
+        }
+    }
+    drop(pkts);
+    packets.borrow_mut().clear();
+}
+
+/// Try to answer a previously parked `Recv` IPC now that new data may have
+/// arrived in `server`'s inbox.
+///
+/// Calls `transfer_and_clear(outbox, server)` first so that packets buffered
+/// in the outbox are injected lazily — at the moment we need them — rather
+/// than eagerly at Send-dispatch time (when the destination listener may not
+/// yet be registered).  This eliminates the startup race where GET_VERSION
+/// is silently dropped because it arrived before the responder registered.
+///
+/// If a message is available after transfer: encodes the response, calls
+/// `channel_respond` to wake the client, then re-adds the channel to the WG.
+/// If the inbox is still empty: **re-parks** and returns `Ok(())`.  Sending
+/// `InternalError` in this case would corrupt the client's state.
+fn try_service_pending<S: openprot_mctp_server::Sender, const N: usize>(
+    pending: &mut Option<PendingRecv>,
+    server: &mut openprot_mctp_server::Server<S, N>,
+    outbox: &RefCell<PacketBuffer>,
+    response_buf: &mut [u8],
+    recv_buf: &mut [u8],
+    wg_handle: u32,
+    chan_handle: u32,
+    wg_user_data: usize,
+) -> Result<()> {
+    let Some(p) = pending.take() else {
+        return Ok(());
+    };
+
+    pw_log::debug!(
+        "try_service_pending: chan={} wg={} ud={} pending_handle={}",
+        chan_handle as u32, wg_handle as u32, wg_user_data as u32, p.handle.0 as u32
+    );
+
+    // Lazily inject any buffered outbound packets from the other side before
+    // checking the inbox.  If this is the first time we check after a Send,
+    // the packets will be queued in the destination server's inbox here.
+    transfer_and_clear(outbox, server);
+
+    let Some(meta) = server.try_recv(p.handle, recv_buf) else {
+        // Inbox still empty — both sides parked simultaneously (startup race).
+        // Re-park and return; the Recv will be answered when data arrives.
+        pw_log::debug!(
+            "try_service_pending: try_recv(handle={}) miss — re-parking on chan={}",
+            p.handle.0 as u32, chan_handle as u32
+        );
+        *pending = Some(p);
+        return Ok(());
+    };
+
+    pw_log::debug!(
+        "try_service_pending: try_recv(handle={}) hit: type={} size={}",
+        p.handle.0 as u32, meta.msg_type as u32, meta.payload_size as u32
+    );
+    let payload = &recv_buf[..meta.payload_size];
+    let resp_len = wire::encode_recv_response(
+        response_buf,
+        meta.msg_type,
+        meta.msg_ic,
+        meta.remote_eid,
+        meta.msg_tag,
+        payload,
+    )
+    .unwrap_or_else(|_| {
+        wire::encode_error_response(response_buf, ResponseCode::InternalError)
+            .unwrap_or_default()
+    });
+
+    syscall::channel_respond(chan_handle, &response_buf[..resp_len])
+        .map_err(|e| {
+            pw_log::error!(
+                "try_service_pending: channel_respond(chan={}) failed: {}",
+                chan_handle as u32, e as u32
+            );
+            e
+        })?;
+
+    // channel_respond cleared READABLE on the handler, so re-adding to the WG
+    // will not cause an immediate spurious fire.
+    pw_log::debug!("try_service_pending: wait_group_add chan={} ud={}", chan_handle as u32, wg_user_data as u32);
+    syscall::wait_group_add(wg_handle, chan_handle, Signals::READABLE, wg_user_data)
+        .map_err(|e| {
+            pw_log::error!(
+                "try_service_pending: wait_group_add(wg={} chan={} ud={}) failed: {}",
+                wg_handle as u32, chan_handle as u32, wg_user_data as u32, e as u32
+            );
+            e
+        })?;
+
+    Ok(())
+}
 
 fn mctp_loopback_server_loop() -> Result<()> {
     pw_log::info!("MCTP loopback server starting");
 
-// Server side: receive a request and reply
-    let mut listener = stack.listener(MSG_TYPE_SPDM, 0).unwrap();
-    let (meta, payload, mut resp) = listener.recv(&mut buf).unwrap();
-    resp.send(&reply).unwrap();
-
-/*
     // Create two PacketBuffers — outboxes for each side
     let packets_req = RefCell::new(PacketBuffer::new());
     let packets_resp = RefCell::new(PacketBuffer::new());
@@ -301,7 +415,6 @@ fn mctp_loopback_server_loop() -> Result<()> {
             );
         }
     }
-    */
 }
 
 #[entry]

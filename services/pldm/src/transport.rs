@@ -20,7 +20,7 @@
 //! Callers only deal with PLDM bytes; the framing byte is inserted or stripped
 //! transparently.
 
-use openprot_mctp_api::{MctpClient, MctpListener, MctpRespChannel, Stack};
+use openprot_mctp_api::{MctpClient, MctpListener, MctpRespChannel, MctpReqChannel, Stack};
 use pldm_common::util::mctp_transport::MCTP_PLDM_MSG_TYPE;
 
 use crate::error::PldmServiceError;
@@ -168,7 +168,7 @@ impl<C: MctpClient> MctpPldmTransport<C> {
         // Receive into buf[1..]; discard the payload sub-slice to end the
         // mutable borrow before we touch buf[0].
         let recv_buf = buf.get_mut(1..).ok_or(PldmServiceError::Overflow)?;
-        let (meta, resp_channel) = listener
+        let (meta, mut resp_channel) = listener
             .recv(recv_buf)
             .map(|(m, _, r)| (m, r))
             .map_err(PldmServiceError::Mctp)?;

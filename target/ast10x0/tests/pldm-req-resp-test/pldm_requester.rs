@@ -20,28 +20,11 @@ use userspace::entry;
 use userspace::syscall;
 
 use app_pldm_requester::handle;
-
-/// Remote EID of the PLDM responder.
-const RESPONDER_EID: u8 = 42;
-
-/// Per-exchange MCTP timeout in milliseconds.
-const TIMEOUT_MILLIS: u32 = 5_000;
+use test_config::{RESPONDER_EID, TIMEOUT_MILLIS, CAPS};
 
 /// Maximum number of [`PldmRequester::run_once`] iterations before the test
 /// declares success.  Acts as a loop guard for the FD firmware-update phases.
 const MAX_ITERS: usize = 64;
-
-const CTRL_CMDS: [u8; 5] = [
-    PldmControlCmd::SetTid as u8,
-    PldmControlCmd::GetTid as u8,
-    PldmControlCmd::GetPldmCommands as u8,
-    PldmControlCmd::GetPldmVersion as u8,
-    PldmControlCmd::GetPldmTypes as u8,
-];
-
-static CAPS: [ProtocolCapability<'static>; 1] = [
-    ProtocolCapability::new(PldmSupportedType::Base, "1.1.0", &CTRL_CMDS).unwrap(),
-];
 
 fn pldm_requester_test() -> Result<(), &'static str> {
     let transport = MctpPldmTransport::new(IpcMctpClient::new(handle::MCTP));

@@ -1,6 +1,6 @@
 # Licensed under the Apache-2.0 license
 
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 load("@pigweed//pw_kernel/tooling:app_linker_script.bzl", "app_linker_script")
 load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_app_codegen")
@@ -37,6 +37,24 @@ rust_binary_no_panics_test(
     name = "no_panics_test",
     binary = ":pldm_req_resp_test",
     tags = ["kernel"],
+)
+
+# ---------------------------------------------------------------------------
+# Shared test configuration (EID constants)
+# ---------------------------------------------------------------------------
+
+rust_library(
+    name = "test_config",
+    srcs = ["config.rs"],
+    crate_name = "test_config",
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        "//services/pldm:pldm_service",
+        "@rust_crates//:pldm-common",
+        "@rust_crates//:pldm-interface",
+    ],
 )
 
 # ---------------------------------------------------------------------------
@@ -121,6 +139,7 @@ rust_binary(
     deps = [
         ":app_mctp_loopback_server",
         ":mctp_loopback_server_app.linker_script",
+        ":test_config",
         "//services/mctp/api:mctp_api",
         "@pigweed//pw_kernel/syscall:syscall_user",
         "@pigweed//pw_kernel/userspace",
@@ -163,14 +182,15 @@ rust_binary(
     deps = [
         ":app_pldm_requester",
         ":pldm_requester_app.linker_script",
+        ":test_config",
         "//services/mctp/api:mctp_api",
         "//services/pldm:pldm_service",
         "@pigweed//pw_kernel/syscall:syscall_user",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",
-        "@pldm_lib//pldm-common",
-        "@pldm_lib//pldm-interface",
+        "@rust_crates//:pldm-common",
+        "@rust_crates//:pldm-interface",
     ],
 )
 
@@ -206,13 +226,14 @@ rust_binary(
     deps = [
         ":app_pldm_responder",
         ":pldm_responder_app.linker_script",
+        ":test_config",
         "//services/mctp/api:mctp_api",
         "//services/pldm:pldm_service",
         "@pigweed//pw_kernel/syscall:syscall_user",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
         "@pigweed//pw_status/rust:pw_status",
-        "@pldm_lib//pldm-common",
-        "@pldm_lib//pldm-interface",
+        "@rust_crates//:pldm-common",
+        "@rust_crates//:pldm-interface",
     ],
 )

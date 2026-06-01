@@ -17,23 +17,9 @@ use pldm_interface::control_context::ProtocolCapability;
 use pw_log::{error, info};
 use userspace::entry;
 use userspace::syscall;
+use test_config::{RESPONDER_EID, TIMEOUT_MILLIS, CAPS};
 
 use app_pldm_responder::handle;
-
-/// Per-exchange MCTP timeout in milliseconds (0 = block indefinitely).
-const TIMEOUT_MILLIS: u32 = 0;
-
-const CTRL_CMDS: [u8; 5] = [
-    PldmControlCmd::SetTid as u8,
-    PldmControlCmd::GetTid as u8,
-    PldmControlCmd::GetPldmCommands as u8,
-    PldmControlCmd::GetPldmVersion as u8,
-    PldmControlCmd::GetPldmTypes as u8,
-];
-
-static CAPS: [ProtocolCapability<'static>; 1] = [
-    ProtocolCapability::new(PldmSupportedType::Base, "1.1.0", &CTRL_CMDS).unwrap(),
-];
 
 fn pldm_responder_loop() -> Result<(), &'static str> {
     info!("PLDM responder starting");
