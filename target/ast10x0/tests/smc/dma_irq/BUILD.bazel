@@ -64,7 +64,10 @@ system_image(
 system_image_test(
     name = "smc_irq_evb_test",
     image = ":smc_irq_test",
-    tags = ["hardware"],
+    tags = [
+        "hardware",
+        "evb",
+    ],
     target_compatible_with = select({
         "//target/ast10x0:qemu_enabled": ["@platforms//:incompatible"],
         "//conditions:default": [],
