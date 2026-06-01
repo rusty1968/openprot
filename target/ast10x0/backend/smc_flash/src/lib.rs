@@ -232,14 +232,14 @@ fn smc_to_error(err: SmcError) -> ErrorCode {
     match err {
         SmcError::InvalidCapacity => error::FLASH_GENERIC_ADDR_OUT_OF_BOUNDS,
         SmcError::WriteInProgress => error::FLASH_GENERIC_BUSY,
-        SmcError::WriteProtected => error::FLASH_GENERIC_BUSY,
-        SmcError::Timeout => error::FLASH_GENERIC_BUSY,
-        SmcError::ControllerNotReady => error::FLASH_GENERIC_BUSY,
-        SmcError::InvalidChipSelect => error::FLASH_GENERIC_ADDR_OUT_OF_BOUNDS,
-        SmcError::DeviceNotSupported => error::FLASH_GENERIC_INVALID_SIZE,
+        SmcError::WriteProtected => error::FLASH_SMC_WRITE_PROTECTED,
+        SmcError::Timeout => error::FLASH_SMC_TIMEOUT,
+        SmcError::ControllerNotReady => error::FLASH_SMC_NOT_READY,
+        SmcError::InvalidChipSelect => error::FLASH_SMC_INVALID_CS,
+        SmcError::DeviceNotSupported => error::FLASH_SMC_DEVICE_NOT_SUPPORTED,
         SmcError::HardwareError
         | SmcError::DmaAborted
         | SmcError::DmaLengthMismatch
-        | SmcError::DmaNotEnabled => error::FLASH_GENERIC_BUSY,
+        | SmcError::DmaNotEnabled => error::FLASH_SMC_HARDWARE_ERROR,
     }
 }

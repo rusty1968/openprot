@@ -61,3 +61,19 @@ pub const FLASH_GENERIC_SFDP_PARAMETERS_TOO_LONG: ErrorCode =
 
 /// The OpenTitan flash error module.
 pub const FLASH_OPENTITAN: ErrorModule = ErrorModule::new(0x464f); //ascii `FO`.
+
+/// The SMC SPI-NOR flash error module.
+pub const FLASH_SMC: ErrorModule = ErrorModule::new(0x4653); //ascii `FS`.
+/// SMC controller reported an internal/hardware fault.
+pub const FLASH_SMC_HARDWARE_ERROR: ErrorCode = FLASH_SMC.from_pw(0, Error::Internal);
+/// Timed out waiting for SMC/SPI-NOR completion.
+pub const FLASH_SMC_TIMEOUT: ErrorCode = FLASH_SMC.from_pw(1, Error::DeadlineExceeded);
+/// SMC controller is not in a ready state for the requested operation.
+pub const FLASH_SMC_NOT_READY: ErrorCode = FLASH_SMC.from_pw(2, Error::FailedPrecondition);
+/// Invalid chip-select was requested.
+pub const FLASH_SMC_INVALID_CS: ErrorCode = FLASH_SMC.from_pw(3, Error::InvalidArgument);
+/// Requested SMC-backed flash device is not supported.
+pub const FLASH_SMC_DEVICE_NOT_SUPPORTED: ErrorCode =
+    FLASH_SMC.from_pw(4, Error::Unimplemented);
+/// Write operation rejected due to write protection policy.
+pub const FLASH_SMC_WRITE_PROTECTED: ErrorCode = FLASH_SMC.from_pw(5, Error::PermissionDenied);
