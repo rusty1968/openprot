@@ -3,7 +3,6 @@
 
 //! AST1060 I2C controller implementation
 
-use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
 use super::timing::configure_timing;
@@ -50,9 +49,12 @@ pub struct Ast1060I2c<'a, Y: FnMut(u32)> {
     /// nanoseconds.
     pub(crate) yield_ns: Y,
 
-    /// Makes `Ast1060I2c` `!Sync` so the raw register pointers can't be
-    /// shared across threads without explicit synchronization.
-    _not_sync: PhantomData<UnsafeCell<()>>,
+    /// Prevent `Send` and `Sync`.
+    ///
+    /// MMIO register blocks must not be transferred across threads or
+    /// shared by reference due to potential side effects and lack of
+    /// synchronization guarantees.
+    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl<'a, Y: FnMut(u32)> Ast1060I2c<'a, Y> {
@@ -118,7 +120,7 @@ impl<'a, Y: FnMut(u32)> Ast1060I2c<'a, Y> {
             completion: false,
             dma_buf: None,
             yield_ns,
-            _not_sync: PhantomData,
+            _not_send_sync: PhantomData,
         }
     }
 

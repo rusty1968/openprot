@@ -4,7 +4,6 @@
 //! AST10x0 SCU low-level register access.
 
 use ast1060_pac as device;
-use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
 const SCU_UNLOCK_KEY: u32 = 0x1688_A8A8;
@@ -12,7 +11,12 @@ const SCU_UNLOCK_KEY: u32 = 0x1688_A8A8;
 /// Safe wrapper around the AST10x0 SCU register block.
 pub struct ScuRegisters {
     base: *const device::scu::RegisterBlock,
-    _not_sync: PhantomData<UnsafeCell<()>>, // Prevent Sync, allow Send.
+    /// Prevent `Send` and `Sync`.
+    ///
+    /// MMIO register blocks must not be transferred across threads or
+    /// shared by reference due to potential side effects and lack of
+    /// synchronization guarantees.
+    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl ScuRegisters {
@@ -23,10 +27,7 @@ impl ScuRegisters {
     /// - `base` points to a valid SCU register block.
     /// - access to the SCU instance is serialized appropriately.
     const unsafe fn new(base: *const device::scu::RegisterBlock) -> Self {
-        Self {
-            base,
-            _not_sync: PhantomData,
-        }
+        Self { base, _not_send_sync: PhantomData }
     }
 
     /// Create a register accessor for the global SCU instance.

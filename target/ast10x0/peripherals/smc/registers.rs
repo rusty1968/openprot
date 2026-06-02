@@ -19,7 +19,6 @@
 //! The controller layer answers "what to do with the data based on the topology."
 
 use ast1060_pac as device;
-use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
 use crate::smc::helpers::{
@@ -35,7 +34,12 @@ use crate::smc::helpers::{
 /// hex offsets (e.g., `fmc000()` for offset 0x00, `fmc080()` for offset 0x80).
 pub struct SmcRegisters {
     base: *const device::fmc::RegisterBlock,
-    _not_sync: PhantomData<UnsafeCell<()>>, // Prevent Sync, allow Send
+    /// Prevent `Send` and `Sync`.
+    ///
+    /// MMIO register blocks must not be transferred across threads or
+    /// shared by reference due to potential side effects and lack of
+    /// synchronization guarantees.
+    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl SmcRegisters {
@@ -49,7 +53,7 @@ impl SmcRegisters {
     pub const unsafe fn new(base: *const device::fmc::RegisterBlock) -> Self {
         Self {
             base,
-            _not_sync: PhantomData,
+            _not_send_sync: PhantomData,
         }
     }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use ast1060_pac as device;
+use core::marker::PhantomData;
 
 use super::types::{
     Bank, BankDevice, Direction, Error, InitialLevel, InterruptMode, InterruptTrigger,
@@ -10,6 +11,12 @@ use super::types::{
 
 pub struct Sgpiom {
     sgpiom: *const device::sgpiom::RegisterBlock,
+    /// Prevent `Send` and `Sync`.
+    ///
+    /// MMIO register blocks must not be transferred across threads or
+    /// shared by reference due to potential side effects and lack of
+    /// synchronization guarantees.
+    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl Sgpiom {
@@ -21,7 +28,7 @@ impl Sgpiom {
     /// - The pointed register block must remain valid for the lifetime of this `Sgpiom`.
     /// - Caller must enforce global ownership so concurrent mutable access does not occur.
     pub const unsafe fn new(sgpiom: *const device::sgpiom::RegisterBlock) -> Self {
-        Self { sgpiom }
+        Self { sgpiom, _not_send_sync: PhantomData }
     }
 
     /// Create an instance pointing to the global AST1060 SGPIOM register block.
