@@ -5,5 +5,6 @@
 
 pub mod i2c;
 pub mod scu;
+pub mod sgpiom;
 pub mod smc;
 pub mod uart;
