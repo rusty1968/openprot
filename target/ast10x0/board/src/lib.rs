@@ -14,6 +14,9 @@
 use ast10x0_peripherals::scu::{ClockRegisterHalf, ScuRegisterHalf};
 use ast10x0_peripherals::scu::{PinctrlPin, ScuRegisters};
 
+#[path = "../sgpiom_config_generated.rs"]
+pub mod sgpiom_config_generated;
+
 /// Board descriptor metadata for AST10x0 board initialization.
 #[derive(Clone, Debug)]
 pub struct Ast10x0BoardDescriptor {

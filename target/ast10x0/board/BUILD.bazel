@@ -8,6 +8,7 @@ rust_library(
     name = "ast10x0_board",
     srcs = [
         "src/lib.rs",
+        ":sgpiom_generate",
     ],
     crate_name = "ast10x0_board",
     edition = "2024",
@@ -16,4 +17,76 @@ rust_library(
     deps = [
         "//target/ast10x0/peripherals",
     ],
+)
+
+genrule(
+    name = "sgpiom_validate",
+    srcs = [
+        "//tools/sgpiom:sgpio_json_tool.py",
+        "//tools/sgpiom:common_json",
+        "//tools/sgpiom:ast1060_dcscm_json",
+        "//tools/sgpiom:schema_files",
+    ],
+    outs = ["sgpiom_validate.ok"],
+    cmd = "python3 $(location //tools/sgpiom:sgpio_json_tool.py) validate " +
+          "--input $(location //tools/sgpiom:common_json) " +
+          "--input $(location //tools/sgpiom:ast1060_dcscm_json) && " +
+          "echo OK > $@",
+)
+
+genrule(
+    name = "sgpiom_merged",
+    srcs = [
+        "//tools/sgpiom:sgpio_json_tool.py",
+        "//tools/sgpiom:common_json",
+        "//tools/sgpiom:ast1060_dcscm_json",
+    ],
+    outs = ["sgpiom_merged.json"],
+    cmd = "python3 $(location //tools/sgpiom:sgpio_json_tool.py) merge " +
+          "--input $(location //tools/sgpiom:common_json) " +
+          "--input $(location //tools/sgpiom:ast1060_dcscm_json) " +
+          "--output $@",
+)
+
+genrule(
+    name = "sgpiom_generate",
+    srcs = [
+        "//tools/sgpiom:sgpio_json_tool.py",
+        "//tools/sgpiom:common_json",
+        "//tools/sgpiom:ast1060_dcscm_json",
+    ],
+    outs = ["sgpiom_config_generated.rs"],
+    cmd = "python3 $(location //tools/sgpiom:sgpio_json_tool.py) generate " +
+          "--input $(location //tools/sgpiom:common_json) " +
+          "--input $(location //tools/sgpiom:ast1060_dcscm_json) " +
+          "--output $@",
+)
+
+genrule(
+    name = "sgpiom_check",
+    srcs = [
+        "//tools/sgpiom:sgpio_json_tool.py",
+        "//tools/sgpiom:common_json",
+        "//tools/sgpiom:ast1060_dcscm_json",
+        ":sgpiom_generate",
+    ],
+    outs = ["sgpiom_check.ok"],
+    cmd = "python3 $(location //tools/sgpiom:sgpio_json_tool.py) check " +
+          "--input $(location //tools/sgpiom:common_json) " +
+          "--input $(location //tools/sgpiom:ast1060_dcscm_json) " +
+            "--output $(location :sgpiom_generate) && " +
+          "echo OK > $@",
+)
+
+genrule(
+    name = "sgpiom_report",
+    srcs = [
+        "//tools/sgpiom:sgpio_json_tool.py",
+        "//tools/sgpiom:common_json",
+        "//tools/sgpiom:ast1060_dcscm_json",
+    ],
+    outs = ["sgpiom_report.txt"],
+    cmd = "python3 $(location //tools/sgpiom:sgpio_json_tool.py) report " +
+          "--input $(location //tools/sgpiom:common_json) " +
+          "--input $(location //tools/sgpiom:ast1060_dcscm_json) > $@",
 )
