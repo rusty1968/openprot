@@ -254,18 +254,42 @@ impl Sgpiom {
 
     fn int_sens_write(&self, bank: Bank, index: u8, value: u32) {
         match (bank, index) {
-            (Bank::Ad, 0) => self.regs().gpio508().write(|w| unsafe { w.bits(value) }),
-            (Bank::Ad, 1) => self.regs().gpio50c().write(|w| unsafe { w.bits(value) }),
-            (Bank::Ad, 2) => self.regs().gpio510().write(|w| unsafe { w.bits(value) }),
-            (Bank::Eh, 0) => self.regs().gpio524().write(|w| unsafe { w.bits(value) }),
-            (Bank::Eh, 1) => self.regs().gpio528().write(|w| unsafe { w.bits(value) }),
-            (Bank::Eh, 2) => self.regs().gpio52c().write(|w| unsafe { w.bits(value) }),
-            (Bank::Il, 0) => self.regs().gpio540().write(|w| unsafe { w.bits(value) }),
-            (Bank::Il, 1) => self.regs().gpio544().write(|w| unsafe { w.bits(value) }),
-            (Bank::Il, 2) => self.regs().gpio548().write(|w| unsafe { w.bits(value) }),
-            (Bank::Mp, 0) => self.regs().gpio598().write(|w| unsafe { w.bits(value) }),
-            (Bank::Mp, 1) => self.regs().gpio59c().write(|w| unsafe { w.bits(value) }),
-            (Bank::Mp, 2) => self.regs().gpio5a0().write(|w| unsafe { w.bits(value) }),
+            (Bank::Ad, 0) => {
+                self.regs().gpio508().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Ad, 1) => {
+                self.regs().gpio50c().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Ad, 2) => {
+                self.regs().gpio510().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Eh, 0) => {
+                self.regs().gpio524().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Eh, 1) => {
+                self.regs().gpio528().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Eh, 2) => {
+                self.regs().gpio52c().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Il, 0) => {
+                self.regs().gpio540().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Il, 1) => {
+                self.regs().gpio544().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Il, 2) => {
+                self.regs().gpio548().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Mp, 0) => {
+                self.regs().gpio598().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Mp, 1) => {
+                self.regs().gpio59c().write(|w| unsafe { w.bits(value) });
+            }
+            (Bank::Mp, 2) => {
+                self.regs().gpio5a0().write(|w| unsafe { w.bits(value) });
+            }
             _ => {}
         };
     }
