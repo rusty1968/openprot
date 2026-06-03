@@ -49,6 +49,7 @@ fn run_master() -> Result<(), &'static str> {
 
     let board = Ast10x0Board::new(Ast10x0BoardDescriptor {
         pinctrl_groups: &[pinctrl::PINCTRL_I2C2],
+        smc_configs: &[],
     });
     // SAFETY: single call at boot with exclusive access to SCU/I2C global regs.
     unsafe { board.init() };

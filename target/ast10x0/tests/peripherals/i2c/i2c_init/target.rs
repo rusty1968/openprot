@@ -314,6 +314,7 @@ fn run_i2c_init_smoke_test() -> Result<(), &'static str> {
 
     let board = Ast10x0Board::new(Ast10x0BoardDescriptor {
         pinctrl_groups: &[pinctrl::PINCTRL_I2C1],
+        smc_configs: &[],
     });
 
     // SAFETY: Test target runs once at boot with exclusive access to the board.
