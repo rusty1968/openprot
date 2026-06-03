@@ -28,6 +28,10 @@ const CTRL_CMDS: [u8; 5] = [
 ];
 
 pub static CAPS: [ProtocolCapability<'static>; 1] = [
-    ProtocolCapability::new(PldmSupportedType::Base, "1.1.0", &CTRL_CMDS).unwrap(),
+    ProtocolCapability {
+        pldm_type: PldmSupportedType::Base,
+        protocol_version: 0xF1F1F000, // "1.1.0" BCD-encoded
+        supported_commands: &CTRL_CMDS,
+    },
 ];
 

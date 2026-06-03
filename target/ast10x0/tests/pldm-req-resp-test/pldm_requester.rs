@@ -10,16 +10,13 @@
 #![no_std]
 #![no_main]
 
-use openprot_mctp_client::IpcMctpClient;
+use openprot_mctp_api::MctpClient;
 use openprot_pldm_service::requester::PldmRequester;
 use openprot_pldm_service::transport::MctpPldmTransport;
-use pldm_common::protocol::base::{PldmControlCmd, PldmSupportedType};
-use pldm_interface::control_context::ProtocolCapability;
 use pw_log::{error, info};
 use userspace::entry;
-use userspace::syscall;
-
 use app_pldm_requester::handle;
+
 use test_config::{RESPONDER_EID, TIMEOUT_MILLIS, CAPS};
 
 /// Maximum number of [`PldmRequester::run_once`] iterations before the test
@@ -27,7 +24,7 @@ use test_config::{RESPONDER_EID, TIMEOUT_MILLIS, CAPS};
 const MAX_ITERS: usize = 64;
 
 fn pldm_requester_test() -> Result<(), &'static str> {
-    let transport = MctpPldmTransport::new(IpcMctpClient::new(handle::MCTP));
+    let transport = MctpPldmTransport::new(MctpClient::new(handle::MCTP));
     let mut requester = PldmRequester::new(&CAPS);
     let mut buf = [0u8; 1024];
 

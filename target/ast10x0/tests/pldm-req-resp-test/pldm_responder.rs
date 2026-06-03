@@ -9,22 +9,19 @@
 #![no_std]
 #![no_main]
 
-use openprot_mctp_client::IpcMctpClient;
+use openprot_mctp_api::MctpClient;
 use openprot_pldm_service::responder::PldmResponder;
 use openprot_pldm_service::transport::MctpPldmTransport;
-use pldm_common::protocol::base::{PldmControlCmd, PldmSupportedType};
-use pldm_interface::control_context::ProtocolCapability;
 use pw_log::{error, info};
 use userspace::entry;
-use userspace::syscall;
-use test_config::{RESPONDER_EID, TIMEOUT_MILLIS, CAPS};
+use test_config::{TIMEOUT_MILLIS, CAPS};
 
 use app_pldm_responder::handle;
 
 fn pldm_responder_loop() -> Result<(), &'static str> {
     info!("PLDM responder starting");
 
-    let transport = MctpPldmTransport::new(IpcMctpClient::new(handle::MCTP));
+    let transport = MctpPldmTransport::new(MctpClient::new(handle::MCTP));
     let mut responder = PldmResponder::new(&CAPS);
     let mut buf = [0u8; 1024];
 

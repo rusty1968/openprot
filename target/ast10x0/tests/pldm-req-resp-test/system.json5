@@ -39,28 +39,28 @@
         {
             name: "mctp_loopback_server",
             flash_size_bytes: 32768,
-            ram_size_bytes: 32768,
             processes: [
                 {
-                    name: "mctp loopback server process",
+                    name: "mctp_loopback_server_process",
+                    ram_size_bytes: 32768,
                     objects: [
                         {
-                            name: "MCTP_REQ",
+                            name: "mctp_req",
                             type: "channel_handler",
                         },
                         {
-                            name: "MCTP_RESP",
+                            name: "mctp_resp",
                             type: "channel_handler",
                         },
                         {
-                            name: "WG",
+                            name: "wg",
                             type: "wait_group",
                         },
                     ],
                     threads: [
                         {
-                            name: "mctp loopback server thread",
-                            stack_size_bytes: 4096,
+                            name: "mctp_loopback_server_thread",
+                            kernel_stack_size_bytes: 4096,
                         },
                     ],
                 },
@@ -70,22 +70,22 @@
         {
             name: "pldm_requester",
             flash_size_bytes: 32768,          // 32KB (actual ~16KB)
-            ram_size_bytes: 32768,            // 32KB (stack 16KB + buffers)
             processes: [
                 {
-                    name: "pldm requester process",
+                    name: "pldm_requester_process",
+                    ram_size_bytes: 32768,    // 32KB (stack 16KB + buffers)
                     objects: [
                         {
-                            name: "MCTP",
+                            name: "mctp",
                             type: "channel_initiator",
-                            handler_process: "mctp loopback server process",
-                            handler_object_name: "MCTP_REQ",
+                            handler_process: "mctp_loopback_server_process",
+                            handler_object_name: "mctp_req",
                         },
                     ],
                     threads: [
                         {
-                            name: "pldm requester thread",
-                            stack_size_bytes: 16384,
+                            name: "pldm_requester_thread",
+                            kernel_stack_size_bytes: 16384,
                         },
                     ],
                 },
@@ -95,22 +95,22 @@
         {
             name: "pldm_responder",
             flash_size_bytes: 32768,          // 32KB (actual ~23KB)
-            ram_size_bytes: 65536,
             processes: [
                 {
-                    name: "pldm responder process",
+                    name: "pldm_responder_process",
+                    ram_size_bytes: 65536,
                     objects: [
                         {
-                            name: "MCTP",
+                            name: "mctp",
                             type: "channel_initiator",
-                            handler_process: "mctp loopback server process",
-                            handler_object_name: "MCTP_RESP",
+                            handler_process: "mctp_loopback_server_process",
+                            handler_object_name: "mctp_resp",
                         },
                     ],
                     threads: [
                         {
-                            name: "pldm responder thread",
-                            stack_size_bytes: 16384,
+                            name: "pldm_responder_thread",
+                            kernel_stack_size_bytes: 16384,
                         },
                     ],
                 },

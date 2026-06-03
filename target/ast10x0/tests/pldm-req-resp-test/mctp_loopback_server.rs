@@ -47,7 +47,7 @@ use core::cell::RefCell;
 use mctp::Eid;
 use openprot_mctp_api::wire::{self, MctpOp, MctpRequestHeader, MAX_PAYLOAD_SIZE, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE};
 use openprot_mctp_api::{Handle, ResponseCode};
-use openprot_mctp_server::dispatch;
+use openprot_mctp_api::dispatch;
 use openprot_mctp_transport_loopback::{BufferSender, PacketBuffer};
 
 use pw_status::Result;
