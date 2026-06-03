@@ -10,8 +10,8 @@
 use ast10x0_peripherals::scu::pinctrl::PINCTRL_FMC_QUAD;
 use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology,
-    SpiNorFlash, SpiNorFlashDevice,
+    CalibrationScratch, ChipSelect, FlashConfig, FmcUninit, SmcConfig, SmcController, SmcError,
+    SmcTopology, SpiNorFlash, SpiNorFlashDevice, SPI_CALIB_LEN,
 };
 use console_backend::console_backend_write_all;
 use target_common::{declare_target, TargetInterface};
@@ -91,8 +91,10 @@ fn run_smc_fmc_cs1_write_test() -> Result<(), SmcError> {
 
     pw_log::info!("=== AST10x0 SMC FMC CS1 write test ===");
     let fmc = unsafe { FmcUninit::new(config)? };
-    let mut fmc = fmc.init()?;
-    fmc.spi_nor_read_init(ChipSelect::Cs1)?;
+    let fmc = fmc.init()?;
+    // Bring-up context (large test stack): calibrate, then operate.
+    let mut scratch: CalibrationScratch = [0u8; SPI_CALIB_LEN];
+    let mut fmc = fmc.calibrate(&mut scratch)?;
 
     if !fmc.is_ready() {
         return Err(SmcError::HardwareError);

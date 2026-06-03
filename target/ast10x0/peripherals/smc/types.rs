@@ -30,6 +30,11 @@ pub enum SmcError {
     ControllerNotReady,
     /// DMA was requested but `SmcConfig::dma_enabled` is false for this controller
     DmaNotEnabled,
+    /// Read timing has not been calibrated in hardware for this controller.
+    ///
+    /// Returned by the driver-facing open path when bring-up (e.g. `board_init`)
+    /// did not run calibration first.
+    NotCalibrated,
 }
 
 /// Chip select index for a controller that may have multiple attached devices.

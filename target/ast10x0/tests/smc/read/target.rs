@@ -23,7 +23,8 @@
 use ast10x0_peripherals::scu::pinctrl::PINCTRL_FMC_QUAD;
 use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SmcTopology, UninitSmc,
+    CalibrationScratch, ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SmcTopology,
+    UninitSmc, SPI_CALIB_LEN,
 };
 use console_backend::console_backend_write_all;
 use target_common::{declare_target, TargetInterface};
@@ -65,19 +66,15 @@ fn run_smc_read_test() -> Result<(), SmcError> {
     };
     pw_log::info!("=== AST10x0 smc  read test  ===");
     let controller = unsafe { UninitSmc::new(config)? };
-    let mut controller = controller.init()?;
+    let controller = controller.init()?;
 
-    let _ = match controller.spi_nor_read_init(ChipSelect::Cs0) {
-        Ok(v) => v,
+    // Bring-up context (large test stack): calibrate all configured chip
+    // selects, transitioning the controller to its operational state.
+    let mut scratch: CalibrationScratch = [0u8; SPI_CALIB_LEN];
+    let mut controller = match controller.calibrate(&mut scratch) {
+        Ok(c) => c,
         Err(e) => {
-            pw_log::info!("Error:: spi_nor_read_init cs0");
-            return Err(e);
-        }
-    };
-    let _ = match controller.spi_nor_read_init(ChipSelect::Cs1) {
-        Ok(v) => v,
-        Err(e) => {
-            pw_log::info!("Error:: spi_nor_read_init cs1");
+            pw_log::info!("Error:: calibrate");
             return Err(e);
         }
     };

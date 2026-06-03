@@ -15,14 +15,17 @@ pub mod registers;
 pub mod spi;
 pub mod types;
 
-pub use controller::{Ready, ReadySmc, Smc, UninitSmc, Uninitialized};
+pub use controller::{
+    Calibrated, CalibratedSmc, CalibrationScratch, Ready, ReadySmc, Smc, UninitSmc, Uninitialized,
+    SPI_CALIB_LEN,
+};
 pub use device::{
     BlockDeviceInfo, FlashAddressingPolicy, FlashCommandProfile, JedecId, SpiNorBlockDevice,
     SpiNorFlash, SpiNorFlashDevice,
 };
-pub use fmc::{FmcReady, FmcUninit};
+pub use fmc::{FmcCalibrated, FmcReady, FmcUninit};
 pub use interrupts::{SmcInterrupt, SmcInterruptDecoder};
-pub use spi::{SpiReady, SpiUninit};
+pub use spi::{SpiCalibrated, SpiReady, SpiUninit};
 pub use types::{
     AddressWidth, ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SmcRetryable,
     SmcTopology, TransferMode,

@@ -25,8 +25,8 @@ use arch_arm_cortex_m::Arch;
 use ast10x0_peripherals::scu::pinctrl::PINCTRL_FMC_QUAD;
 use ast10x0_peripherals::scu::ScuRegisters;
 use ast10x0_peripherals::smc::{
-    ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SmcInterrupt, SmcTopology,
-    UninitSmc,
+    CalibrationScratch, ChipSelect, FlashConfig, SmcConfig, SmcController, SmcError, SmcInterrupt,
+    SmcTopology, UninitSmc, SPI_CALIB_LEN,
 };
 use codegen as _;
 use console_backend::console_backend_write_all;
@@ -91,7 +91,7 @@ pub fn fmc_dma_irq_handler<K: Kernel>(_kernel: K) {
 }
 
 fn poll_dma_irq_completion(
-    controller: &mut ast10x0_peripherals::smc::ReadySmc,
+    controller: &mut ast10x0_peripherals::smc::CalibratedSmc,
 ) -> Poll<Result<(), SmcError>> {
     if !FMC_DMA_IRQ_FIRED.swap(false, Ordering::AcqRel) {
         return Poll::Pending;
@@ -118,9 +118,11 @@ fn run_dma_read_irq_test() -> Result<(), SmcError> {
     };
 
     let uninit = unsafe { UninitSmc::new(config)? };
-    let mut controller = uninit.init()?;
+    let controller = uninit.init()?;
 
-    controller.spi_nor_read_init(ChipSelect::Cs0)?;
+    // Bring-up context (large test stack): calibrate, then operate.
+    let mut scratch: CalibrationScratch = [0u8; SPI_CALIB_LEN];
+    let mut controller = controller.calibrate(&mut scratch)?;
 
     if !controller.is_ready() || controller.controller_id() != SmcController::Fmc {
         return Err(SmcError::HardwareError);

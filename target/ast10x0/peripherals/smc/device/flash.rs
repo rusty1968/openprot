@@ -7,8 +7,8 @@ use core::ops::FnMut;
 use core::result::Result;
 use core::result::Result::{Err, Ok};
 
-use crate::smc::fmc::FmcReady;
-use crate::smc::spi::SpiReady;
+use crate::smc::fmc::FmcCalibrated;
+use crate::smc::spi::SpiCalibrated;
 use crate::smc::types::{AddressWidth, ChipSelect, FlashConfig, SmcError, TransferMode};
 
 /// Build a command byte array: opcode followed by address bytes selected by
@@ -177,8 +177,8 @@ fn poll_delay() {
 }
 
 enum FlashBackend<'a> {
-    Fmc(&'a FmcReady),
-    Spi(&'a SpiReady),
+    Fmc(&'a FmcCalibrated),
+    Spi(&'a SpiCalibrated),
 }
 
 /// Decoded JEDEC identifier returned by `READ_ID` (`0x9F`).
@@ -229,14 +229,14 @@ pub struct SpiNorFlash<'a> {
 }
 
 impl<'a> SpiNorFlash<'a> {
-    /// Build a flash facade from an initialized FMC controller wrapper.
-    pub fn from_fmc(fmc: &'a mut FmcReady, cfg: FlashConfig) -> Result<Self, SmcError> {
+    /// Build a flash facade from a calibrated FMC controller wrapper.
+    pub fn from_fmc(fmc: &'a mut FmcCalibrated, cfg: FlashConfig) -> Result<Self, SmcError> {
         Self::from_fmc_cs(fmc, cfg, ChipSelect::Cs0)
     }
 
-    /// Build a flash facade from an initialized FMC controller wrapper with explicit CS.
+    /// Build a flash facade from a calibrated FMC controller wrapper with explicit CS.
     pub fn from_fmc_cs(
-        fmc: &'a mut FmcReady,
+        fmc: &'a mut FmcCalibrated,
         cfg: FlashConfig,
         cs: ChipSelect,
     ) -> Result<Self, SmcError> {
@@ -252,14 +252,14 @@ impl<'a> SpiNorFlash<'a> {
         })
     }
 
-    /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper.
-    pub fn from_spi(spi: &'a mut SpiReady, cfg: FlashConfig) -> Result<Self, SmcError> {
+    /// Build a flash facade from a calibrated SPI1/SPI2 controller wrapper.
+    pub fn from_spi(spi: &'a mut SpiCalibrated, cfg: FlashConfig) -> Result<Self, SmcError> {
         Self::from_spi_cs(spi, cfg, ChipSelect::Cs0)
     }
 
-    /// Build a flash facade from an initialized SPI1/SPI2 controller wrapper with explicit CS.
+    /// Build a flash facade from a calibrated SPI1/SPI2 controller wrapper with explicit CS.
     pub fn from_spi_cs(
-        spi: &'a mut SpiReady,
+        spi: &'a mut SpiCalibrated,
         cfg: FlashConfig,
         cs: ChipSelect,
     ) -> Result<Self, SmcError> {
@@ -408,7 +408,7 @@ impl<'a> SpiNorFlash<'a> {
 
     /// Validate a device-local offset before handing it to the controller.
     ///
-    /// `FmcReady::read` / `SpiReady::read` already select the per-CS AHB
+    /// `FmcCalibrated::read` / `SpiCalibrated::read` already select the per-CS AHB
     /// window from the chip-select argument, so offsets stay CS-local here.
     fn device_to_controller_offset(&self, device_offset: u32) -> Result<u32, SmcError> {
         let cs_cap = self.capacity_bytes()?;
