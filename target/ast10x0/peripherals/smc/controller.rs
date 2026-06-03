@@ -163,7 +163,7 @@ impl Smc<Uninitialized> {
         let mut conf = 0u32;
         if self.config.cs0.is_some() {
             conf |= 1 << 16; // CONF_ENABLE_W0
-            conf |= 0x2 << 0; // FLASH_TYPE_SPI
+            conf |= 0x2; // FLASH_TYPE_SPI
         }
         if self.config.cs1.is_some() {
             conf |= 1 << 17; // CONF_ENABLE_W1
@@ -514,12 +514,15 @@ impl Smc<Ready> {
     fn run_timing_sweep(&mut self, cs: ChipSelect, gold_checksum: u32) {
         let hclk_masks = [7u32, 14, 6, 13];
         let mut calib_res = [0u8; 6 * 17];
-        let cs_cfg = self.cs_config(cs);
-        let mut freq_to_use = cs_cfg.unwrap().spi_clock_mhz;
+        let cs_cfg = match self.cs_config(cs) {
+            Ok(cfg) => cfg,
+            Err(_) => return,
+        };
+        let mut freq_to_use = cs_cfg.spi_clock_mhz;
         let sysclk_mhz = 200u32;
 
         for (i, &mask) in hclk_masks.iter().enumerate() {
-            let div = u32::try_from(i).unwrap() + 2;
+            let div = (i as u32) + 2;
             if freq_to_use < sysclk_mhz / div {
                 continue;
             }

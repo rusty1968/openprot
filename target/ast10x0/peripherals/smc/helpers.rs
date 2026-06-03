@@ -244,9 +244,9 @@ pub(crate) fn get_mid_point_of_longest_one(buf: &[u8]) -> i32 {
     }
 
     if max_cnt < 4 {
-        return -1;
+        -1
     } else {
-        return i32::try_from(mid_point).unwrap();
+        i32::try_from(mid_point).unwrap_or(-1)
     }
 }
 

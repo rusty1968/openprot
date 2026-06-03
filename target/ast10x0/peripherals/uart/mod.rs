@@ -144,19 +144,17 @@ impl Write for Usart {
                     .uartthr()
                     .write(|w| unsafe { w.bits(*byte as u32) });
                 written += 1;
+            } else if written == 0 {
+                // spec demands to block until at least one byte has been written.
+                // `continue` would skip to the next byte rather than retrying
+                // this one, so we busy-wait inline instead.
+                while self.is_tx_full() {}
+                self.regs()
+                    .uartthr()
+                    .write(|w| unsafe { w.bits(*byte as u32) });
+                written += 1;
             } else {
-                if written == 0 {
-                    // spec demands to block until at least one byte has been written.
-                    // `continue` would skip to the next byte rather than retrying
-                    // this one, so we busy-wait inline instead.
-                    while self.is_tx_full() {}
-                    self.regs()
-                        .uartthr()
-                        .write(|w| unsafe { w.bits(*byte as u32) });
-                    written += 1;
-                } else {
-                    break;
-                }
+                break;
             }
         }
         // Two invariants hold that LLVM cannot prove through value range analysis

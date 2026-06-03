@@ -79,7 +79,7 @@ impl<'a, Y: FnMut(u32)> Ast1060I2c<'a, Y> {
         yield_ns: Y,
     ) -> Result<Self, I2cError> {
         let mut i2c = unsafe { Self::from_initialized(regs, buff_regs, config, yield_ns) };
-        i2c.init_hardware(&config)?;
+        i2c.init_hardware(config)?;
         Ok(i2c)
     }
 
@@ -143,7 +143,7 @@ impl<'a, Y: FnMut(u32)> Ast1060I2c<'a, Y> {
     ) -> Result<Self, I2cError> {
         let mut i2c = unsafe { Self::from_initialized(regs, buff_regs, config, yield_ns) };
         i2c.dma_buf = Some(dma_buf);
-        i2c.init_hardware(&config)?;
+        i2c.init_hardware(config)?;
         Ok(i2c)
     }
 
