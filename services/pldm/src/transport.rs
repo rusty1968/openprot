@@ -139,10 +139,12 @@ impl<C: MctpClient> MctpPldmTransport<C> {
     /// `handler` to produce a response.
     ///
     /// The PLDM payload is received into `buf[1..]`; `buf[0]` is set to the
-    /// MCTP PLDM type byte (`0x01`).  `handler` receives the full framed
-    /// slice `buf[..1+payload_size]` and must return the total number of
-    /// bytes written for the response (including the type byte at `buf[0]`).
-    /// Bytes `buf[1..resp_total_len]` are sent back to the requester.
+    /// MCTP PLDM type byte (`0x01`).  `handler` receives the entire `buf`
+    /// (with the request framed at `buf[..1+payload_size]`) so it has room to
+    /// write a response that is larger than the request, processing it in
+    /// place.  It must return the total number of bytes written for the
+    /// response (including the type byte at `buf[0]`).  Bytes
+    /// `buf[1..resp_total_len]` are sent back to the requester.
     ///
     /// A `timeout_millis` of `0` blocks indefinitely.
     ///
@@ -181,15 +183,16 @@ impl<C: MctpClient> MctpPldmTransport<C> {
             None => return Err(PldmServiceError::Overflow),
         }
 
-        // total = 1 (type byte) + payload_size
-        let total_len = payload_size
+        // Ensure the buffer is at least large enough to hold the framed
+        // request before handing it off.
+        let _ = payload_size
             .checked_add(1)
+            .filter(|&total_len| total_len <= buf.len())
             .ok_or(PldmServiceError::Overflow)?;
 
-        let framed_buf = buf.get_mut(..total_len).ok_or(PldmServiceError::Overflow)?;
-
-        // Invoke the handler to process the request in-place.
-        let resp_total_len = handler(framed_buf)?;
+        // Invoke the handler to process the request in-place.  The handler is
+        // given the whole buffer so the response may exceed the request size.
+        let resp_total_len = handler(buf)?;
 
         // Send the response, excluding the MCTP type byte that the transport
         // layer manages separately.

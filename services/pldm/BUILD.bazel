@@ -23,3 +23,19 @@ rust_test(
     name = "pldm_service_test",
     crate = ":pldm_service",
 )
+
+rust_test(
+    name = "pldm_requester_responder_host_test",
+    srcs = ["tests/requester_responder_host.rs"],
+    crate_root = "tests/requester_responder_host.rs",
+    edition = "2024",
+    deps = [
+        ":pldm_service",
+        "//services/mctp/api:mctp_api",
+        "//services/mctp/server:mctp_server_lib",
+        "@rust_crates//:mctp",
+        "@rust_crates//:mctp-lib",
+        "@rust_crates//:pldm-common",
+        "@rust_crates//:pldm-interface",
+    ],
+)

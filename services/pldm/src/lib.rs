@@ -17,7 +17,7 @@
 //! ┌──────────────────────────┐
 //! │   openprot-pldm-service  │◄── this crate
 //! │   PldmResponder          │  dispatches to CmdInterface (responder side)
-//! │   PldmRequester          │  drives CmdInterface (FD initiator side)
+//! │   PldmRequester          │  sends PLDM requests (initiator side)
 //! └───────────┬──────────────┘
 //!             │ MctpListener / MctpReqChannel / MctpRespChannel
 //!             ▼
@@ -60,8 +60,9 @@
 //!     }
 //! }
 //!
-//! // Requester: send FD-initiated requests to the Update Agent.
+//! // Requester: queue and send PLDM requests to a remote endpoint.
 //! let mut requester = PldmRequester::new(&caps);
+//! requester.queue_get_tid();
 //! loop {
 //!     if let Err(e) = requester.run_once(&stack, REMOTE_EID, &mut buf, 0) {
 //!         // handle or log error
@@ -78,6 +79,6 @@ pub mod responder;
 pub mod transport;
 
 pub use error::PldmServiceError;
-pub use requester::PldmRequester;
+pub use requester::{PldmRequester, PldmRequesterCommand};
 pub use transport::MctpPldmTransport;
 pub use responder::{PldmResponder, PLDM_MSG_TYPE};
