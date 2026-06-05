@@ -3,6 +3,7 @@
 
 #![no_std]
 
-pub mod smbus_protocol;
 pub mod smb_mbox_adapter;
 pub mod smbus_mailbox_client;
+pub mod smbus_protocol;
+pub mod swmbx_ctrl;

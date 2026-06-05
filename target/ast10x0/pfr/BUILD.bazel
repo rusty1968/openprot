@@ -1,7 +1,7 @@
 # Licensed under the Apache-2.0 license
 # SPDX-License-Identifier: Apache-2.0
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 
 package(default_visibility = ["//visibility:public"])
@@ -9,10 +9,11 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "pfr",
     srcs = [
-        "smbus_mailbox_client.rs",
         "lib.rs",
         "smb_mbox_adapter.rs",
+        "smbus_mailbox_client.rs",
         "smbus_protocol.rs",
+        "swmbx_ctrl.rs",
     ],
     crate_name = "ast10x0_pfr",
     crate_root = "lib.rs",
@@ -22,6 +23,16 @@ rust_library(
         "//services/i2c/api:i2c_api",
         "//services/i2c/client:i2c_client",
         "//target/ast10x0/peripherals",
-        "@ureg",
+        "@rust_crates//:heapless",
+    ],
+)
+
+rust_test(
+    name = "swmbx_ctrl_host_test",
+    srcs = ["swmbx_ctrl.rs"],
+    crate_root = "swmbx_ctrl.rs",
+    edition = "2024",
+    deps = [
+        "@rust_crates//:heapless",
     ],
 )

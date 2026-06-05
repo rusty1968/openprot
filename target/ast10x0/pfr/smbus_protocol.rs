@@ -132,7 +132,7 @@ pub struct NotificationResult {
     // Optional register value that should be written back before returning.
     /// Optional value that should be written back to the same register.
     pub write_back: Option<u8>,
-    /// Optional high-level event for the state machine.
+    /// Optional high-level event for the caller's dispatcher.
     pub event: Option<ProtocolEvent>,
 }
 
