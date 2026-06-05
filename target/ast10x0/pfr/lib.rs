@@ -3,8 +3,6 @@
 
 #![no_std]
 
-pub mod i2c;
-pub mod scu;
-pub mod smc;
-pub mod uart;
-pub mod smb_mbox;
+pub mod smbus_protocol;
+pub mod smb_mbox_adapter;
+pub mod smbus_mailbox_client;

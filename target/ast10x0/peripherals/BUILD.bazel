@@ -32,6 +32,8 @@ rust_library(
         "scu/reset.rs",
         "scu/status.rs",
         "scu/types.rs",
+        "smb_mbox/mod.rs",
+        "smb_mbox/registers.rs",
         "smc/controller.rs",
         "smc/device/block_device.rs",
         "smc/device/flash.rs",
@@ -55,6 +57,7 @@ rust_library(
     deps = [
         "//hal/blocking",
         "@ast1060_pac",
+        "@ureg",
         "@pigweed//pw_log/rust:pw_log",
         "@rust_crates//:bitflags",
         "@rust_crates//:embedded-hal",
