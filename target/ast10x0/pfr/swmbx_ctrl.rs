@@ -5,10 +5,11 @@ use core::ptr::NonNull;
 use core::ptr::{read_volatile, write_volatile};
 use heapless::spsc::Queue;
 
-const SWMBX_DEV_COUNT: usize = 2;
-const SWMBX_NODE_COUNT: usize = 256;
-const SWMBX_FIFO_COUNT: usize = 4;
-const SWMBX_FIFO_DEPTH: usize = 256;
+pub const SWMBX_DEV_COUNT: usize = 2;
+pub const SWMBX_NODE_COUNT: usize = 256;
+pub const SWMBX_FIFO_COUNT: usize = 4;
+pub const SWMBX_FIFO_DEPTH: usize = 256;
+pub const SWMBX_BUF_BASE: usize = 0x7e7b_0e00;
 
 const _: () = assert!(SWMBX_NODE_COUNT == 256);
 const _: () = assert!(SWMBX_NODE_COUNT == (u8::MAX as usize) + 1);
@@ -20,13 +21,13 @@ const PROTECT_WORD_SHIFT: u32 = PROTECT_BITS_PER_WORD.ilog2();
 /// Count of 32-bit words needed to cover every node's protection bit.
 const PROTECT_WORD_COUNT: usize = SWMBX_NODE_COUNT / PROTECT_BITS_PER_WORD;
 
-const SWMBX_PROTECT: u8 = 1 << 0;
-const SWMBX_NOTIFY: u8 = 1 << 1;
-const SWMBX_FIFO: u8 = 1 << 2;
+pub const SWMBX_PROTECT: u8 = 1 << 0;
+pub const SWMBX_NOTIFY: u8 = 1 << 1;
+pub const SWMBX_FIFO: u8 = 1 << 2;
 const FLAG_MASK: u8 = SWMBX_PROTECT | SWMBX_NOTIFY | SWMBX_FIFO;
 
-const SWMBX_FIFO_NOTIFY_START: u8 = 1 << 0;
-const SWMBX_FIFO_NOTIFY_STOP: u8 = 1 << 1;
+pub const SWMBX_FIFO_NOTIFY_START: u8 = 1 << 0;
+pub const SWMBX_FIFO_NOTIFY_STOP: u8 = 1 << 1;
 
 /// Error type for SW mailbox controller operations.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

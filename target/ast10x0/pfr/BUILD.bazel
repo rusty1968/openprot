@@ -11,12 +11,15 @@ rust_library(
     srcs = [
         "lib.rs",
         "swmbx_ctrl.rs",
+        "smbus_mailbox_client.rs",
     ],
     crate_name = "ast10x0_pfr",
     crate_root = "lib.rs",
     edition = "2024",
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     deps = [
+        "//services/i2c/api:i2c_api",
+        "//services/i2c/client:i2c_client",
         "@rust_crates//:heapless",
     ],
 )
@@ -33,5 +36,6 @@ rust_test(
     ],
     deps = [
         "@rust_crates//:heapless",
+
     ],
 )
