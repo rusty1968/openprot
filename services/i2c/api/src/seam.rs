@@ -40,9 +40,6 @@ pub trait I2cSlaveEvent: I2cSlaveBuffer {
     }
 }
 
-/// Blanket impl so all I2cSlaveBuffer types get the default behavior.
-impl<T: I2cSlaveBuffer> I2cSlaveEvent for T {}
-
 /// Map a wire status code onto the `embedded_hal::i2c::ErrorKind` taxonomy so
 /// the client can satisfy `embedded_hal::i2c::Error`.
 pub fn error_kind(err: I2cError) -> ErrorKind {

@@ -222,6 +222,16 @@ impl SwmbxCtrl {
         // contract. We validate null/alignment once and cache the pointer.
         let buffer_base = unsafe { SharedRegion::<u8>::from_addr(buffer_base).base };
 
+        // Zero the backing region. It is a device-memory mapping that is not
+        // cleared at power-on, so a read of a never-written offset would
+        // otherwise return SRAM garbage instead of 0. Matches the zero-init
+        // backing buffer assumed by aspeed-rust's swmbx.
+        for i in 0..buffer_size {
+            // SAFETY: same validity contract as the cached `buffer_base`;
+            // `i < buffer_size` keeps the write inside the mapped region.
+            unsafe { write_volatile(buffer_base.as_ptr().add(i), 0) };
+        }
+
         SwmbxCtrl {
             mbx_en: 0,
             node: [[SwmbxNode::default(); SWMBX_NODE_COUNT]; SWMBX_DEV_COUNT],
@@ -263,6 +273,26 @@ impl SwmbxCtrl {
             node.enabled_flags &= !SWMBX_NOTIFY;
         }
         Ok(())
+    }
+
+    /// Consume the next pending notification, if any.
+    ///
+    /// Scans every node for a latched `notify_flag` (set by a write to a
+    /// notify-enabled address while global notify is on), clears the first one
+    /// found, and returns its `(port, addr)`. Returns `None` when no
+    /// notification is pending. Mirrors the polled-flag model of aspeed-rust's
+    /// `poll_notify`; the caller drains it once per service loop.
+    pub fn take_notify(&mut self) -> Option<(usize, u8)> {
+        for port in 0..SWMBX_DEV_COUNT {
+            for addr in 0..SWMBX_NODE_COUNT {
+                let node = &mut self.node[port][addr];
+                if node.notify_flag {
+                    node.notify_flag = false;
+                    return Some((port, addr as u8));
+                }
+            }
+        }
+        None
     }
 
     /// Configures one FIFO endpoint mapping.
@@ -431,7 +461,7 @@ impl SwmbxCtrl {
     ///
     /// # Errors
     /// Returns [`SwmbxError::InvalidPort`] if `port` is out of range.
-    /// Returns [`SwmbxError::FifoEmpty`] when reading from an empty active FIFO.
+    /// Returns `0` when reading from an empty active FIFO.
     /// Returns [`SwmbxError::InvalidAddress`] for out-of-bounds flat-buffer
     /// reads relative to `buffer_size`.
     pub fn get_msg(&mut self, port: usize, addr: u8) -> Result<u8, SwmbxError> {
@@ -441,7 +471,11 @@ impl SwmbxCtrl {
 
         if self.mbx_fifo_execute[port] && (self.mbx_en & SWMBX_FIFO) != 0 {
             let fifo_index = self.mbx_fifo_idx[port] as usize;
-            return self.fifo[fifo_index].dequeue();
+            return match self.fifo[fifo_index].dequeue() {
+                Ok(value) => Ok(value),
+                Err(SwmbxError::FifoEmpty) => Ok(0),
+                Err(err) => Err(err),
+            };
         }
 
         self.read_in_region(addr)
@@ -489,7 +523,11 @@ impl SwmbxCtrl {
         } else {
             let node = &mut self.node[port][addr as usize];
 
-            if (node.enabled_flags & SWMBX_PROTECT) == 0 || (self.mbx_en & SWMBX_PROTECT) == 0 {
+            let protected =
+                (node.enabled_flags & SWMBX_PROTECT) != 0 && (self.mbx_en & SWMBX_PROTECT) != 0;
+
+            if protected {
+            } else {
                 write_to_buffer = true;
             }
 
@@ -668,7 +706,7 @@ mod tests {
 
         assert_eq!(ctrl.get_msg(0, 0x0d).expect("get_msg #1 failed"), 0x11);
         assert_eq!(ctrl.get_msg(0, 0x0d).expect("get_msg #2 failed"), 0x22);
-        assert_eq!(ctrl.get_msg(0, 0x0d), Err(SwmbxError::FifoEmpty));
+        assert_eq!(ctrl.get_msg(0, 0x0d).expect("empty fifo read failed"), 0);
 
         ctrl.send_stop(0).expect("send_stop failed");
         assert!(!ctrl.mbx_fifo_execute[0]);

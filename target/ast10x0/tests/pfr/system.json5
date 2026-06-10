@@ -14,14 +14,14 @@
     },
     kernel: {
         flash_start_address: 0x00000800,
-        flash_size_bytes: 129024,
+        flash_size_bytes: 63488,
         ram_start_address: 0x00060000,
         ram_size_bytes: 131072,
     },
     apps: [
         {
             name: "i2c_server",
-            flash_size_bytes: 131072,
+            flash_size_bytes: 16384,
             processes: [
                 {
                     name: "i2c_server_process",
@@ -30,9 +30,9 @@
                         { name: "wg", type: "wait_group" },
                         { name: "i2c", type: "channel_handler" },
                         {
-                            name: "i2c2_irq",
+                            name: "i2c0_irq",
                             type: "interrupt",
-                            irqs: [{ name: "i2c2", number: 112 }],
+                            irqs: [{ name: "i2c0", number: 110 }],
                         },
                         {
                             type: "thread",
@@ -53,7 +53,7 @@
         },
         {
             name: "pfr_i2c_notify_client",
-            flash_size_bytes: 131072,
+            flash_size_bytes: 16384,
             processes: [
                 {
                     name: "pfr_i2c_notify_client_process",
@@ -69,6 +69,14 @@
                             type: "thread",
                             name: "pfr_i2c_notify_client_thread",
                             kernel_stack_size_bytes: 2048,
+                        },
+                    ],
+                    memory_mappings: [
+                        {
+                            name: "swmbx_buf",
+                            type: "device",
+                            start_address: 0x7e7b0e00,
+                            size_bytes: 0x100,
                         },
                     ],
                 },

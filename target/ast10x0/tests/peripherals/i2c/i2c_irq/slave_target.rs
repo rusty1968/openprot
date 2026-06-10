@@ -83,7 +83,8 @@ fn run_slave() -> Result<(), &'static str> {
         .map_err(|_| "test 1: configure_slave failed")?;
 
     match wait_event(&mut slave, 50_000_000) {
-        Some(SlaveEvent::DataReceived { len }) => {
+        Some(SlaveEvent::DataReceived { len })
+        | Some(SlaveEvent::DataReceivedStop { len }) => {
             if len != EXPECTED_WRITE.len() {
                 pw_log::error!(
                     "test 1: DataReceived len={} expected={}",
@@ -136,6 +137,7 @@ fn run_slave() -> Result<(), &'static str> {
 
     match wait_event(&mut slave, 50_000_000) {
         Some(SlaveEvent::DataReceived { len: _ })
+        | Some(SlaveEvent::DataReceivedStop { len: _ })
         | Some(SlaveEvent::Stop)
         | Some(SlaveEvent::WriteRequest) => {
             pw_log::info!("Test 3 passed: data/stop/write-req observed");

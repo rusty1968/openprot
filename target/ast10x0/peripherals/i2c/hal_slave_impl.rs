@@ -32,6 +32,7 @@ fn to_hal_event(ev: SlaveEvent) -> I2cIsrEvent {
         SlaveEvent::DataReceived { .. } | SlaveEvent::DataReceivedAndSent { .. } => {
             I2cIsrEvent::SlaveWrRecvd
         }
+        SlaveEvent::DataReceivedStop { .. } => I2cIsrEvent::SlaveWrRecvdStop,
         SlaveEvent::DataSent { .. } => I2cIsrEvent::SlaveRdProc,
         SlaveEvent::Stop => I2cIsrEvent::SlaveStop,
     }
@@ -40,7 +41,7 @@ fn to_hal_event(ev: SlaveEvent) -> I2cIsrEvent {
 /// Bytes received in the event, if any (the only thing the drain path needs).
 fn rx_len(ev: SlaveEvent) -> Option<usize> {
     match ev {
-        SlaveEvent::DataReceived { len } => Some(len),
+        SlaveEvent::DataReceived { len } | SlaveEvent::DataReceivedStop { len } => Some(len),
         SlaveEvent::DataReceivedAndSent { rx_len, .. } => Some(rx_len),
         _ => None,
     }

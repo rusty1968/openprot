@@ -170,6 +170,18 @@ pub const AST_I2CS_PKT_ERROR: u32 = 1 << 17;
 pub const AST_I2CS_WAIT_TX_DMA: u32 = 1 << 25;
 /// Waiting for RX DMA
 pub const AST_I2CS_WAIT_RX_DMA: u32 = 1 << 24;
+/// Slave transaction is pending
+pub const AST_I2CS_SLAVE_PENDING: u32 = 1 << 29;
+/// Encoded matched-address indicator bits
+pub const AST_I2CS_ADDR_INDICATE_MASK: u32 = 3 << 30;
+/// Address 3 NAK status
+pub const AST_I2CS_ADDR3_NAK: u32 = 1 << 22;
+/// Address 2 NAK status
+pub const AST_I2CS_ADDR2_NAK: u32 = 1 << 21;
+/// Address 1 NAK status
+pub const AST_I2CS_ADDR1_NAK: u32 = 1 << 20;
+/// Address status field
+pub const AST_I2CS_ADDR_MASK: u32 = 3 << 18;
 
 /// Helper to build packet mode address field
 #[inline]

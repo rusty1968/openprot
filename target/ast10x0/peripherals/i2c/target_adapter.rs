@@ -152,7 +152,7 @@ where
         };
 
         match event {
-            SlaveEvent::AddressMatch => {
+            SlaveEvent::WriteRequest => {
                 if !self.in_transaction {
                     self.target.on_transaction_start(false);
                     self.in_transaction = true;
@@ -174,12 +174,8 @@ where
                 }
             }
 
-            SlaveEvent::WriteRequest => {
-                // Master wants to write to us - nothing to do here,
-                // data will arrive in DataReceived
-            }
-
-            SlaveEvent::DataReceived { len } => {
+            SlaveEvent::DataReceived { len } | SlaveEvent::DataReceivedStop { len } => {
+                let stop_after_data = matches!(event, SlaveEvent::DataReceivedStop { .. });
                 // Read data from hardware
                 let read_len = self.i2c.slave_read(&mut self.rx_buffer)?;
                 let actual_len = read_len.min(len);
@@ -190,6 +186,22 @@ where
                         .on_write(&self.rx_buffer[..actual_len])
                         .map_err(|_| I2cError::SlaveError)?;
                 }
+                if stop_after_data {
+                    self.target.on_stop();
+                    self.in_transaction = false;
+                }
+            }
+
+            SlaveEvent::DataReceivedAndSent { rx_len, .. } => {
+                let read_len = self.i2c.slave_read(&mut self.rx_buffer)?;
+                let actual_len = read_len.min(rx_len);
+
+                if actual_len > 0 {
+                    self.target
+                        .on_write(&self.rx_buffer[..actual_len])
+                        .map_err(|_| I2cError::SlaveError)?;
+                }
+                self.target.on_data_sent();
             }
 
             SlaveEvent::DataSent { len: _ } => {

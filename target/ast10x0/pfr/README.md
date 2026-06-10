@@ -183,7 +183,7 @@ FIFO routing is *per transaction*, bracketed by `send_start` / `send_stop`:
    │             • on FIFO full → latch node notify_flag, return FifoFull
    │
  get_msg(port, addr)         (repeatable)
-   │  FIFO path → fifo[i].dequeue()  // removes (pops) the oldest byte
+   │  FIFO path → fifo[i].dequeue()  // pops oldest byte; empty FIFO returns 0
    │
    ▼
  send_stop(port)
@@ -210,10 +210,9 @@ When not in a FIFO transaction, `send_msg` runs the node policy:
 
 `get_msg` on this path simply reads the byte from the buffer.
 
-> **Current limitation:** `notify_flag` on a node is *written* but the crate
-> exposes no API to *read or consume* it, so notifications are presently
-> unobservable from outside. Wiring up a consumer (e.g. `take_notify(port, addr)`)
-> is a known follow-up.
+`take_notify()` exposes the latched node notify bits as `(port, addr)` pairs,
+so firmware can poll and clear notifications after a transaction. The current
+PFR server does exactly that once per service loop.
 
 ### Direct helpers
 
@@ -257,6 +256,10 @@ another wake-up — the IRQ only drains the slave-RX latch, `interrupt_ack`s, an
 signals the client. The mailbox itself is then driven **serially** by one
 consumer (one IPC channel per bus); the IRQ never reentrantly touches controller
 state. Because of this:
+
+* In the current AST10x0 PFR test server, the controller lives in the same
+  process that handles the slave IRQ, so a master transaction can be served
+  inline and then polled for notifications immediately after the drain.
 
 * All mutators take `&mut self`; `mbx_en` is a plain `u8` (no `Cell`, no atomics,
   no lock). The type is intentionally `!Sync`, so any accidental attempt to share
@@ -320,13 +323,54 @@ ctrl.send_msg(0, 0x0D, 0x11)?;
 ctrl.send_msg(0, 0x0D, 0x22)?;
 assert_eq!(ctrl.get_msg(0, 0x0D)?, 0x11);       // pops in order
 assert_eq!(ctrl.get_msg(0, 0x0D)?, 0x22);
-assert_eq!(ctrl.get_msg(0, 0x0D), Err(SwmbxError::FifoEmpty));
+assert_eq!(ctrl.get_msg(0, 0x0D)?, 0x00);
 ctrl.send_stop(0)?;
 ```
 
 ---
 
-## 10. Build & test
+## 10. Quick test
+
+Use bus `0`, slave address `0x38`.
+
+### Protect check
+
+```sh
+iic write_byte i2c@7e7b0080 38 13 88
+iic read_byte  i2c@7e7b0080 38 13
+# expected: 0x88
+
+iic write_byte i2c@7e7b0080 38 12 88
+iic read_byte  i2c@7e7b0080 38 12
+# expected: 0x0
+```
+
+### FIFO check
+
+```sh
+iic write_byte i2c@7e7b0080 38 d aa
+iic write_byte i2c@7e7b0080 38 d bb
+iic write_byte i2c@7e7b0080 38 d cc
+
+iic read_byte  i2c@7e7b0080 38 d
+iic read_byte  i2c@7e7b0080 38 d
+iic read_byte  i2c@7e7b0080 38 d
+# expected: 0xaa, 0xbb, 0xcc
+```
+
+### Slave-side output
+
+```text
+[INF] PFR mailbox server ready on Bus 0, slave addr=0x38
+[INF] notify triggered port=0 addr=0x13
+[INF] notify triggered port=0 addr=0x0d
+[INF] notify triggered port=0 addr=0x0d
+[INF] notify triggered port=0 addr=0x0d
+```
+
+---
+
+## 11. Build & test
 
 ```sh
 # Build the (target-only) library
@@ -338,7 +382,7 @@ bazel test //target/ast10x0/pfr:swmbx_ctrl_host_test
 
 ---
 
-## 11. Quick reference: glossary
+## 12. Quick reference: glossary
 
 | Term            | In code                              | Meaning                                   |
 |-----------------|--------------------------------------|-------------------------------------------|
@@ -352,7 +396,7 @@ bazel test //target/ast10x0/pfr:swmbx_ctrl_host_test
 
 ---
 
-## 12. How SWMBX sits in Zephyr PFR
+## 13. How SWMBX sits in Zephyr PFR
 
 ```
                  ASPEED Zephyr PFR (apps/aspeed-pfr)
