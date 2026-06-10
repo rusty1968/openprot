@@ -41,11 +41,13 @@
 
 use ast1060_pac::{i2c::RegisterBlock, i2cbuff::RegisterBlock as BuffRegisterBlock};
 use embedded_hal::i2c::{ErrorType, I2c, Operation, SevenBitAddress};
+use i2c_api::seam::{I2cIsrEvent, I2cSlaveEvent};
 use openprot_hal_blocking::i2c_hardware::slave::{I2cSlaveBuffer, I2cSlaveCore};
 use openprot_hal_blocking::i2c_hardware::I2cBusRecovery;
 
 pub use ast10x0_peripherals::i2c::{
     Ast1060I2c, Ast1060I2cRegisters, ClockConfig, I2cConfig, I2cError, I2cSpeed, I2cXferMode,
+    SlaveEvent,
 };
 
 /// The yield closure type stored in every bus driver.
@@ -189,6 +191,43 @@ impl I2cSlaveBuffer<SevenBitAddress> for Ast1060I2cBackend {
     fn rx_buffer_count(&self) -> Result<usize, Self::Error> {
         // Conservative: use poll_slave_data() for the actual drain path.
         Ok(0)
+    }
+}
+
+impl Ast1060I2cBackend {
+    /// True when the controller is clock-stretching a master read, waiting for
+    /// the firmware to load the TX byte. Lets the server serve a read inline.
+    pub fn slave_waiting_for_tx(&mut self) -> bool {
+        self.make_driver().slave_waiting_for_tx()
+    }
+
+    /// Debug: (i2cs20 irq-enable mask, i2cc00 control, i2cs24 status).
+    pub fn dbg_slave_regs(&mut self) -> (u32, u32, u32) {
+        self.make_driver().dbg_slave_regs()
+    }
+}
+
+impl I2cSlaveEvent for Ast1060I2cBackend {
+    fn try_next_slave_event(&mut self) -> Result<Option<(I2cIsrEvent, usize)>, Self::Error> {
+        let event = {
+            let mut driver = self.make_driver();
+            driver.handle_slave_interrupt()
+        };
+
+        Ok(match event {
+            Some(SlaveEvent::ReadRequest) => Some((I2cIsrEvent::SlaveRdReq, 0)),
+            Some(SlaveEvent::WriteRequest) => Some((I2cIsrEvent::SlaveWrReq, 0)),
+            Some(SlaveEvent::DataReceived { len }) => Some((I2cIsrEvent::SlaveWrRecvd, len)),
+            Some(SlaveEvent::DataReceivedStop { len }) => {
+                Some((I2cIsrEvent::SlaveWrRecvdStop, len))
+            }
+            Some(SlaveEvent::DataReceivedAndSent { rx_len, .. }) => {
+                Some((I2cIsrEvent::SlaveWrRecvd, rx_len))
+            }
+            Some(SlaveEvent::DataSent { len }) => Some((I2cIsrEvent::SlaveRdProc, len)),
+            Some(SlaveEvent::Stop) => Some((I2cIsrEvent::SlaveStop, 0)),
+            None => None,
+        })
     }
 }
 

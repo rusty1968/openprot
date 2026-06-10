@@ -61,9 +61,10 @@ rust_app(
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     deps = [
-        "//services/i2c/server-runtime:i2c_server_runtime",
+        "//services/i2c/api:i2c_api",
         "//target/ast10x0/backend/i2c:i2c_backend_ast10x0",
         "//target/ast10x0/peripherals",
+        "//target/ast10x0/pfr:pfr",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",
     ],

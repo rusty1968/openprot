@@ -913,7 +913,8 @@ impl MockI2cHardware {
 
         // Simulate event handling based on event type
         match event {
-            openprot_hal_blocking::i2c_hardware::slave::I2cIsrEvent::SlaveWrRecvd => {
+            openprot_hal_blocking::i2c_hardware::slave::I2cIsrEvent::SlaveWrRecvd
+            | openprot_hal_blocking::i2c_hardware::slave::I2cIsrEvent::SlaveWrRecvdStop => {
                 // Simulate receiving data using safe injection
                 self.inject_slave_data(&[0xAA, 0xBB, 0xCC]);
             }

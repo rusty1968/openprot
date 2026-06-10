@@ -57,6 +57,8 @@ pub enum SlaveEvent {
     WriteRequest,
     /// Data received from master
     DataReceived { len: usize },
+    /// Data received from master and stop condition received in the same status
+    DataReceivedStop { len: usize },
     /// Data sent to master
     DataSent { len: usize },
     /// Data received from master and send data to master (combined event)
@@ -123,19 +125,51 @@ impl SlaveBuffer {
 
 impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
     #[inline]
+    fn slave_rx_includes_addr(&self) -> bool {
+        (self.regs().i2cc00().read().bits() & constants::AST_I2CC_SLAVE_PKT_SAVE_ADDR) != 0
+    }
+
+    #[inline]
+    pub fn slave_waiting_for_tx(&self) -> bool {
+        (self.regs().i2cs24().read().bits() & constants::AST_I2CS_WAIT_TX_DMA) != 0
+    }
+
+    /// Debug: (i2cs20 irq-enable mask, i2cc00 control, i2cs24 status).
+    #[inline]
+    pub fn dbg_slave_regs(&self) -> (u32, u32, u32) {
+        (
+            self.regs().i2cs20().read().bits(),
+            self.regs().i2cc00().read().bits(),
+            self.regs().i2cs24().read().bits(),
+        )
+    }
+
+    #[inline]
     fn slave_rx_len(&self) -> usize {
         if self.xfer_mode == I2cXferMode::DmaMode {
-            self.regs().i2cs4c().read().dmarx_actual_len_byte().bits() as usize
+            let raw = self.regs().i2cs4c().read().dmarx_actual_len_byte().bits() as usize;
+            raw.saturating_sub(usize::from(self.slave_rx_includes_addr()))
         } else {
-            // Hardware includes the I2C address byte in the buffer count (packet mode,
-            // I2CC00 bit 20). Subtract 1 to report only the payload byte count.
-            self.regs()
+            let raw = self
+                .regs()
                 .i2cc0c()
                 .read()
                 .actual_rxd_pool_buffer_size()
-                .bits()
-                .saturating_sub(1) as usize
+                .bits() as usize;
+            raw.saturating_sub(usize::from(self.slave_rx_includes_addr()))
         }
+    }
+
+    #[inline]
+    fn normalized_slave_status(status: u32) -> u32 {
+        status
+            & !(constants::AST_I2CS_ADDR_INDICATE_MASK
+                | constants::AST_I2CS_SLAVE_PENDING
+                | constants::AST_I2CS_ADDR_MASK
+                | constants::AST_I2CS_ADDR1_NAK
+                | constants::AST_I2CS_ADDR2_NAK
+                | constants::AST_I2CS_ADDR3_NAK
+                | constants::AST_I2CS_INACTIVE_TO)
     }
 
     /// Arm slave receive path based on transfer mode.
@@ -190,15 +224,6 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
         // Clear slave interrupts
         self.clear_slave_interrupts();
 
-        // Enable slave mode and save address byte in packet mode (I2CC00 bit 20)
-        // This makes the hardware include the destination address byte in the receive buffer
-        // which is required for MCTP-over-SMBus (DSP0237) packet format.
-        self.regs().i2cc00().modify(|r, w| unsafe {
-            w.bits(
-                r.bits() | constants::AST_I2CC_SLAVE_EN | constants::AST_I2CC_SLAVE_PKT_SAVE_ADDR,
-            )
-        });
-
         // Configure slave mode
         let mut cmd = 0u32;
 
@@ -249,6 +274,13 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
 
         // Enable slave interrupts
         self.enable_slave_interrupts();
+
+        // Enable slave mode only after RX DMA/buffer is armed. Do NOT set
+        // AST_I2CC_SLAVE_PKT_SAVE_ADDR: that prepends the matched destination
+        // address as RX byte[0], shifting SMBus [offset, data...] semantics.
+        self.regs().i2cc00().modify(|r, w| unsafe {
+            w.bits(r.bits() | constants::AST_I2CC_SLAVE_EN)
+        });
 
         Ok(())
     }
@@ -317,71 +349,79 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
     pub fn slave_read(&mut self, buffer: &mut [u8]) -> Result<usize, I2cError> {
         // Get receive length from buffer length register
         if self.xfer_mode == I2cXferMode::BufferMode {
-            // AST_I2CC_SLAVE_PKT_SAVE_ADDR (I2CC00 bit 20) deposits the I2C
-            // address byte at buffer offset 0. Read the raw count once, subtract
-            // 1 for that byte, then copy only the payload (skipping offset 0).
             let raw = self
                 .regs()
                 .i2cc0c()
                 .read()
                 .actual_rxd_pool_buffer_size()
                 .bits() as usize;
-            let data_len = raw.saturating_sub(1);
-            let to_read = data_len.min(buffer.len()).min(BUFFER_SIZE - 1);
+            let skip = usize::from(self.slave_rx_includes_addr());
+            let data_len = raw.saturating_sub(skip);
+            let to_read = data_len.min(buffer.len()).min(BUFFER_SIZE.saturating_sub(skip));
 
             let mut tmp = [0u8; BUFFER_SIZE];
-            self.copy_from_buffer(&mut tmp[..1 + to_read])?;
-            buffer[..to_read].copy_from_slice(&tmp[1..1 + to_read]);
+            self.copy_from_buffer(&mut tmp[..skip + to_read])?;
+            buffer[..to_read].copy_from_slice(&tmp[skip..skip + to_read]);
 
-            // Re-enable RX buffer
-            let mut cmd = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
-            cmd |= constants::AST_I2CS_RX_BUFF_EN;
-            unsafe {
-                self.regs().i2cs28().write(|w| w.bits(cmd));
+            let rearm_rx = !self.slave_waiting_for_tx();
+            if rearm_rx {
+                let mut cmd = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
+                cmd |= constants::AST_I2CS_RX_BUFF_EN;
+                unsafe {
+                    self.regs().i2cs28().write(|w| w.bits(cmd));
+                }
             }
+            pw_log::info!(
+                "i2c slave_read buf raw={} skip={} n={} rx0=0x{:02x} rx1=0x{:02x} rearm={}",
+                raw as u32,
+                skip as u32,
+                to_read as u32,
+                buffer.get(0).copied().unwrap_or(0) as u32,
+                buffer.get(1).copied().unwrap_or(0) as u32,
+                rearm_rx as u32
+            );
 
             Ok(to_read)
         } else if self.xfer_mode == I2cXferMode::DmaMode {
-            // DMA mode: the hardware has already DMA'd into `self.dma_buf`.
-            // AST_I2CC_SLAVE_PKT_SAVE_ADDR deposits the address byte at dma_buf[0];
-            // subtract 1 and skip it, matching the buffer-mode treatment above.
             let hw_len = self.regs().i2cs4c().read().dmarx_actual_len_byte().bits() as usize;
-            let data_len = hw_len.saturating_sub(1);
+            let skip = usize::from(self.slave_rx_includes_addr());
+            let data_len = hw_len.saturating_sub(skip);
             let to_read = data_len.min(buffer.len());
 
             if let Some(dma_buf) = self.slave_dma_buf.as_deref() {
-                let src_len = to_read.min(dma_buf.len().saturating_sub(1));
+                let src_len = to_read.min(dma_buf.len().saturating_sub(skip));
                 if let (Some(src), Some(dst)) =
-                    (dma_buf.get(1..1 + src_len), buffer.get_mut(..src_len))
+                    (dma_buf.get(skip..skip + src_len), buffer.get_mut(..src_len))
                 {
                     dst.copy_from_slice(src);
                 }
             }
 
-            // Re-arm slave DMA for next receive
-            let mut cmd = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
-            if let Some(dma_buf) = self.slave_dma_buf.as_deref_mut() {
-                let dma_addr = dma_buf.as_mut_ptr() as u32;
-                let dma_len = u16::try_from(dma_buf.len().min(4096) - 1).unwrap_or(u16::MAX);
-                unsafe {
-                    self.regs().i2cs4c().write(|w| w.bits(0));
-                    self.regs().i2cs38().write(|w| w.bits(dma_addr));
-                    self.regs().i2cs3c().write(|w| w.bits(dma_addr));
-                    self.regs().i2cs2c().write(|w| {
-                        w.dmarx_buf_len_byte()
-                            .bits(dma_len)
-                            .dmarx_buf_len_wr_enbl_for_cur_cmd()
-                            .set_bit()
-                    });
+            let rearm_rx = !self.slave_waiting_for_tx();
+            if rearm_rx {
+                let mut cmd = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
+                if let Some(dma_buf) = self.slave_dma_buf.as_deref_mut() {
+                    let dma_addr = dma_buf.as_mut_ptr() as u32;
+                    let dma_len = u16::try_from(dma_buf.len().min(4096) - 1).unwrap_or(u16::MAX);
+                    unsafe {
+                        self.regs().i2cs4c().write(|w| w.bits(0));
+                        self.regs().i2cs38().write(|w| w.bits(dma_addr));
+                        self.regs().i2cs3c().write(|w| w.bits(dma_addr));
+                        self.regs().i2cs2c().write(|w| {
+                            w.dmarx_buf_len_byte()
+                                .bits(dma_len)
+                                .dmarx_buf_len_wr_enbl_for_cur_cmd()
+                                .set_bit()
+                        });
+                    }
+                    cmd |= AST_I2CS_RX_DMA_EN;
+                } else {
+                    cmd |= constants::AST_I2CS_RX_BUFF_EN;
                 }
-                cmd |= AST_I2CS_RX_DMA_EN;
-            } else {
-                cmd |= constants::AST_I2CS_RX_BUFF_EN;
+                unsafe {
+                    self.regs().i2cs28().write(|w| w.bits(cmd));
+                }
             }
-            unsafe {
-                self.regs().i2cs28().write(|w| w.bits(cmd));
-            }
-
             Ok(to_read)
         } else {
             // byte mode
@@ -394,6 +434,7 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
             self.regs().i2cs28().write(|w| unsafe { w.bits(cmd) });
 
             self.clear_slave_interrupts();
+            pw_log::info!("i2c slave_read byte rx0=0x{:02x}", byte as u32);
             Ok(1)
         }
     }
@@ -422,22 +463,42 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
             unsafe {
                 self.regs().i2cs28().write(|w| w.bits(cmd));
             }
+            pw_log::info!(
+                "i2c slave_write buf n={} tx0=0x{:02x} cmd=0x{:08x}",
+                to_write as u32,
+                data[0] as u32,
+                cmd as u32
+            );
             Ok(to_write)
         } else if self.xfer_mode == I2cXferMode::DmaMode {
-            // Slave TX always uses the 32-byte hardware FIFO, even in DMA mode.
-            // The DMA buffer is reserved exclusively for slave RX — writing TX data
-            // into dma_buf would alias the RX path. This matches base's
-            // slave_set_response() pattern (buffs.buff(0) + TX_BUFF_EN).
-            let to_write = data.len().min(BUFFER_SIZE);
-            self.copy_to_buffer(&data[..to_write])?;
-            #[allow(clippy::cast_possible_truncation)]
-            self.regs()
-                .i2cc0c()
-                .write(|w| unsafe { w.tx_data_byte_count().bits((to_write - 1) as u8) });
+            let Some(dma_buf) = self.slave_dma_buf.as_deref_mut() else {
+                return Err(I2cError::Invalid);
+            };
+            let to_write = data.len().min(dma_buf.len()).min(constants::DMA_MODE_MAX_SIZE);
+            dma_buf[..to_write].copy_from_slice(&data[..to_write]);
 
-            // Arm TX via FIFO and keep RX DMA armed in one atomic i2cs28 write.
-            let mut cmd = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
-            cmd |= constants::AST_I2CS_TX_BUFF_EN | AST_I2CS_RX_DMA_EN;
+            #[allow(clippy::cast_possible_truncation)]
+            let dma_tx_len = u16::try_from(to_write - 1).unwrap_or(u16::MAX);
+            unsafe {
+                // Reset the DMA actual-length register before programming a new
+                // TX length. The stale dmatx_actual_len from a prior transfer
+                // otherwise leaves the engine thinking the TX is already
+                // complete, so it clocks out nothing and the master samples an
+                // idle bus as 0xff. Mirrors aspeed-rust's slave read path.
+                self.regs().i2cs4c().write(|w| w.bits(0));
+                self.regs().i2cs2c().modify(|_, w| {
+                    w.dmatx_buf_len_byte()
+                        .bits(dma_tx_len)
+                        .dmatx_buf_len_wr_enbl_for_cur_cmd()
+                        .set_bit()
+                });
+            }
+
+            // DMA-mode slave reads must be released with TX_DMA_EN. This mirrors
+            // aspeed-rust's swmbx target path and avoids mixing FIFO TX with DMA RX.
+            let cmd = constants::AST_I2CS_ACTIVE_ALL
+                | constants::AST_I2CS_PKT_MODE_EN
+                | constants::AST_I2CS_TX_DMA_EN;
             unsafe {
                 self.regs().i2cs28().write(|w| w.bits(cmd));
             }
@@ -454,6 +515,7 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
             }
             self.clear_slave_interrupts();
 
+            pw_log::info!("i2c slave_write byte tx0=0x{:02x}", data[0] as u32);
             Ok(1)
         }
     }
@@ -467,8 +529,30 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
             return None;
         }
 
-        // Check for errors first
+        if (status & constants::AST_I2CS_INACTIVE_TO) != 0 {
+            let mut cmd: u32 = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
+            self.arm_slave_receive(&mut cmd);
+            unsafe {
+                self.regs().i2cs28().write(|w| w.bits(cmd));
+                self.regs().i2cs24().write(|w| w.bits(status));
+                let _ = self.regs().i2cs24().read().bits();
+            }
+            pw_log::info!(
+                "i2c slave inactive timeout raw=0x{:08x} rearm=0x{:08x}",
+                status as u32,
+                cmd as u32
+            );
+            // Surface the timeout as a Stop so the application resets its
+            // per-transaction state (e.g. the SMBus offset cursor / first-byte
+            // flag). An aborted master read ends here with no real STOP on the
+            // bus; without this the next transaction mis-parses its offset byte
+            // as data and the cursor drifts across transactions.
+            return Some(SlaveEvent::Stop);
+        }
+
+        // Check for real packet errors after the inactive-timeout cleanup path.
         if (status & constants::AST_I2CS_PKT_ERROR) != 0 {
+            pw_log::error!("i2c slave pkt_error raw=0x{:08x}", status as u32);
             self.clear_slave_interrupts();
             return None;
         }
@@ -480,7 +564,9 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                     .i2cs24()
                     .write(|w| w.bits(constants::AST_I2CS_PKT_DONE));
             }
-            let sts = status & (!(constants::AST_I2CS_PKT_DONE | constants::AST_I2CS_PKT_ERROR));
+            let sts = Self::normalized_slave_status(
+                status & (!(constants::AST_I2CS_PKT_DONE | constants::AST_I2CS_PKT_ERROR)),
+            );
             if sts == constants::AST_I2CS_SLAVE_MATCH
                 || sts == constants::AST_I2CS_SLAVE_MATCH | constants::AST_I2CS_RX_DONE
             {
@@ -507,8 +593,18 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                     self.regs().i2cs28().write(|w| w.bits(cmd));
                 }
                 return Some(SlaveEvent::Stop);
-            } else if sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_STOP
-                || sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_WAIT_RX_DMA
+            } else if sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_WAIT_RX_DMA {
+                // S: (Sw)|D
+                return Some(SlaveEvent::DataReceived {
+                    len: self.slave_rx_len(),
+                });
+            } else if sts
+                    == constants::AST_I2CS_SLAVE_MATCH
+                        | constants::AST_I2CS_RX_DONE
+                        | constants::AST_I2CS_WAIT_RX_DMA
+                        | constants::AST_I2CS_STOP
+                        | constants::AST_I2CS_TX_NAK
+                || sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_STOP
                 || sts
                     == constants::AST_I2CS_RX_DONE
                         | constants::AST_I2CS_WAIT_RX_DMA
@@ -533,7 +629,7 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                         | constants::AST_I2CS_STOP
             {
                 // S: (Sw)|D|(P)
-                return Some(SlaveEvent::DataReceived {
+                return Some(SlaveEvent::DataReceivedStop {
                     len: self.slave_rx_len(),
                 });
             } else if sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_WAIT_TX_DMA
@@ -573,11 +669,17 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 }
                 return Some(SlaveEvent::Stop);
             } else {
-                // TODO packet slave sts
+                pw_log::error!(
+                    "i2c slave pkt unhandled raw=0x{:08x} sts=0x{:08x}",
+                    status as u32,
+                    sts as u32
+                );
             }
         } else {
             //byte irq
             let cmd: u32 = constants::AST_I2CS_ACTIVE_ALL;
+            let status = Self::normalized_slave_status(status);
+            pw_log::info!("i2c slave byte sts=0x{:08x}", status as u32);
 
             if status
                 == constants::AST_I2CS_SLAVE_MATCH
@@ -639,7 +741,21 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 self.regs().i2cs24().write(|w| unsafe { w.bits(status) });
                 return Some(SlaveEvent::Stop);
             }
-            // TODO byte slave sts
+            // Benign transient sub-status edges that also raise an IRQ in
+            // packet/DMA mode (RX_DONE / WAIT_RX_DMA / WAIT_TX_DMA / TX_ACK
+            // latched mid-packet, with no MATCH/STOP). The real transaction is
+            // reported via PKT_DONE, so ignore these silently instead of
+            // logging them as unhandled. Anything carrying MATCH or STOP that
+            // still falls through here is a genuine gap and is logged.
+            let benign = (status
+                & !(constants::AST_I2CS_RX_DONE
+                    | constants::AST_I2CS_WAIT_RX_DMA
+                    | constants::AST_I2CS_WAIT_TX_DMA
+                    | constants::AST_I2CS_TX_ACK))
+                == 0;
+            if !benign {
+                pw_log::error!("i2c slave byte unhandled sts=0x{:08x}", status as u32);
+            }
         }
         None
     }

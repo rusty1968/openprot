@@ -147,6 +147,8 @@ pub mod slave {
         SlaveRdProc,
         /// Slave has received write data from master
         SlaveWrRecvd,
+        /// Slave received write data and the same hardware status included STOP
+        SlaveWrRecvdStop,
         /// Stop condition received
         SlaveStop,
     }

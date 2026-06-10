@@ -28,7 +28,7 @@ impl TargetInterface for Target {
             for _ in 0..10_000u32 {
                 core::hint::spin_loop();
             }
-            scu.apply_pinctrl_group(pinctrl::PINCTRL_I2C2);
+            scu.apply_pinctrl_group(pinctrl::PINCTRL_I2C0);
             i2c::init_i2c_global();
         }
 

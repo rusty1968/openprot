@@ -1,7 +1,7 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-use  crate::swmbx_ctrl::{SwmbxCtrl, SwmbxError};
+use crate::swmbx_ctrl::{SwmbxCtrl, SwmbxError};
 use i2c_api::seam::SevenBitAddress;
 use i2c_api::{SlaveEvent, Transport};
 use i2c_client::{ClientError as I2cClientError, I2cClient};
@@ -98,7 +98,7 @@ impl<T: Transport> I2cPfrSmbusClient<T> {
         Ok(self.swmbx.swmbx_read(false, addr)?)
     }
 
-    /// Processes at most one pending I2C slave event.
+    /// Processes all currently pending I2C slave events.
     ///
     /// This mirrors the Zephyr SWMBX target callback flow:
     ///
@@ -112,40 +112,51 @@ impl<T: Transport> I2cPfrSmbusClient<T> {
     /// - `Stop`: finalizes the transaction via `send_stop` and resets
     ///   first-write state.
     ///
-    /// If no data is pending, this returns `Ok(())`.
+    /// Returns `Ok(true)` if at least one event was handled, `Ok(false)` if
+    /// the queue is empty (`NoData`). The method drains the queue fully so a
+    /// `DataReceived`/`Stop` burst cannot be split across two caller wake-ups.
+    /// That keeps `first_write`, `active_port`, and `read_cursor` consistent
+    /// for the next FIFO-backed access.
     ///
     /// # Errors
     /// Returns `I2cPfrClientError::I2c` for transport failures and propagates
-    /// `Swmbx`/source-resolution errors encountered while handling an event.
-    pub fn process_one_event(&mut self) -> Result<(), I2cPfrClientError> {
+    /// `Swmbx` errors encountered while handling an event.
+    pub fn process_one_event(&mut self) -> Result<bool, I2cPfrClientError> {
         let mut rx = [0u8; RX_BUFFER_SIZE];
-        let event = match self.i2c.slave_receive(&mut rx) {
-            Ok(ev) => ev,
-            Err(I2cClientError::ServerError(i2c_api::I2cError::NoData)) => return Ok(()),
-            Err(e) => return Err(I2cPfrClientError::I2c(e)),
-        };
+        let mut handled = false;
 
-        match event.kind {
-            SlaveEvent::DataReceived => {
-                self.handle_data_received(&rx[..event.data_len], event.source_address)
+        loop {
+            let event = match self.i2c.slave_receive(&mut rx) {
+                Ok(ev) => ev,
+                Err(I2cClientError::ServerError(i2c_api::I2cError::NoData)) => {
+                    return Ok(handled);
+                }
+                Err(e) => return Err(I2cPfrClientError::I2c(e)),
+            };
+
+            handled = true;
+            match event.kind {
+                SlaveEvent::DataReceived => {
+                    self.handle_data_received(&rx[..event.data_len], event.source_address)?
+                }
+                SlaveEvent::ReadRequest => self.handle_read_request()?,
+                SlaveEvent::Stop => {
+                    self.swmbx.send_stop(self.active_port)?;
+                    // The next write transaction starts with an offset byte.
+                    self.first_write = true;
+                }
+                _ => {}
             }
-            SlaveEvent::ReadRequest => self.handle_read_request(),
-            SlaveEvent::Stop => {
-                self.swmbx.send_stop(self.active_port)?;
-                // The next write transaction starts with an offset byte.
-                self.first_write = true;
-                Ok(())
-            }
-            _ => Ok(()),
         }
     }
 
-    fn resolve_source(&self, source_addr: Option<SevenBitAddress>) -> Result<Source, I2cPfrClientError> {
+    /// Resolve the originating port. A recognized MCTP source address selects
+    /// its port; a plain offset-addressed SMBus access (no source header)
+    /// defaults to port 0 so it is served, not dropped.
+    fn resolve_source(&self, source_addr: Option<SevenBitAddress>) -> Source {
         match source_addr {
-            Some(addr) if addr == self.sources.bmc => Ok(Source::Bmc),
-            Some(addr) if addr == self.sources.pch_cpu => Ok(Source::PchCpu),
-            Some(_) => Err(I2cPfrClientError::UnknownSource),
-            None => Err(I2cPfrClientError::UnknownSource),
+            Some(addr) if addr == self.sources.pch_cpu => Source::PchCpu,
+            _ => Source::Bmc,
         }
     }
 
@@ -165,7 +176,7 @@ impl<T: Transport> I2cPfrSmbusClient<T> {
             return Ok(());
         }
 
-        let source = self.resolve_source(source_addr)?;
+        let source = self.resolve_source(source_addr);
         self.active_port = source_to_port(source);
 
         // Mirrors Zephyr swmbx_target callback sequencing:
