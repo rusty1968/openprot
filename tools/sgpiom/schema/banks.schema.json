@@ -8,7 +8,7 @@
     "required": ["name", "pin_offset", "ngpios", "reserved_pins"],
     "properties": {
       "name": { "type": "string", "minLength": 1 },
-      "pin_offset": { "type": "integer", "minimum": 0 },
+      "pin_offset": { "type": "integer", "enum": [0, 32, 64, 96] },
       "ngpios": { "type": "integer", "minimum": 1, "maximum": 32 },
       "reserved_pins": {
         "type": "array",
