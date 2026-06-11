@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use openprot_hal_blocking::gpio_port::{
-    ActivePolarity, GpioBankPassthrough, GpioError, GpioErrorKind, GpioErrorType, GpioPort,
-    PinConfig, PinDirection, PinMask,
+    ActivePolarity, EdgeSensitivity, GpioBankPassthrough, GpioError, GpioErrorKind, GpioErrorType,
+    GpioInterrupt, GpioPort, InterruptOperation, PinConfig, PinDirection, PinMask,
 };
 
 use super::register_block::Sgpiom;
-use super::types::{BankDevice, Error};
+use super::types::{BankDevice, Error, InterruptMode, InterruptTrigger};
 
 /// 32-bit pin mask for a single SGPIOM bank.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -85,14 +85,7 @@ impl GpioPort for SgpiomBankPort {
 
     fn configure(&mut self, pins: Self::Mask, config: Self::Config) -> Result<(), Self::Error> {
         // Reject pins outside this bank's ngpios window.
-        let valid_mask: u32 = if self.dev.ngpios >= 32 {
-            u32::MAX
-        } else {
-            (1u32 << self.dev.ngpios) - 1
-        };
-        if (pins.0 & !valid_mask) != 0 {
-            return Err(Error::InvalidPin);
-        }
+        self.dev.validate_mask(pins.0)?;
 
         if config.direction == PinDirection::Output {
             if let Some(logical_high) = config.initial_output {
@@ -118,6 +111,7 @@ impl GpioPort for SgpiomBankPort {
         set_mask: Self::Mask,
         reset_mask: Self::Mask,
     ) -> Result<(), Self::Error> {
+        self.dev.validate_mask(set_mask.0 | reset_mask.0)?;
         // Atomically apply both masks: set wins over reset for overlapping bits.
         self.sgpiom
             .port_set_masked_raw(self.dev.bank, set_mask.0 | reset_mask.0, set_mask.0);
@@ -129,14 +123,94 @@ impl GpioPort for SgpiomBankPort {
     }
 
     fn toggle(&mut self, pins: Self::Mask) -> Result<(), Self::Error> {
+        self.dev.validate_mask(pins.0)?;
         self.sgpiom.port_toggle_bits(self.dev.bank, pins.0);
         Ok(())
+    }
+}
+
+impl GpioInterrupt for SgpiomBankPort {
+    type Mask = SgpiomMask;
+
+    /// Program interrupt sensitivity for the masked pins.
+    ///
+    /// Only sensitivity is written here; enabling/disabling is done via
+    /// [`GpioInterrupt::irq_control`] — matching the EarlGrey driver split.
+    fn irq_configure(
+        &mut self,
+        mask: Self::Mask,
+        sensitivity: EdgeSensitivity,
+    ) -> Result<(), Self::Error> {
+        // Validate up front so a mixed valid/invalid mask cannot partially
+        // program some pins before erroring.
+        self.dev.validate_mask(mask.0)?;
+
+        let (mode, trig) = match sensitivity {
+            EdgeSensitivity::RisingEdge => (InterruptMode::Edge, InterruptTrigger::High),
+            EdgeSensitivity::FallingEdge => (InterruptMode::Edge, InterruptTrigger::Low),
+            EdgeSensitivity::BothEdges => (InterruptMode::Edge, InterruptTrigger::Both),
+            EdgeSensitivity::HighLevel => (InterruptMode::Level, InterruptTrigger::High),
+            EdgeSensitivity::LowLevel => (InterruptMode::Level, InterruptTrigger::Low),
+        };
+
+        let mut pins = mask.0;
+        while pins != 0 {
+            let pin = pins.trailing_zeros() as u8;
+            self.sgpiom
+                .configure_interrupt_sensitivity(&self.dev, pin, mode, trig)?;
+            pins &= pins - 1;
+        }
+        Ok(())
+    }
+
+    /// Enable/disable/clear/query interrupts for the masked pins.
+    fn irq_control(
+        &mut self,
+        mask: Self::Mask,
+        operation: InterruptOperation,
+    ) -> Result<bool, Self::Error> {
+        self.dev.validate_mask(mask.0)?;
+        match operation {
+            InterruptOperation::Enable => {
+                // Clear stale status first to avoid a spurious immediate fire.
+                self.sgpiom.clear_interrupt_status(self.dev.bank, mask.0);
+                self.sgpiom.set_interrupt_enable(self.dev.bank, mask.0);
+                Ok(true)
+            }
+            InterruptOperation::Disable => {
+                self.sgpiom.clear_interrupt_enable(self.dev.bank, mask.0);
+                Ok(true)
+            }
+            InterruptOperation::Clear => {
+                self.sgpiom.clear_interrupt_status(self.dev.bank, mask.0);
+                Ok(true)
+            }
+            InterruptOperation::IsPending => {
+                let status = self.sgpiom.interrupt_status(self.dev.bank);
+                Ok((status & mask.0) != 0)
+            }
+        }
+    }
+
+    /// Callback registration is unsupported: in the OpenPRoT microkernel
+    /// architecture interrupts are delivered to userspace via wait-on-object
+    /// syscalls rather than in-driver callbacks (same as the EarlGrey driver).
+    fn register_interrupt_handler<F>(
+        &mut self,
+        _mask: Self::Mask,
+        _handler: F,
+    ) -> Result<(), Self::Error>
+    where
+        F: FnMut(Self::Mask) + Send + 'static,
+    {
+        Err(Error::UnsupportedFlags)
     }
 }
 
 impl GpioBankPassthrough for SgpiomBankPort {
     /// Sample current inputs for `mask` pins and write them to the output latch (one-shot).
     fn set_passthrough_mask(&mut self, mask: Self::Mask) -> Result<(), Self::Error> {
+        self.dev.validate_mask(mask.0)?;
         self.sgpiom.passthrough_masked(self.dev.bank, mask.0);
         Ok(())
     }
