@@ -48,11 +48,36 @@ impl Sgpiom {
         unsafe { &*self.sgpiom }
     }
 
+    /// Read the global configuration register (`gpio554`) back from hardware.
+    #[must_use]
+    pub fn read_config(&self) -> u32 {
+        self.regs().gpio554().read().bits()
+    }
+
+    /// Dump the live SGPIOM register state for a bank via `pw_log::info!`.
+    ///
+    /// All values are read back from hardware (not the last written value), so
+    /// this confirms whether writes actually stuck and the engine reflects them.
+    pub fn debug_dump(&self, bank: Bank) {
+        pw_log::info!(
+            "sgpiom dump bank={} cfg(554)=0x{:08x} data(500)=0x{:08x} latch=0x{:08x} int_en=0x{:08x} int_sts=0x{:08x}",
+            bank as u32,
+            self.read_config() as u32,
+            self.port_get_raw(bank) as u32,
+            self.read_output_latch(bank) as u32,
+            self.int_en_read(bank) as u32,
+            self.interrupt_status(bank) as u32
+        );
+    }
+
     /// Configures SGPIOM global settings.
     ///
     /// `ngpios` is total SGPIO count across banks.
     pub fn configure_global(&self, ngpios: u16, clock_div: u16) -> Result<(), Error> {
-        if ngpios == 0 {
+        // Four 32-pin banks (A-P) => 128 max. Zephyr's AST10x0 DTS uses
+        // ngpios = 128; reject out-of-range instead of silently masking the
+        // 5-bit `numbers` hardware field.
+        if ngpios == 0 || ngpios > 128 {
             return Err(Error::InvalidNgpios);
         }
 
@@ -69,7 +94,10 @@ impl Sgpiom {
         Ok(())
     }
 
-    /// Read the raw 32-bit output register for a bank.
+    /// Read the raw 32-bit Data Value register for a bank.
+    ///
+    /// This returns the SGPIOM sampled *input* state, NOT the last value driven
+    /// out. For read-modify-write of outputs use [`Self::read_output_latch`].
     #[must_use]
     pub fn port_get_raw(&self, bank: Bank) -> u32 {
         match bank {
@@ -80,8 +108,36 @@ impl Sgpiom {
         }
     }
 
+    /// Read the output-latch readback register for a bank.
+    ///
+    /// The Data Value register (`port_get_raw`) returns the sampled *input*
+    /// state, not the value last driven out. For read-modify-write of outputs
+    /// we must read the dedicated Data Read (output-latch) register so that
+    /// untouched bits retain their previously driven value rather than being
+    /// overwritten with input samples.
+    ///
+    /// Bank `Mp` (M/N/O/P) has no `gpio57c()` accessor in the PAC, so its latch
+    /// readback (`wr_latch[3]` in Zephyr, controller base + 0x7c) is read raw to
+    /// stay aligned with the Zephyr RMW across all four banks.
+    #[must_use]
+    pub fn read_output_latch(&self, bank: Bank) -> u32 {
+        match bank {
+            Bank::Ad => self.regs().gpio570().read().bits(),
+            Bank::Eh => self.regs().gpio574().read().bits(),
+            Bank::Il => self.regs().gpio578().read().bits(),
+            // SAFETY: `self.sgpiom` is a valid RegisterBlock pointer (construction
+            // contract). The register block base is the controller base (0x..0500);
+            // +0x7c (= 0x..057c) is the MP write-latch readback, inside the mapped
+            // 0x100 SGPIOM register file.
+            Bank::Mp => unsafe {
+                let base = self.sgpiom.cast::<u8>();
+                core::ptr::read_volatile(base.add(0x7c).cast::<u32>())
+            },
+        }
+    }
+
     pub fn port_set_masked_raw(&self, bank: Bank, mask: u32, value: u32) {
-        let current = self.port_get_raw(bank);
+        let current = self.read_output_latch(bank);
         let next = (current & !mask) | (value & mask);
         self.port_write_raw(bank, next);
     }
@@ -95,7 +151,7 @@ impl Sgpiom {
     }
 
     pub fn port_toggle_bits(&self, bank: Bank, mask: u32) {
-        let current = self.port_get_raw(bank);
+        let current = self.read_output_latch(bank);
         self.port_write_raw(bank, current ^ mask);
     }
 
@@ -132,18 +188,16 @@ impl Sgpiom {
         Ok(())
     }
 
-    pub fn configure_interrupt(
-        &self,
-        dev: &BankDevice,
-        pin: u8,
+    /// Map a (`mode`, `trig`) pair to the 3-bit SGPIOM sensitivity-type code.
+    ///
+    /// Returns `Ok(None)` for [`InterruptMode::Disabled`] (no sensitivity to
+    /// program) and `Err(UnsupportedFlags)` for invalid combinations.
+    fn interrupt_sens_type(
         mode: InterruptMode,
         trig: InterruptTrigger,
-    ) -> Result<(), Error> {
-        dev.validate_pin(pin)?;
-
-        let bit = 1u32 << pin;
+    ) -> Result<Option<u8>, Error> {
         let int_type = match mode {
-            InterruptMode::Disabled => 0u8,
+            InterruptMode::Disabled => return Ok(None),
             InterruptMode::Level => match trig {
                 InterruptTrigger::Low => 2,
                 InterruptTrigger::High => 3,
@@ -155,37 +209,90 @@ impl Sgpiom {
                 InterruptTrigger::Both => 4,
             },
         };
+        Ok(Some(int_type))
+    }
 
-        match mode {
-            InterruptMode::Disabled => {
+    /// Write the 3-bit sensitivity code for a single `bit` into the bank's
+    /// `int_sens_type[0..2]` registers, leaving other pins untouched.
+    fn write_sens_bits(&self, bank: Bank, bit: u32, int_type: u8) {
+        let mut s0 = self.int_sens_read(bank, 0) & !bit;
+        let mut s1 = self.int_sens_read(bank, 1) & !bit;
+        let mut s2 = self.int_sens_read(bank, 2) & !bit;
+
+        if (int_type & 0x1) != 0 {
+            s0 |= bit;
+        }
+        if (int_type & 0x2) != 0 {
+            s1 |= bit;
+        }
+        if (int_type & 0x4) != 0 {
+            s2 |= bit;
+        }
+
+        self.int_sens_write(bank, 0, s0);
+        self.int_sens_write(bank, 1, s1);
+        self.int_sens_write(bank, 2, s2);
+    }
+
+    /// Configure a pin's interrupt sensitivity *and* enable/disable bit.
+    ///
+    /// For finer control (e.g. the HAL `GpioInterrupt` split of configure vs.
+    /// enable), see [`Self::configure_interrupt_sensitivity`] and
+    /// [`Self::set_interrupt_enable`].
+    pub fn configure_interrupt(
+        &self,
+        dev: &BankDevice,
+        pin: u8,
+        mode: InterruptMode,
+        trig: InterruptTrigger,
+    ) -> Result<(), Error> {
+        dev.validate_pin(pin)?;
+
+        let bit = 1u32 << pin;
+        match Self::interrupt_sens_type(mode, trig)? {
+            None => {
                 let en = self.int_en_read(dev.bank) & !bit;
                 self.int_en_write(dev.bank, en);
             }
-            _ => {
+            Some(int_type) => {
                 let en = self.int_en_read(dev.bank) | bit;
                 self.int_en_write(dev.bank, en);
-
-                let mut s0 = self.int_sens_read(dev.bank, 0) & !bit;
-                let mut s1 = self.int_sens_read(dev.bank, 1) & !bit;
-                let mut s2 = self.int_sens_read(dev.bank, 2) & !bit;
-
-                if (int_type & 0x1) != 0 {
-                    s0 |= bit;
-                }
-                if (int_type & 0x2) != 0 {
-                    s1 |= bit;
-                }
-                if (int_type & 0x4) != 0 {
-                    s2 |= bit;
-                }
-
-                self.int_sens_write(dev.bank, 0, s0);
-                self.int_sens_write(dev.bank, 1, s1);
-                self.int_sens_write(dev.bank, 2, s2);
+                self.write_sens_bits(dev.bank, bit, int_type);
             }
         }
 
         Ok(())
+    }
+
+    /// Program a pin's interrupt sensitivity only, without touching the enable
+    /// bit. Mirrors the EarlGrey `irq_configure` semantics where sensitivity
+    /// and enable are controlled independently.
+    pub fn configure_interrupt_sensitivity(
+        &self,
+        dev: &BankDevice,
+        pin: u8,
+        mode: InterruptMode,
+        trig: InterruptTrigger,
+    ) -> Result<(), Error> {
+        dev.validate_pin(pin)?;
+        let bit = 1u32 << pin;
+        // Disabled has no sensitivity to program; treat as code 0 (falling edge)
+        // which is inert while the enable bit stays clear.
+        let int_type = Self::interrupt_sens_type(mode, trig)?.unwrap_or(0);
+        self.write_sens_bits(dev.bank, bit, int_type);
+        Ok(())
+    }
+
+    /// Set the interrupt-enable bits for `mask` on a bank (OR into `int_en`).
+    pub fn set_interrupt_enable(&self, bank: Bank, mask: u32) {
+        let en = self.int_en_read(bank) | mask;
+        self.int_en_write(bank, en);
+    }
+
+    /// Clear the interrupt-enable bits for `mask` on a bank.
+    pub fn clear_interrupt_enable(&self, bank: Bank, mask: u32) {
+        let en = self.int_en_read(bank) & !mask;
+        self.int_en_write(bank, en);
     }
 
     /// Read the latched interrupt status register for a bank.

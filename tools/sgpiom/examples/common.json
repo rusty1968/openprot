@@ -2,7 +2,7 @@
   "board": "common",
   "controller": {
     "name": "sgpiom0",
-    "base_addr": "0x1E780000",
+    "base_addr": "0x7E780500",
     "bus_frequency_hz": 1000000,
     "ngpios": 128,
     "enabled": true

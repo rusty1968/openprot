@@ -110,7 +110,8 @@ def merge_manifests(inputs: Iterable[JsonMap]) -> JsonMap:
 
 
 def _is_nonneg_int(value: Any) -> bool:
-    return isinstance(value, int) and value >= 0
+    # `bool` is a subclass of `int`; exclude it so `true`/`false` are rejected.
+    return type(value) is int and value >= 0
 
 
 def _is_bool(value: Any) -> bool:
@@ -118,7 +119,43 @@ def _is_bool(value: Any) -> bool:
 
 
 def _is_hex_string(value: Any) -> bool:
-    return isinstance(value, str) and value.startswith("0x")
+    # Lowercase `0x` prefix only, to match the schema pattern and keep a single
+    # canonical form across schema-only and tool validation.
+    if not isinstance(value, str) or not value.startswith("0x"):
+        return False
+    try:
+        int(value, 16)
+        return True
+    except ValueError:
+        return False
+
+
+# Largest value representable by the generated `u32` fields.
+_U32_MAX = 0xFFFF_FFFF
+
+
+def _hex_or_int_value(value: Any) -> int:
+    """Numeric value of a hex-string or integer (callers pre-validate the type)."""
+    return int(value, 16) if isinstance(value, str) else int(value)
+
+
+def _rust_str_literal(value: str) -> str:
+    """Emit a `value` as an escaped Rust string literal (incl. surrounding quotes)."""
+    out = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def validate_manifest(manifest: JsonMap) -> ValidationResult:
@@ -151,14 +188,23 @@ def validate_manifest(manifest: JsonMap) -> ValidationResult:
         base_addr = controller["base_addr"]
         if not (_is_hex_string(base_addr) or _is_nonneg_int(base_addr)):
             errors.append("controller.base_addr: must be hex string or integer")
+        elif _hex_or_int_value(base_addr) > _U32_MAX:
+            errors.append("controller.base_addr: exceeds u32 range (> 0xffffffff)")
 
-    if "bus_frequency_hz" in controller and not _is_nonneg_int(
-        controller["bus_frequency_hz"]
+    if "bus_frequency_hz" in controller:
+        bus_freq = controller["bus_frequency_hz"]
+        if not _is_nonneg_int(bus_freq):
+            errors.append("controller.bus_frequency_hz: must be non-negative integer")
+        elif bus_freq > _U32_MAX:
+            errors.append("controller.bus_frequency_hz: exceeds u32 range (> 0xffffffff)")
+
+    if "ngpios" in controller and (
+        not _is_nonneg_int(controller["ngpios"])
+        or controller["ngpios"] == 0
+        or controller["ngpios"] > 128
     ):
-        errors.append("controller.bus_frequency_hz: must be non-negative integer")
-
-    if "ngpios" in controller and (not _is_nonneg_int(controller["ngpios"]) or controller["ngpios"] == 0):
-        errors.append("controller.ngpios: must be positive integer")
+        # Four 32-pin banks (A-P) => 128 max (matches Zephyr AST10x0 DTS).
+        errors.append("controller.ngpios: must be a positive integer <= 128")
 
     if "enabled" in controller and not _is_bool(controller["enabled"]):
         errors.append("controller.enabled: must be bool")
@@ -170,7 +216,9 @@ def validate_manifest(manifest: JsonMap) -> ValidationResult:
 
     bank_by_name: Dict[str, JsonMap] = {}
     seen_bank_names: set[str] = set()
+    seen_pin_offsets: set[int] = set()
     total_bank_gpios = 0
+    controller_ngpios = controller.get("ngpios")
 
     for i, bank in enumerate(banks):
         prefix = f"banks[{i}]"
@@ -194,12 +242,31 @@ def validate_manifest(manifest: JsonMap) -> ValidationResult:
         pin_offset = bank.get("pin_offset")
         if not _is_nonneg_int(pin_offset):
             errors.append(f"{prefix}.pin_offset: must be non-negative integer")
+        elif pin_offset not in (0, 32, 64, 96):
+            # Runtime derives the bank as pin_offset >> 5; only the four 32-pin
+            # bank boundaries are valid (Zephyr offsets 0/32/64/96).
+            errors.append(
+                f"{prefix}.pin_offset: must be one of 0, 32, 64, 96 (got {pin_offset})"
+            )
+        else:
+            if pin_offset in seen_pin_offsets:
+                errors.append(f"{prefix}.pin_offset: duplicate pin_offset {pin_offset}")
+            seen_pin_offsets.add(pin_offset)
 
         ngpios = bank.get("ngpios")
         if not _is_nonneg_int(ngpios) or ngpios == 0 or ngpios > 32:
             errors.append(f"{prefix}.ngpios: must be integer in range 1..32")
         else:
             total_bank_gpios += ngpios
+            if (
+                _is_nonneg_int(pin_offset)
+                and isinstance(controller_ngpios, int)
+                and pin_offset + ngpios > controller_ngpios
+            ):
+                errors.append(
+                    f"{prefix}: pin_offset + ngpios ({pin_offset} + {ngpios}) "
+                    f"exceeds controller.ngpios ({controller_ngpios})"
+                )
 
         reserved = bank.get("reserved_pins")
         if not isinstance(reserved, list):
@@ -213,7 +280,6 @@ def validate_manifest(manifest: JsonMap) -> ValidationResult:
                         f"{prefix}.reserved_pins[{j}]: pin {pin} out of range for ngpios {ngpios}"
                     )
 
-    controller_ngpios = controller.get("ngpios")
     if isinstance(controller_ngpios, int) and total_bank_gpios > controller_ngpios:
         errors.append(
             "controller.ngpios: smaller than sum of bank ngpios "
@@ -272,7 +338,8 @@ def validate_manifest(manifest: JsonMap) -> ValidationResult:
             errors.append(f"{prefix}.active_level: must be 'high' or 'low'")
 
         safe_default = signal.get("safe_default")
-        if safe_default not in (None, 0, 1):
+        # `bool` is an `int` subclass and true==1/false==0, so exclude it explicitly.
+        if not (safe_default is None or (type(safe_default) is int and safe_default in (0, 1))):
             errors.append(f"{prefix}.safe_default: must be null, 0, or 1")
 
         bank = bank_by_name.get(bank_name)
@@ -373,14 +440,11 @@ def render_rust(manifest: JsonMap) -> str:
     lines.append("}")
     lines.append("")
 
-    base_addr = controller["base_addr"]
-    if isinstance(base_addr, str):
-        base_addr_literal = base_addr
-    else:
-        base_addr_literal = hex(base_addr)
+    # Canonicalize to a lowercase `0x` Rust literal regardless of input form.
+    base_addr_literal = hex(_hex_or_int_value(controller["base_addr"]))
 
     lines.append("pub const SGPIOM_CONTROLLER: SgpiomControllerConfig = SgpiomControllerConfig {")
-    lines.append(f"    name: \"{controller['name']}\",")
+    lines.append(f"    name: {_rust_str_literal(controller['name'])},")
     lines.append(f"    base_addr: {base_addr_literal},")
     lines.append(f"    bus_frequency_hz: {controller['bus_frequency_hz']},")
     lines.append(f"    ngpios: {controller['ngpios']},")
@@ -388,22 +452,23 @@ def render_rust(manifest: JsonMap) -> str:
     lines.append("};")
     lines.append("")
 
-    for bank in banks:
-        ident = rust_ident(bank["name"])
+    # Index the const name (not rust_ident(name)) so distinct bank names that
+    # sanitize to the same identifier (e.g. "a-b" / "a_b") cannot collide into
+    # one RESERVED_PINS_* symbol.
+    for i, bank in enumerate(banks):
         reserved = ", ".join(str(pin) for pin in sorted(bank.get("reserved_pins", [])))
         lines.append(
-            f"const RESERVED_PINS_{ident}: [u8; {len(bank.get('reserved_pins', []))}] = [{reserved}];"
+            f"const RESERVED_PINS_{i}: [u8; {len(bank.get('reserved_pins', []))}] = [{reserved}];"
         )
     lines.append("")
 
     lines.append(f"pub const SGPIOM_BANKS: [SgpiomBankConfig; {len(banks)}] = [")
-    for bank in banks:
-        ident = rust_ident(bank["name"])
+    for i, bank in enumerate(banks):
         lines.append("    SgpiomBankConfig {")
-        lines.append(f"        name: \"{bank['name']}\",")
+        lines.append(f"        name: {_rust_str_literal(bank['name'])},")
         lines.append(f"        pin_offset: {bank['pin_offset']},")
         lines.append(f"        ngpios: {bank['ngpios']},")
-        lines.append(f"        reserved_pins: &RESERVED_PINS_{ident},")
+        lines.append(f"        reserved_pins: &RESERVED_PINS_{i},")
         lines.append("    },")
     lines.append("];\n")
 
@@ -420,8 +485,8 @@ def render_rust(manifest: JsonMap) -> str:
             safe_default_text = "Some(true)" if safe_default == 1 else "Some(false)"
 
         lines.append("    SgpiomSignalConfig {")
-        lines.append(f"        logical_name: \"{signal['logical_name']}\",")
-        lines.append(f"        bank: \"{signal['bank']}\",")
+        lines.append(f"        logical_name: {_rust_str_literal(signal['logical_name'])},")
+        lines.append(f"        bank: {_rust_str_literal(signal['bank'])},")
         lines.append(f"        pin: {signal['pin']},")
         lines.append(f"        direction: {dir_value},")
         lines.append(f"        active_level: {lvl_value},")
