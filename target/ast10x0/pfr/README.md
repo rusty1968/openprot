@@ -53,7 +53,7 @@ shared memory is reached through a caller-supplied buffer address (see §7).
 SwmbxCtrl
 ├── mbx_en:           u8                        // GLOBAL feature switches
 ├── node:             [[SwmbxNode; 256]; 2]     // per-port, per-address policy
-├── fifo:             [SwmbxFifo<256>; 4]       // the four FIFO endpoints
+├── fifo:             [SwmbxFifo<257>; 4]       // the four FIFO endpoints (N = depth + 1, see below)
 ├── mbx_fifo_execute: [bool; 2]                 // per-port: in a FIFO transaction?
 ├── mbx_fifo_addr:    [u8;   2]                 // per-port: address that opened it
 ├── mbx_fifo_idx:     [u8;   2]                 // per-port: which FIFO is active
@@ -97,10 +97,14 @@ struct SwmbxFifo<N> {
     fifo_write:    bool,  // runtime: was anything written this txn?
     fifo_offset:   u8,    // the address this FIFO is bound to
     enabled:       bool,  // is this FIFO active?
-    msg_index:     usize, // write cursor
-    max_msg_count: usize, // effective depth (<= N)
+    max_msg_count: usize, // effective depth (< N)
 }
 ```
+
+> The queue is sized `N = SWMBX_FIFO_DEPTH + 1` (`FIFO_QUEUE_SLOTS`) because
+> heapless's `spsc::Queue<T, N>` stores at most `N - 1` elements; the extra
+> slot is what lets a FIFO configured at the maximum depth actually hold
+> `SWMBX_FIFO_DEPTH` messages.
 
 > Note the name collision: `SwmbxNode::notify_flag` is a **bool event latch**,
 > while `SwmbxFifo::notify_flag` is a **u8 configuration mask** of
@@ -180,7 +184,9 @@ FIFO routing is *per transaction*, bracketed by `send_start` / `send_stop`:
    │             • on first write, if NOTIFY armed + node NOTIFY set +
    │               fifo START-notify configured  → latch node notify_flag,
    │               mark notify_start so it fires only once
-   │             • on FIFO full → latch node notify_flag, return FifoFull
+   │             • on FIFO full → return FifoFull; if NOTIFY armed + the
+   │               FIFO's bound node has NOTIFY set, latch that node's
+   │               notify_flag as an overflow event
    │
  get_msg(port, addr)         (repeatable)
    │  FIFO path → fifo[i].dequeue()  // pops oldest byte; empty FIFO returns 0
@@ -283,7 +289,7 @@ state. Because of this:
 | `InvalidAddress`       | `0x1002` | address outside the buffer / node range          |
 | `InvalidFifoIndex`     | `0x1003` | `index >= SWMBX_FIFO_COUNT`                       |
 | `InvalidFifoDepth`     | `0x1004` | configured depth is 0 or `> SWMBX_FIFO_DEPTH`     |
-| `InvalidFlagMask`      | `0x1005` | `enable_behavior` flag has no known bits          |
+| `InvalidFlagMask`      | `0x1005` | `enable_behavior` flag is zero or has unknown bits |
 | `InvalidProtectRange`  | `0x1006` | `apply_protect` slice out of range / overflows    |
 | `FifoFull`             | `0x1007` | append to a full FIFO                              |
 | `FifoEmpty`            | `0x1008` | read from an empty FIFO                            |
@@ -303,7 +309,7 @@ let mut backing = [0u8; BUF_LEN];
 
 // SAFETY: `backing` is live, uniquely-owned memory for the controller's life.
 let mut ctrl = unsafe {
-    SwmbxCtrl::new_with_regions(BUF_LEN, backing.as_mut_ptr() as usize, 0)
+    SwmbxCtrl::new_with_regions(BUF_LEN, backing.as_mut_ptr() as usize)
 };
 
 // --- Flat register with write-protect + notify -------------------------------
@@ -374,7 +380,7 @@ iic read_byte  i2c@7e7b0080 38 d
 
 ```sh
 # Build the (target-only) library
-bazel build //target/ast10x0/pfr:pfr
+bazel build --config=k_ast1060_evb //target/ast10x0/pfr:pfr
 
 # Run the host unit tests
 bazel test //target/ast10x0/pfr:swmbx_ctrl_host_test
