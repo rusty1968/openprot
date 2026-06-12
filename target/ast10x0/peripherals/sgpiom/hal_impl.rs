@@ -141,10 +141,6 @@ impl GpioInterrupt for SgpiomBankPort {
         mask: Self::Mask,
         sensitivity: EdgeSensitivity,
     ) -> Result<(), Self::Error> {
-        // Validate up front so a mixed valid/invalid mask cannot partially
-        // program some pins before erroring.
-        self.dev.validate_mask(mask.0)?;
-
         let (mode, trig) = match sensitivity {
             EdgeSensitivity::RisingEdge => (InterruptMode::Edge, InterruptTrigger::High),
             EdgeSensitivity::FallingEdge => (InterruptMode::Edge, InterruptTrigger::Low),
@@ -153,14 +149,8 @@ impl GpioInterrupt for SgpiomBankPort {
             EdgeSensitivity::LowLevel => (InterruptMode::Level, InterruptTrigger::Low),
         };
 
-        let mut pins = mask.0;
-        while pins != 0 {
-            let pin = pins.trailing_zeros() as u8;
-            self.sgpiom
-                .configure_interrupt_sensitivity(&self.dev, pin, mode, trig)?;
-            pins &= pins - 1;
-        }
-        Ok(())
+        self.sgpiom
+            .configure_interrupt_sensitivity_masked(&self.dev, mask.0, mode, trig)
     }
 
     /// Enable/disable/clear/query interrupts for the masked pins.
