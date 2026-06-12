@@ -212,26 +212,46 @@ impl Sgpiom {
         Ok(Some(int_type))
     }
 
-    /// Write the 3-bit sensitivity code for a single `bit` into the bank's
-    /// `int_sens_type[0..2]` registers, leaving other pins untouched.
-    fn write_sens_bits(&self, bank: Bank, bit: u32, int_type: u8) {
-        let mut s0 = self.int_sens_read(bank, 0) & !bit;
-        let mut s1 = self.int_sens_read(bank, 1) & !bit;
-        let mut s2 = self.int_sens_read(bank, 2) & !bit;
+    /// Write the 3-bit sensitivity code for every set bit in `mask` into the
+    /// bank's `int_sens_type[0..2]` registers, leaving other pins untouched.
+    ///
+    /// The three sensitivity registers can only be rewritten one at a time, so
+    /// a pin whose interrupt is enabled would pass through transient codes
+    /// while they are updated (e.g. level-high `011` -> falling-edge `000`
+    /// passes through level-low `010` after the first write) and could latch a
+    /// spurious interrupt. To prevent that, any currently enabled pins in
+    /// `mask` are disabled for the duration of the update; status latched
+    /// under the old or transient sensitivity is cleared before their enable
+    /// bits are restored.
+    fn write_sens_bits(&self, bank: Bank, mask: u32, int_type: u8) {
+        let en = self.int_en_read(bank);
+        let enabled = en & mask;
+        if enabled != 0 {
+            self.int_en_write(bank, en & !mask);
+        }
+
+        let mut s0 = self.int_sens_read(bank, 0) & !mask;
+        let mut s1 = self.int_sens_read(bank, 1) & !mask;
+        let mut s2 = self.int_sens_read(bank, 2) & !mask;
 
         if (int_type & 0x1) != 0 {
-            s0 |= bit;
+            s0 |= mask;
         }
         if (int_type & 0x2) != 0 {
-            s1 |= bit;
+            s1 |= mask;
         }
         if (int_type & 0x4) != 0 {
-            s2 |= bit;
+            s2 |= mask;
         }
 
         self.int_sens_write(bank, 0, s0);
         self.int_sens_write(bank, 1, s1);
         self.int_sens_write(bank, 2, s2);
+
+        if enabled != 0 {
+            self.clear_interrupt_status(bank, enabled);
+            self.int_en_write(bank, self.int_en_read(bank) | enabled);
+        }
     }
 
     /// Configure a pin's interrupt sensitivity *and* enable/disable bit.
@@ -255,9 +275,13 @@ impl Sgpiom {
                 self.int_en_write(dev.bank, en);
             }
             Some(int_type) => {
+                // Program sensitivity while the pin is (still) disabled, then
+                // clear any status latched under the previous sensitivity so a
+                // stale event cannot fire the moment the enable bit is set.
+                self.write_sens_bits(dev.bank, bit, int_type);
+                self.clear_interrupt_status(dev.bank, bit);
                 let en = self.int_en_read(dev.bank) | bit;
                 self.int_en_write(dev.bank, en);
-                self.write_sens_bits(dev.bank, bit, int_type);
             }
         }
 
@@ -275,11 +299,29 @@ impl Sgpiom {
         trig: InterruptTrigger,
     ) -> Result<(), Error> {
         dev.validate_pin(pin)?;
-        let bit = 1u32 << pin;
         // Disabled has no sensitivity to program; treat as code 0 (falling edge)
         // which is inert while the enable bit stays clear.
         let int_type = Self::interrupt_sens_type(mode, trig)?.unwrap_or(0);
-        self.write_sens_bits(dev.bank, bit, int_type);
+        self.write_sens_bits(dev.bank, 1u32 << pin, int_type);
+        Ok(())
+    }
+
+    /// Program interrupt sensitivity for every pin in `mask` in one pass
+    /// (three register read-modify-writes total, instead of three per pin).
+    /// Like [`Self::configure_interrupt_sensitivity`], the enable bits are not
+    /// changed.
+    pub fn configure_interrupt_sensitivity_masked(
+        &self,
+        dev: &BankDevice,
+        mask: u32,
+        mode: InterruptMode,
+        trig: InterruptTrigger,
+    ) -> Result<(), Error> {
+        dev.validate_mask(mask)?;
+        let int_type = Self::interrupt_sens_type(mode, trig)?.unwrap_or(0);
+        if mask != 0 {
+            self.write_sens_bits(dev.bank, mask, int_type);
+        }
         Ok(())
     }
 
