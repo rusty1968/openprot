@@ -11,6 +11,11 @@ pub const SWMBX_FIFO_COUNT: usize = 4;
 pub const SWMBX_FIFO_DEPTH: usize = 256;
 pub const SWMBX_BUF_BASE: usize = 0x7e7b_0e00;
 
+/// heapless `spsc::Queue<T, N>` stores at most `N - 1` elements, so the
+/// backing queue needs one slot more than the deepest configurable FIFO for a
+/// depth of [`SWMBX_FIFO_DEPTH`] to actually hold that many messages.
+const FIFO_QUEUE_SLOTS: usize = SWMBX_FIFO_DEPTH + 1;
+
 const _: () = assert!(SWMBX_NODE_COUNT == 256);
 const _: () = assert!(SWMBX_NODE_COUNT == (u8::MAX as usize) + 1);
 
@@ -102,7 +107,6 @@ struct SwmbxFifo<const N: usize> {
     fifo_write: bool,
     fifo_offset: u8,
     enabled: bool,
-    msg_index: usize,
     max_msg_count: usize,
 }
 
@@ -115,7 +119,6 @@ impl<const N: usize> SwmbxFifo<N> {
             fifo_write: false,
             fifo_offset: 0,
             enabled: false,
-            msg_index: 0,
             max_msg_count: SWMBX_FIFO_DEPTH,
         }
     }
@@ -129,11 +132,6 @@ impl<const N: usize> SwmbxFifo<N> {
             self.queue
                 .enqueue(SwmbxFifoEntry { value })
                 .map_err(|_| SwmbxError::FifoFull)?;
-            if self.msg_index == (self.max_msg_count - 1) {
-                self.msg_index = 0;
-            } else {
-                self.msg_index = (self.msg_index + 1) % self.max_msg_count;
-            }
             Ok(())
         } else {
             Err(SwmbxError::FifoFull)
@@ -151,7 +149,6 @@ impl<const N: usize> SwmbxFifo<N> {
 
     pub fn flush(&mut self) {
         while self.queue.dequeue().is_some() {}
-        self.msg_index = 0;
         self.notify_start = false;
         self.fifo_write = false;
     }
@@ -174,7 +171,7 @@ pub struct SwmbxCtrl {
     // type `!Sync`, so accidental cross-context sharing is a compile error.
     mbx_en: u8,
     node: [[SwmbxNode; SWMBX_NODE_COUNT]; SWMBX_DEV_COUNT],
-    fifo: [SwmbxFifo<SWMBX_FIFO_DEPTH>; SWMBX_FIFO_COUNT],
+    fifo: [SwmbxFifo<FIFO_QUEUE_SLOTS>; SWMBX_FIFO_COUNT],
     mbx_fifo_execute: [bool; SWMBX_DEV_COUNT],
     mbx_fifo_addr: [u8; SWMBX_DEV_COUNT],
     mbx_fifo_idx: [u8; SWMBX_DEV_COUNT],
@@ -334,7 +331,6 @@ impl SwmbxCtrl {
             fifo.fifo_offset = addr;
             fifo.max_msg_count = depth;
             fifo.notify_flag = notify;
-            fifo.msg_index = 0;
             fifo.notify_start = false;
             fifo.fifo_write = false;
             fifo.queue = Queue::new();
@@ -366,10 +362,10 @@ impl SwmbxCtrl {
     /// Enables or disables global SWMBX behavior flags.
     ///
     /// # Errors
-    /// Returns [`SwmbxError::InvalidFlagMask`] if `flag` contains no known
-    /// behavior bits ([`FLAG_MASK`]).
+    /// Returns [`SwmbxError::InvalidFlagMask`] if `flag` is zero or contains
+    /// bits outside the known behavior set ([`FLAG_MASK`]).
     pub fn enable_behavior(&mut self, flag: u8, enable: bool) -> Result<(), SwmbxError> {
-        if (flag & FLAG_MASK) == 0 {
+        if flag == 0 || (flag & !FLAG_MASK) != 0 {
             return Err(SwmbxError::InvalidFlagMask);
         }
 
@@ -504,7 +500,14 @@ impl SwmbxCtrl {
             let fifo_index = self.mbx_fifo_idx[port] as usize;
 
             if let Err(err) = self.fifo[fifo_index].append_write(val) {
-                self.node[port][addr as usize].notify_flag = true;
+                // Overflow notification belongs to the FIFO's bound address
+                // (`addr` is the caller's running cursor, which has usually
+                // walked past the FIFO offset by the time the queue fills) and
+                // obeys the same notify gating as every other latch.
+                let node = &mut self.node[port][fifo_addr as usize];
+                if (self.mbx_en & SWMBX_NOTIFY) != 0 && (node.enabled_flags & SWMBX_NOTIFY) != 0 {
+                    node.notify_flag = true;
+                }
                 return Err(err);
             }
 
@@ -860,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn fifo_full_returns_error_and_sets_node_notify() {
+    fn fifo_full_notify_is_gated_and_latches_on_fifo_addr() {
         let mut host_buffer = [0u8; SWMBX_NODE_COUNT];
         // SAFETY: `buffer_base` is live, uniquely-owned host storage for the test.
         let mut ctrl = unsafe {
@@ -873,12 +876,57 @@ mod tests {
         ctrl.update_fifo(0, addr, 1, 0, true)
             .expect("fifo setup failed");
 
+        // Notify disabled (globally and per node): overflow errors but must not
+        // latch a spurious notification.
         ctrl.send_start(0, addr).expect("send_start failed");
         ctrl.send_msg(0, addr, 0x11)
             .expect("first fifo write failed");
-
         assert_eq!(ctrl.send_msg(0, addr, 0x22), Err(SwmbxError::FifoFull));
+        assert!(ctrl.take_notify().is_none());
+        ctrl.send_stop(0).expect("send_stop failed");
+
+        // With notify enabled, the overflow latch lands on the FIFO's bound
+        // address even when the caller's cursor has walked past it.
+        ctrl.enable_behavior(SWMBX_NOTIFY, true)
+            .expect("enable notify failed");
+        ctrl.update_notify(0, addr, true)
+            .expect("update_notify failed");
+        ctrl.flush_fifo(0).expect("flush_fifo failed");
+
+        ctrl.send_start(0, addr).expect("send_start failed");
+        ctrl.send_msg(0, addr, 0x11)
+            .expect("first fifo write failed");
+        let cursor = addr.wrapping_add(1);
+        assert_eq!(ctrl.send_msg(0, cursor, 0x22), Err(SwmbxError::FifoFull));
         assert!(ctrl.node[0][addr as usize].notify_flag);
+        assert!(!ctrl.node[0][cursor as usize].notify_flag);
+    }
+
+    #[test]
+    fn fifo_at_max_depth_holds_exactly_that_many_messages() {
+        let mut host_buffer = [0u8; SWMBX_NODE_COUNT];
+        // SAFETY: `buffer_base` is live, uniquely-owned host storage for the test.
+        let mut ctrl = unsafe {
+            SwmbxCtrl::new_with_regions(host_buffer.len(), host_buffer.as_mut_ptr() as usize)
+        };
+
+        let addr = 0x0d;
+        ctrl.enable_behavior(SWMBX_FIFO, true)
+            .expect("enable fifo failed");
+        ctrl.update_fifo(0, addr, SWMBX_FIFO_DEPTH, 0, true)
+            .expect("fifo setup failed");
+
+        ctrl.send_start(0, addr).expect("send_start failed");
+        for i in 0..SWMBX_FIFO_DEPTH {
+            ctrl.send_msg(0, addr, i as u8)
+                .unwrap_or_else(|e| panic!("write {} failed: {:?}", i, e));
+        }
+        assert_eq!(ctrl.send_msg(0, addr, 0xee), Err(SwmbxError::FifoFull));
+
+        for i in 0..SWMBX_FIFO_DEPTH {
+            assert_eq!(ctrl.get_msg(0, addr).expect("fifo read failed"), i as u8);
+        }
+        assert_eq!(ctrl.get_msg(0, addr).expect("empty fifo read failed"), 0);
     }
 
     #[test]
@@ -1101,6 +1149,16 @@ mod tests {
 
         assert_eq!(
             ctrl.enable_behavior(0, true),
+            Err(SwmbxError::InvalidFlagMask)
+        );
+        // Unknown bits are rejected even when combined with valid ones, so
+        // stray bits can never be stored into the global enable mask.
+        assert_eq!(
+            ctrl.enable_behavior(0x80, true),
+            Err(SwmbxError::InvalidFlagMask)
+        );
+        assert_eq!(
+            ctrl.enable_behavior(SWMBX_PROTECT | 0x80, true),
             Err(SwmbxError::InvalidFlagMask)
         );
         assert_eq!(
