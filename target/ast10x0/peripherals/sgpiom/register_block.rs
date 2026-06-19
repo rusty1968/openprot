@@ -56,20 +56,19 @@ impl Sgpiom {
             return Err(Error::InvalidNgpios);
         }
 
-        let numbers = ((ngpios as u32 + 7) / 8) & 0x1f;
-        let mut value = self.regs().gpio554().read().bits();
+        let numbers = ((ngpios as u32 + 7) / 8) as u8;
 
-        value |= 1; // enable
-        value &= !(0x1f << 6);
-        value |= numbers << 6;
-        value &= !(0xffff << 16);
-        value |= (clock_div as u32) << 16;
-
-        self.regs().gpio554().write(|w| unsafe { w.bits(value) });
+        self.regs().gpio554().modify(|_, w| {
+            w.enbl_of_serial_gpio().set_bit();
+            // SAFETY: writing the datasheet-defined numbers and clock-division fields.
+            unsafe { w.numbers_of_serial_gpiopins().bits(numbers) };
+            unsafe { w.serial_gpioclk_division().bits(clock_div) };
+            w
+        });
         Ok(())
     }
 
-    /// Read the raw 32-bit output register for a bank.
+    /// Read the raw 32-bit Data Value register for a bank (sampled serial input).
     #[must_use]
     pub fn port_get_raw(&self, bank: Bank) -> u32 {
         match bank {
@@ -80,8 +79,27 @@ impl Sgpiom {
         }
     }
 
+    /// Read the output-latch readback register for a bank.
+    ///
+    /// Use this for read-modify-write of outputs. `port_get_raw` returns the
+    /// sampled serial input state, not the last driven value.
+    #[must_use]
+    pub fn read_output_latch(&self, bank: Bank) -> u32 {
+        match bank {
+            Bank::Ad => self.regs().gpio570().read().bits(),
+            Bank::Eh => self.regs().gpio574().read().bits(),
+            Bank::Il => self.regs().gpio578().read().bits(),
+            // SAFETY: `self.sgpiom` is a valid RegisterBlock pointer. +0x7c is the
+            // MP write-latch readback register inside the 0x100-byte SGPIOM register file.
+            Bank::Mp => unsafe {
+                let base = self.sgpiom.cast::<u8>();
+                core::ptr::read_volatile(base.add(0x7c).cast::<u32>())
+            },
+        }
+    }
+
     pub fn port_set_masked_raw(&self, bank: Bank, mask: u32, value: u32) {
-        let current = self.port_get_raw(bank);
+        let current = self.read_output_latch(bank);
         let next = (current & !mask) | (value & mask);
         self.port_write_raw(bank, next);
     }
@@ -95,7 +113,7 @@ impl Sgpiom {
     }
 
     pub fn port_toggle_bits(&self, bank: Bank, mask: u32) {
-        let current = self.port_get_raw(bank);
+        let current = self.read_output_latch(bank);
         self.port_write_raw(bank, current ^ mask);
     }
 
