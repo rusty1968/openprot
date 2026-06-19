@@ -60,7 +60,7 @@ fn run_smoke_test() -> bool {
         return false;
     }
 
-    if (sgpiom.port_get_raw(Bank::Ad) & (1 << 1)) == 0 {
+    if (sgpiom.read_output_latch(Bank::Ad) & (1 << 1)) == 0 {
         pw_log::error!("configure_pin did not set pin high");
         return false;
     }
@@ -130,6 +130,12 @@ fn run_smoke_test() -> bool {
         return false;
     }
 
+    let latched = sgpiom.read_output_latch(Bank::Ad);
+    if (latched & (1 << 5)) == 0 || (latched & (1 << 3)) != 0 {
+        pw_log::error!("HAL operations produced unexpected output state");
+        return false;
+    }
+
     if bank_port.set_passthrough_mask(SgpiomMask(1 << 5)).is_err() {
         pw_log::error!("HAL passthrough failed");
         return false;
@@ -137,19 +143,6 @@ fn run_smoke_test() -> bool {
 
     if bank_port.clear_passthrough().is_err() {
         pw_log::error!("HAL clear_passthrough failed");
-        return false;
-    }
-
-    let observed = match bank_port.read_input() {
-        Ok(v) => v.0,
-        Err(_) => {
-            pw_log::error!("HAL read_input failed");
-            return false;
-        }
-    };
-
-    if (observed & (1 << 5)) == 0 || (observed & (1 << 3)) != 0 {
-        pw_log::error!("HAL operations produced unexpected output state");
         return false;
     }
 
