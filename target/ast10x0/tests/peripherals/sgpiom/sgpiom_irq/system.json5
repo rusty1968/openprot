@@ -31,10 +31,10 @@
     },
     kernel: {
         flash_start_address: 0x00000800,  // After vector table
-        // 0x7800 so the kernel flash ends exactly at 0x8000 — a PMSAv7 MPU
-        // 16KB subregion boundary — and the app starts there without the
-        // subregion-overlap warning. Kernel code is ~30KB.
-        flash_size_bytes: 30720,          // 0x7800 (0x800..0x8000)
+        // 0xF800 so the kernel flash ends at 0x10000 — a natural 64KB / PMSAv7
+        // MPU boundary. The hardware (opt) build uses ~30KB; the QEMU fastbuild
+        // grows to ~47KB, so we size for headroom. App starts at 0x10000.
+        flash_size_bytes: 63488,          // 0xF800 (0x800..0x10000)
         ram_start_address: 0x00060000,
         ram_size_bytes: 131072,           // 128KB
     },
