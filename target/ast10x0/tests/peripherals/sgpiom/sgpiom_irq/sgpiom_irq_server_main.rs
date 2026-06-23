@@ -117,7 +117,15 @@ fn entry() {
             ((data >> pin) & 1) as u32
         );
     }
-    pw_log::info!("{}", monitor.dump_state(Bank::Ad));
+    let state = monitor.dump_state(Bank::Ad);
+    pw_log::info!(
+        "SGPIO state: config=0x{:08x} data=0x{:08x} latch=0x{:08x} int_en=0x{:08x} int_status=0x{:08x}",
+        state.config as u32,
+        state.data as u32,
+        state.latch as u32,
+        state.int_en as u32,
+        state.int_status as u32,
+    );
 
     // INPUT/IRQ: both-edge sensitivity on the watched pins.
     if port

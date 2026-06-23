@@ -64,6 +64,11 @@
                                 },
                             ],
                         },
+                        {
+                            type: "thread",
+                            name: "sgpiom_irq_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },
                     ],
                     memory_mappings: [
                         {
@@ -73,12 +78,6 @@
                             type: "device",
                             start_address: 0x7e780000,
                             size_bytes: 0x1000,
-                        },
-                    ],
-                    threads: [
-                        {
-                            name: "sgpiom_irq_thread",
-                            kernel_stack_size_bytes: 4096,
                         },
                     ],
                 },
