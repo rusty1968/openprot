@@ -97,16 +97,15 @@ impl Sgpiom {
             return Err(Error::InvalidNgpios);
         }
 
-        let numbers = ((ngpios as u32 + 7) / 8) & 0x1f;
-        let mut value = self.regs().gpio554().read().bits();
+        let numbers = ((ngpios as u32 + 7) / 8) as u8;
 
-        value |= 1; // enable
-        value &= !(0x1f << 6);
-        value |= numbers << 6;
-        value &= !(0xffff << 16);
-        value |= (clock_div as u32) << 16;
-
-        self.regs().gpio554().write(|w| unsafe { w.bits(value) });
+        self.regs().gpio554().modify(|_, w| {
+            w.enbl_of_serial_gpio().set_bit();
+            // SAFETY: writing the datasheet-defined numbers and clock-division fields.
+            unsafe { w.numbers_of_serial_gpiopins().bits(numbers) };
+            unsafe { w.serial_gpioclk_division().bits(clock_div) };
+            w
+        });
         Ok(())
     }
 
