@@ -6,7 +6,7 @@ use openprot_hal_blocking::gpio_port::{
     GpioInterrupt, GpioPort, InterruptOperation, PinConfig, PinDirection, PinMask,
 };
 
-use super::register_block::Sgpiom;
+use super::registers::Sgpiom;
 use super::types::{BankDevice, Error, InterruptMode, InterruptTrigger};
 
 /// 32-bit pin mask for a single SGPIOM bank.

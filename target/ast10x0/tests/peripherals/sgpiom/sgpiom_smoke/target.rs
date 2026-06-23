@@ -164,7 +164,10 @@ fn run_smoke_test() -> bool {
 
     // HAL GpioInterrupt: configure sensitivity, then enable/query/clear/disable.
     let irq_mask = SgpiomMask(1 << 6);
-    if bank_port.irq_configure(irq_mask, EdgeSensitivity::RisingEdge).is_err() {
+    if bank_port
+        .irq_configure(irq_mask, EdgeSensitivity::RisingEdge)
+        .is_err()
+    {
         pw_log::error!("HAL irq_configure failed");
         return false;
     }
@@ -187,7 +190,10 @@ fn run_smoke_test() -> bool {
     }
 
     // IsPending must not error (status value is environment-dependent).
-    if bank_port.irq_control(irq_mask, InterruptOperation::IsPending).is_err() {
+    if bank_port
+        .irq_control(irq_mask, InterruptOperation::IsPending)
+        .is_err()
+    {
         pw_log::error!("HAL irq IsPending failed");
         return false;
     }

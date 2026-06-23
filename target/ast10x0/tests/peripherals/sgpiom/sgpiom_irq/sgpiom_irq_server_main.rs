@@ -117,7 +117,7 @@ fn entry() {
             ((data >> pin) & 1) as u32
         );
     }
-    monitor.debug_dump(Bank::Ad);
+    pw_log::info!("{}", monitor.dump_state(Bank::Ad));
 
     // INPUT/IRQ: both-edge sensitivity on the watched pins.
     if port

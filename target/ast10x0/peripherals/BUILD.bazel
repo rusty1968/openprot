@@ -36,7 +36,7 @@ rust_library(
         "sgpiom/controller.rs",
         "sgpiom/hal_impl.rs",
         "sgpiom/mod.rs",
-        "sgpiom/register_block.rs",
+        "sgpiom/registers.rs",
         "sgpiom/types.rs",
         "smc/controller.rs",
         "smc/device/block_device.rs",

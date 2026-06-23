@@ -20,7 +20,7 @@ pub enum InitialLevel {
     High,
 }
 
-/// Low-level per-pin configuration used by [`crate::sgpiom::register_block::Sgpiom::configure_pin`].
+/// Low-level per-pin configuration used by [`crate::sgpiom::registers::Sgpiom::configure_pin`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SgpiomPinConfig {
     pub direction: Direction,
