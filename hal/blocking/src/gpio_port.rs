@@ -242,4 +242,3 @@ pub trait GpioBankPassthrough: GpioPort {
     /// Disable passthrough for all pins.
     fn clear_passthrough(&mut self) -> Result<(), Self::Error>;
 }
-

@@ -9,6 +9,18 @@ use super::types::{
     SgpiomPinConfig,
 };
 
+/// Snapshot of live SGPIOM register state for one bank, returned by
+/// [`Sgpiom::dump_state`]. The caller decides how to log or inspect the values.
+#[derive(Debug, Clone, Copy)]
+pub struct SgpiomBankState {
+    pub bank: Bank,
+    pub config: u32,
+    pub data: u32,
+    pub latch: u32,
+    pub int_en: u32,
+    pub int_status: u32,
+}
+
 pub struct Sgpiom {
     sgpiom: *const device::sgpiom::RegisterBlock,
     /// Prevent `Send` and `Sync`.
@@ -57,20 +69,21 @@ impl Sgpiom {
         self.regs().gpio554().read().bits()
     }
 
-    /// Dump the live SGPIOM register state for a bank via `pw_log::info!`.
+    /// Snapshot the live SGPIOM register state for a bank.
     ///
     /// All values are read back from hardware (not the last written value), so
     /// this confirms whether writes actually stuck and the engine reflects them.
-    pub fn debug_dump(&self, bank: Bank) {
-        pw_log::info!(
-            "sgpiom dump bank={} cfg(554)=0x{:08x} data(500)=0x{:08x} latch=0x{:08x} int_en=0x{:08x} int_sts=0x{:08x}",
-            bank as u32,
-            self.read_config() as u32,
-            self.port_get_raw(bank) as u32,
-            self.read_output_latch(bank) as u32,
-            self.int_en_read(bank) as u32,
-            self.interrupt_status(bank) as u32
-        );
+    /// The caller is responsible for logging or otherwise consuming the result.
+    #[must_use]
+    pub fn dump_state(&self, bank: Bank) -> SgpiomBankState {
+        SgpiomBankState {
+            bank,
+            config: self.read_config(),
+            data: self.port_get_raw(bank),
+            latch: self.read_output_latch(bank),
+            int_en: self.int_en_read(bank),
+            int_status: self.interrupt_status(bank),
+        }
     }
 
     /// Configures SGPIOM global settings.
