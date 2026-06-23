@@ -1,14 +1,12 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-//! SGPIOM combined output + interrupt test (single process, userspace, ONE image).
+//! SGPIOM output + interrupt configuration test (userspace).
 //!
-//! Does everything in one continuous loop:
-//!   - OUTPUT: blinks SGPIO_A pins 0..7 (LEDs) high/low each tick (0xff <-> 0x00).
-//!   - INPUT/IRQ: arms both-edge interrupts on the watched input mask via the HAL
-//!     [`GpioInterrupt`] trait and reports each edge. Interrupts are delivered to
-//!     userspace via the microkernel wait-on-object model (`object_wait`), not via
-//!     in-driver ISR callbacks (`register_interrupt_handler` is unsupported).
+//! - Drives a static pattern on SGPIO_A 0..7 output pins.
+//! - Arms both-edge interrupts on the same pins via the HAL `GpioInterrupt` trait.
+//! - Verifies the `int_en` register matches the watch mask after arming.
+//! - Calls `debug_shutdown(Ok(()))` → `TEST_RESULT:PASS` on success.
 //!
 //! Config matches Zephyr's live SGPIOM state (ngpios=128 -> numbers=16, clock
 //! divider 24) so the full serial daisy chain is clocked.
@@ -25,7 +23,6 @@ use openprot_hal_blocking::gpio_port::{
 use pw_status::Error;
 use userspace::entry;
 use userspace::syscall;
-use userspace::time::Duration;
 
 /// Controller total SGPIO count (Zephyr DTS uses 128 -> numbers = 16 bytes).
 const NGPIOS: u16 = 128;
@@ -39,8 +36,6 @@ const OUT_MASK: u32 = 0x0000_00ff;
 const OUT_PATTERN: u32 = 0x0000_0055;
 /// Watched input pins for interrupts (SGPIO_A 0..7).
 const WATCH_MASK: u32 = 0x0000_00ff;
-/// Input-poll cadence (re-check, not a FAIL timeout).
-const POLL_MS: i64 = 500;
 
 macro_rules! fail {
     ($($arg:tt)*) => {{
@@ -160,56 +155,31 @@ fn entry() {
         WATCH_MASK as u32
     );
 
-    // Loop: report input edges. object_wait blocks until an IRQ is delivered or
-    // the re-check deadline (not a FAIL timeout). The output pattern stays held.
-    //
-    // `interrupt_status` only tells WHICH pin edged, not the direction. For
-    // both-edge sensitivity we infer rising/falling by diffing against the last
-    // observed level snapshot. A latched edge whose level matches the snapshot
-    // (logged `unchanged`) means the pin toggled and returned between scans —
-    // expected with serial-sampled SGPIO, not a bug.
-    let poll = Duration::from_millis(POLL_MS);
-    let mut prev = data;
-    loop {
-        let deadline = syscall::debug_clock_now() + poll;
-        let _ = syscall::object_wait(handle::WG, signals::SGPIOM, deadline);
-
-        let status = monitor.interrupt_status(Bank::Ad) & WATCH_MASK;
-        if status != 0 {
-            let now = monitor.port_get_raw(Bank::Ad);
-            // Decode each set status bit to a concrete pin so it's human-readable.
-            let mut bits = status;
-            while bits != 0 {
-                let pin = bits.trailing_zeros();
-                bits &= bits - 1;
-                let old = (prev >> pin) & 1;
-                let new = (now >> pin) & 1;
-                let edge: &str = if new > old {
-                    "rising 0->1"
-                } else if new < old {
-                    "falling 1->0"
-                } else {
-                    "unchanged (toggled between scans)"
-                };
-                pw_log::info!(
-                    "SGPIO edge: SGPIO_{}{} (pin {}) {}",
-                    group_letter(pin) as &str,
-                    (pin % 8) as u32,
-                    pin as u32,
-                    edge as &str
-                );
-            }
-            prev = now;
-            let _ = port.irq_control(SgpiomMask(status), InterruptOperation::Clear);
-        }
-        let _ = syscall::interrupt_ack(handle::SGPIOM_IRQ, signals::SGPIOM);
+    // Verify IRQ registers were correctly programmed by reading back state.
+    // int_en must have every watched pin enabled; int_status should be clear
+    // (no spurious edge before we've driven anything). This validates the full
+    // IRQ configuration path without requiring an external signal source.
+    let armed = monitor.dump_state(Bank::Ad);
+    pw_log::info!(
+        "Armed state: int_en=0x{:08x} int_status=0x{:08x}",
+        armed.int_en as u32,
+        armed.int_status as u32,
+    );
+    if armed.int_en & WATCH_MASK != WATCH_MASK {
+        fail!(
+            "int_en mismatch: got 0x{:08x}, expected 0x{:08x}",
+            (armed.int_en & WATCH_MASK) as u32,
+            WATCH_MASK as u32
+        );
     }
+    pw_log::info!("PASS: IRQ configuration verified");
+    let _ = syscall::debug_shutdown(Ok(()));
+    loop {}
 }
 
-/// Busy-wait `ms` milliseconds on the monotonic clock. Unlike `sleep_until`,
-/// this does not rely on `object_wait` (which returns early on this target), so
-/// it gives the HW SGPIO serial scan real wall-clock time to settle.
+/// Busy-wait `ms` milliseconds on the monotonic clock.
 fn busy_wait_ms(ms: i64) {
+    use userspace::time::Duration;
     let until = syscall::debug_clock_now() + Duration::from_millis(ms);
     while syscall::debug_clock_now() < until {}
 }
