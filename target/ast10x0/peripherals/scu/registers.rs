@@ -27,7 +27,10 @@ impl ScuRegisters {
     /// - `base` points to a valid SCU register block.
     /// - access to the SCU instance is serialized appropriately.
     const unsafe fn new(base: *const device::scu::RegisterBlock) -> Self {
-        Self { base, _not_send_sync: PhantomData }
+        Self {
+            base,
+            _not_send_sync: PhantomData,
+        }
     }
 
     /// Create a register accessor for the global SCU instance.

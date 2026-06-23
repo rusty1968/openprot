@@ -14,15 +14,44 @@
       "safe_default"
     ],
     "properties": {
-      "logical_name": { "type": "string", "minLength": 1 },
-      "bank": { "type": "string", "minLength": 1 },
-      "pin": { "type": "integer", "minimum": 0 },
-      "direction": { "type": "string", "enum": ["in", "out"] },
-      "active_level": { "type": "string", "enum": ["high", "low"] },
+      "logical_name": {
+        "type": "string",
+        "minLength": 1
+      },
+      "bank": {
+        "type": "string",
+        "minLength": 1
+      },
+      "pin": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "in",
+          "out"
+        ]
+      },
+      "active_level": {
+        "type": "string",
+        "enum": [
+          "high",
+          "low"
+        ]
+      },
       "safe_default": {
         "oneOf": [
-          { "type": "null" },
-          { "type": "integer", "enum": [0, 1] }
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ]
+          }
         ]
       }
     },

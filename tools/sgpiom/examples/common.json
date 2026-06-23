@@ -8,10 +8,30 @@
     "enabled": true
   },
   "banks": [
-    { "name": "sgpiom_a_d", "pin_offset": 0, "ngpios": 32, "reserved_pins": [] },
-    { "name": "sgpiom_e_h", "pin_offset": 32, "ngpios": 32, "reserved_pins": [] },
-    { "name": "sgpiom_i_l", "pin_offset": 64, "ngpios": 32, "reserved_pins": [] },
-    { "name": "sgpiom_m_p", "pin_offset": 96, "ngpios": 32, "reserved_pins": [] }
+    {
+      "name": "sgpiom_a_d",
+      "pin_offset": 0,
+      "ngpios": 32,
+      "reserved_pins": []
+    },
+    {
+      "name": "sgpiom_e_h",
+      "pin_offset": 32,
+      "ngpios": 32,
+      "reserved_pins": []
+    },
+    {
+      "name": "sgpiom_i_l",
+      "pin_offset": 64,
+      "ngpios": 32,
+      "reserved_pins": []
+    },
+    {
+      "name": "sgpiom_m_p",
+      "pin_offset": 96,
+      "ngpios": 32,
+      "reserved_pins": []
+    }
   ],
   "signals": []
 }

@@ -28,7 +28,10 @@ impl Sgpiom {
     /// - The pointed register block must remain valid for the lifetime of this `Sgpiom`.
     /// - Caller must enforce global ownership so concurrent mutable access does not occur.
     pub const unsafe fn new(sgpiom: *const device::sgpiom::RegisterBlock) -> Self {
-        Self { sgpiom, _not_send_sync: PhantomData }
+        Self {
+            sgpiom,
+            _not_send_sync: PhantomData,
+        }
     }
 
     /// Create an instance pointing to the global AST1060 SGPIOM register block.
