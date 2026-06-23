@@ -86,7 +86,11 @@ fn run_smoke_test() -> bool {
     let sens0 = regs.gpio508().read().bits();
     let sens1 = regs.gpio50c().read().bits();
     let sens2 = regs.gpio510().read().bits();
-    if (int_en & (1 << 2)) == 0 || (sens2 & (1 << 2)) == 0 || (sens0 & (1 << 2)) != 0 || (sens1 & (1 << 2)) != 0 {
+    if (int_en & (1 << 2)) == 0
+        || (sens2 & (1 << 2)) == 0
+        || (sens0 & (1 << 2)) != 0
+        || (sens1 & (1 << 2)) != 0
+    {
         pw_log::error!("interrupt config register mismatch");
         return false;
     }

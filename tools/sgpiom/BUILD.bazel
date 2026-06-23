@@ -41,15 +41,15 @@ filegroup(
 filegroup(
     name = "ast1060_dcscm_inputs",
     srcs = [
-        "examples/common.json",
         "examples/ast1060_dcscm.json",
+        "examples/common.json",
     ],
 )
 
 filegroup(
     name = "ast1060_prot_dice_inputs",
     srcs = [
-        "examples/common.json",
         "examples/ast1060_prot_dice.json",
+        "examples/common.json",
     ],
 )

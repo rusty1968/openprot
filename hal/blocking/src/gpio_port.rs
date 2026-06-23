@@ -243,4 +243,3 @@ pub trait GpioBankPassthrough: GpioPort {
     fn clear_passthrough(&mut self) -> Result<(), Self::Error>;
 }
 
-

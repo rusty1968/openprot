@@ -285,7 +285,10 @@ impl Usart {
     /// - `usart` must be a valid, non-null pointer to the AST1060 UART register block.
     /// - The pointed register block must remain valid for the lifetime of this `Usart`.
     pub const unsafe fn new_uninit(usart: *const device::uart::RegisterBlock) -> Self {
-        Self { usart, _not_send_sync: PhantomData }
+        Self {
+            usart,
+            _not_send_sync: PhantomData,
+        }
     }
 
     /// Create a new USART instance from a raw register-block pointer.
@@ -300,7 +303,10 @@ impl Usart {
     /// - Caller must enforce global ownership/coordination so concurrent mutable access
     ///   does not occur through other code paths.
     pub unsafe fn new(usart: *const device::uart::RegisterBlock) -> Self {
-        let this = Self { usart, _not_send_sync: PhantomData };
+        let this = Self {
+            usart,
+            _not_send_sync: PhantomData,
+        };
 
         unsafe {
             this.regs().uartfcr().write(|w| {

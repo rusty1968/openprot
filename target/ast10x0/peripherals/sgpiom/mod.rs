@@ -15,4 +15,3 @@ pub use types::{
     Bank, BankDevice, Direction, Error, InitialLevel, InterruptMode, InterruptTrigger,
     SgpiomPinConfig,
 };
-
