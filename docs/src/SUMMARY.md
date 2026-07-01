@@ -20,6 +20,7 @@
 * [Services](./specification/services/README.md)
   * [Attestation](./specification/services/attestation.md)
   * [Firmware Update](./specification/services/fwupdate.md)
+  * [Resiliency Orchestrator](./specification/services/orchestrator.md)
 * [Device Abstraction](./specification/device_abstraction/README.md)
 * [Terminology](./specification/terminology.md)
 
@@ -30,5 +31,6 @@
 * [Contributing](./contributing.md)
 * [Development Process](./development-process.md)
 * [Design](./design/README.md)
+  * [Resiliency Orchestrator](./design/orchestrator.md)
   * [Pigweed Integration Overview](./design/pigweed-overview.md)
   * [pw_kernel IPC](./design/pw-kernel-ipc.md)

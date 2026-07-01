@@ -117,3 +117,54 @@ TARGET_COMPATIBLE_WITH` so wildcard host builds skip target-only crates.
 - `coding-style.md` — formatter configs and Rust conventions.
 - `contributing.md` and `development-process.md` — review and merge process.
 - `design/` — focused notes on individual subsystems (e.g. pw_kernel IPC).
+
+---
+
+## Resiliency Orchestrator
+
+The Resiliency Orchestrator enforces consistent firmware trust state across all
+platform domains. For the full component decomposition, domain model, Verifier,
+extension points, vendor portability model, and design constraints see
+`services/orchestrator/README.md` and `docs/src/design/orchestrator.md`.
+
+### Components
+
+The orchestrator is composed of two components with a contract between them:
+
+- **State machine (SM)** (`services/orchestrator/sm/`) — a library component
+  containing pure policy logic. No platform I/O. Fully testable without
+  hardware.
+- **Runner** (`target/<target>/orchestrator/`) — a per-target executable that
+  owns the SM, wires it to driver services, and executes effects through the
+  platform impl.
+
+The **platform contract** (`ResiliencyPlatform` trait) is the interface
+boundary between them — not a component, but a decoupling seam.
+
+```
+SM (library)  ←── ResiliencyPlatform trait ──→  Runner (executable)
+```
+
+### Domains
+
+A **domain** is a hardware component whose trust state the orchestrator is
+responsible for. The current required domains are `RoT` (the host-side HROT)
+and `HostTarget` (the primary host boot path). The domain set is extensible;
+adding a domain is an architectural change requiring design review.
+
+### Vendor portability
+
+Porting to a new vendor target requires **no changes to `services/orchestrator/`**.
+A new vendor implements the `ResiliencyPlatform` trait and runner for their
+hardware. All changes are confined to `target/<vendor>/orchestrator/`.
+
+Adding a new downstream device is not a porting concern — it is an
+architectural change that touches `services/orchestrator/` and requires review.
+
+### Design constraint — Non-Uniform System State Principle
+
+The orchestrator SHALL support system states in which different devices are in
+different operational conditions. The orchestrator SHALL NOT require the system
+to reach a globally uniform state prior to enabling execution of individual
+devices. See `docs/src/design/orchestrator.md` for the current implementation
+status and required evolution.
