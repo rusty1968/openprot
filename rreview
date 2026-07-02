@@ -1,0 +1,261 @@
+# OpenPRoT Resiliency Orchestrator Discussion
+**Date:** July 1, 2026  
+**Meeting:** OpenPRoT: AMD RoT Team  
+**Participants:** Anthony Rocha, Louis Ferraro  
+_Source: Meeting transcript_ 【1-67b124】
+
+---
+
+# Executive Summary
+
+The discussion focused on converging the resiliency orchestrator architecture before engaging 9elements in implementation work.
+
+Key outcomes:
+
+1. Continue using a generalized, configuration-driven orchestrator model.
+2. Use the existing ASPEED/Cerberus-style state machine as the baseline.
+3. Avoid prematurely exposing implementation code to 9elements.
+4. Focus contractors on specification and state-model review first.
+5. Continue building the orchestrator around events, effects, and platform contracts.
+6. Preserve transport independence by keeping mailbox/protocol concerns outside orchestrator logic.
+7. Continue using `statig` as the preferred Rust HSM framework. 【1-67b124】
+
+---
+
+# Architectural Clarifications
+
+## Device Scope
+
+Anthony questioned whether OpenPRoT should be tracking accelerators, GPUs, and other runtime-managed devices. He argued that the orchestrator should primarily focus on boot-critical domains. 【1-67b124】
+
+Lou clarified that OpenPRoT should not hardcode assumptions about device types. The orchestrator must remain generic because different platform vendors may configure OpenPRoT to manage different sets of devices.
+
+The orchestrator should therefore support:
+
+- One managed device
+- BMC-only deployments
+- CPU and BMC deployments
+- Multi-device deployments
+- Future architectures not yet defined
+
+The orchestrator should operate on generic devices rather than device-specific knowledge. 【1-67b124】
+
+---
+
+## Configuration-Driven Architecture
+
+Lou emphasized that the primary challenge is no longer the state machine itself.
+
+The remaining work is defining the configuration model that describes:
+
+- managed devices
+- flash locations
+- reset controls
+- verification requirements
+- platform signals
+- device relationships
+- update paths
+
+The orchestrator should remain generic while platform configuration supplies the specifics. 【1-67b124】
+
+---
+
+# Mailbox / Protocol Discussion
+
+Anthony reinforced the distinction between:
+
+- mailbox as a concept
+- protocol as a transport mechanism
+
+The orchestrator should only express effects and requests.
+
+Protocol selection should remain outside orchestrator logic. 【1-67b124】
+
+Lou agreed and reiterated the current direction:
+
+- Define generalized mailbox semantics.
+- Transport mailbox messages through SPDM.
+- Initially use vendor-defined commands.
+- Standardize those commands later if adoption occurs. 【1-67b124】
+
+The orchestrator should not care whether communication occurs over:
+
+- SPDM
+- PLDM
+- vendor-specific protocols
+- future transports
+
+That responsibility belongs to platform services. 【1-67b124】
+
+---
+
+# Sequential vs Parallel Device Processing
+
+A significant portion of the discussion revisited previous conversations about independent device progression.
+
+Anthony questioned whether allowing devices to progress independently introduces unnecessary complexity. 【1-67b124】
+
+The discussion converged toward:
+
+- Start with a deterministic sequence.
+- Hold all devices in reset initially.
+- Verify devices in a known order.
+- Release verified devices as processing progresses.
+- Prioritize reliability and predictability over parallelism. 【1-67b124】
+
+Lou acknowledged that earlier suggestions around parallel handling may have added complexity that is not necessary for the initial implementation. 【1-67b124】
+
+---
+
+# Using Existing Models as the Baseline
+
+Anthony proposed using the existing ASPEED/Cerberus state machine architecture as the baseline model.
+
+The rationale:
+
+- Known behavior.
+- Existing implementation experience.
+- Reduced design risk.
+- Easier contractor onboarding. 【1-67b124】
+
+Lou agreed.
+
+The plan is to begin with the existing model and modify only those areas where OpenPRoT requires different behavior. 【1-67b124】
+
+---
+
+# Orchestrator Structure
+
+Anthony reviewed the current orchestrator decomposition.
+
+The architecture remains separated into:
+
+## State Machine Layer
+
+Contains:
+
+- state definitions
+- transitions
+- events
+- effects
+
+Pure logic only.
+
+No platform I/O. 【1-67b124】
+
+## Runner Loop
+
+Responsible for:
+
+- feeding inputs
+- dispatching events
+- executing effects
+- coordinating platform interaction
+
+The runner loop acts as the execution engine that drives the state machine. 【1-67b124】
+
+## Platform Contract
+
+Provides abstraction for platform-specific services such as:
+
+- GPIO
+- Watchdog
+- Mailbox
+- Monitoring
+- Future platform integrations
+
+The orchestrator interacts only through these contracts. 【1-67b124】
+
+---
+
+# User-Space Service Dependencies
+
+Anthony noted that the orchestrator framework depends on several user-space services that do not yet exist.
+
+Examples discussed:
+
+- GPIO service
+- GPIO monitor service
+- Watchdog service
+- Mailbox service
+
+The low-level drivers already exist or are being merged, but the service layer that exposes these capabilities to the orchestrator still has to be implemented. 【1-67b124】
+
+---
+
+# Event / Effect Model
+
+The discussion reaffirmed the event/effect-based design.
+
+Benefits identified:
+
+- Extensible behavior
+- Platform independence
+- Generic device support
+- Minimal device-specific logic
+- Easier evolution over time
+
+Lou indicated that events and effects provide the generalized flexibility desired for OpenPRoT. 【1-67b124】
+
+---
+
+# Contractor (9elements) Strategy
+
+A major topic was determining what should be provided to 9elements.
+
+Anthony recommended:
+
+- Do not review code yet.
+- Finalize architectural direction first.
+- Stabilize the state model first.
+- Start with specifications. 【1-67b124】
+
+Lou agreed.
+
+The current plan is:
+
+## Provide
+
+- High-level specification
+- CSA material
+- State-machine concepts
+- Architecture decomposition
+- Design rationale
+
+## Do Not Provide Yet
+
+- Current implementation code
+- In-progress state-machine implementation
+- Unstable design details
+
+The existing implementation should remain private until the state model stabilizes. 【1-67b124】
+
+---
+
+# Statig Framework
+
+Anthony reviewed the selected Rust HSM framework:
+
+**statig**
+
+Reasons for selection:
+
+- Hierarchical state machine support
+- Active maintenance
+- Good Rust implementation
+- Similar concepts to Zephyr state machines
+- Simplifies ASPEED model migration into Rust
+
+The framework is already integrated into the orchestration prototype. 【1-67b124】
+
+Lou agreed that contractors should begin familiarizing themselves with the framework. 【1-67b124】
+
+---
+
+# Agreed Next Steps
+
+## Anthony
+
+- Update orchestrator specification.
+- Incorporate discussion feedback.
+- Restore the simpler baseline orchestration model.
