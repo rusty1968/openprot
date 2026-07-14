@@ -420,9 +420,9 @@ def main() -> int:
         slave_symlink = image.parent / (image.name + ".slave.elf")
         if slave_symlink.exists():
             slave_elf_path = slave_symlink.resolve()
-            args.slave_firmware = str(image.parent / (image.name + ".slave.bin"))
-        args.firmware = str(image.parent / (image.name + ".bin"))
+            args.slave_firmware = str(slave_elf_path.with_suffix(".bin"))
         image = image.resolve()
+        args.firmware = str(image.with_suffix(".bin"))
     else:
         args.firmware = str(image.with_suffix(".bin"))
 
