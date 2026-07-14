@@ -41,7 +41,6 @@ pub const HMAC_KEY_CAP: usize = 131;
 /// Largest HMAC message accepted (one-shot, like the authoritative model).
 pub const HMAC_MSG_CAP: usize = 1024;
 
-
 // ----- DMA-safe HMAC working buffers ----------------------------------------
 //
 // All large HMAC buffers live in a single `.ram_nc` static so they are never
@@ -55,10 +54,10 @@ pub const HMAC_MSG_CAP: usize = 1024;
 // single-instance/non-reentrant `HaceDevice` contract). `init()` zeroes all
 // fields before starting a new operation.
 struct HmacNcBufs {
-    key:  core::cell::UnsafeCell<[u8; HMAC_KEY_CAP]>,
+    key: core::cell::UnsafeCell<[u8; HMAC_KEY_CAP]>,
     ipad: core::cell::UnsafeCell<[u8; 128]>,
     opad: core::cell::UnsafeCell<[u8; 128]>,
-    msg:  core::cell::UnsafeCell<[u8; HMAC_MSG_CAP]>,
+    msg: core::cell::UnsafeCell<[u8; HMAC_MSG_CAP]>,
 }
 // SAFETY: single-threaded HACE driver; non-reentrant `HaceDevice` contract
 // serialises all HMAC operations.
@@ -66,10 +65,10 @@ unsafe impl Sync for HmacNcBufs {}
 
 #[unsafe(link_section = ".ram_nc")]
 static HMAC_NC: HmacNcBufs = HmacNcBufs {
-    key:  core::cell::UnsafeCell::new([0u8; HMAC_KEY_CAP]),
+    key: core::cell::UnsafeCell::new([0u8; HMAC_KEY_CAP]),
     ipad: core::cell::UnsafeCell::new([0u8; 128]),
     opad: core::cell::UnsafeCell::new([0u8; 128]),
-    msg:  core::cell::UnsafeCell::new([0u8; HMAC_MSG_CAP]),
+    msg: core::cell::UnsafeCell::new([0u8; HMAC_MSG_CAP]),
 };
 
 /// Run one full digest of `$input` via the verified public path, yielding the
@@ -106,7 +105,9 @@ impl HmacKey {
         }
         let mut bytes = [0u8; HMAC_KEY_CAP];
         if let Some(dst) = bytes.get_mut(..key.len()) {
-            for (d, s) in dst.iter_mut().zip(key.iter()) { *d = *s; }
+            for (d, s) in dst.iter_mut().zip(key.iter()) {
+                *d = *s;
+            }
         }
         Ok(Self {
             bytes,
@@ -186,18 +187,24 @@ macro_rules! hmac_variant {
                     let key_nc: &[u8] = unsafe {
                         let buf = &mut *HMAC_NC.key.get();
                         if let Some(dst) = buf.get_mut(..k.len()) {
-                            for (d, s) in dst.iter_mut().zip(k.iter()) { *d = *s; }
+                            for (d, s) in dst.iter_mut().zip(k.iter()) {
+                                *d = *s;
+                            }
                         }
                         buf.get(..k.len()).unwrap_or(&[])
                     };
                     let kh = one_shot!($inner, $algo, pb, key_nc);
                     let hb = kh.as_bytes();
                     if let Some(dst) = k0.get_mut(..hb.len()) {
-                        for (d, s) in dst.iter_mut().zip(hb.iter()) { *d = *s; }
+                        for (d, s) in dst.iter_mut().zip(hb.iter()) {
+                            *d = *s;
+                        }
                     }
                 } else {
                     if let Some(dst) = k0.get_mut(..k.len()) {
-                        for (d, s) in dst.iter_mut().zip(k.iter()) { *d = *s; }
+                        for (d, s) in dst.iter_mut().zip(k.iter()) {
+                            *d = *s;
+                        }
                     }
                 }
 
@@ -206,10 +213,20 @@ macro_rules! hmac_variant {
                 unsafe {
                     let ipad = &mut *HMAC_NC.ipad.get();
                     let opad = &mut *HMAC_NC.opad.get();
-                    ipad.iter_mut().zip(k0.iter()).take($b).for_each(|(d, s)| *d = *s ^ 0x36);
-                    opad.iter_mut().zip(k0.iter()).take($b).for_each(|(d, s)| *d = *s ^ 0x5c);
-                    if let Some(rest) = ipad.get_mut($b..) { rest.fill(0); }
-                    if let Some(rest) = opad.get_mut($b..) { rest.fill(0); }
+                    ipad.iter_mut()
+                        .zip(k0.iter())
+                        .take($b)
+                        .for_each(|(d, s)| *d = *s ^ 0x36);
+                    opad.iter_mut()
+                        .zip(k0.iter())
+                        .take($b)
+                        .for_each(|(d, s)| *d = *s ^ 0x5c);
+                    if let Some(rest) = ipad.get_mut($b..) {
+                        rest.fill(0);
+                    }
+                    if let Some(rest) = opad.get_mut($b..) {
+                        rest.fill(0);
+                    }
                     (*HMAC_NC.msg.get()).fill(0);
                 }
 

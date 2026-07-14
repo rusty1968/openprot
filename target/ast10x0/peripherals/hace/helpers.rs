@@ -33,10 +33,7 @@ pub(crate) fn fill_padding(ctx: &mut HashContext, remaining: usize) {
         128 + 112 - index
     };
 
-    ctx.buffer
-        .get_mut(bufcnt)
-        .map(|b| *b = 0x80)
-        .unwrap_or(());
+    ctx.buffer.get_mut(bufcnt).map(|b| *b = 0x80).unwrap_or(());
     ctx.buffer
         .get_mut(bufcnt + 1..bufcnt + padlen)
         .map(|s| s.fill(0))
@@ -54,7 +51,10 @@ pub(crate) fn fill_padding(ctx: &mut HashContext, remaining: usize) {
         if let Some(dst) = ctx.buffer.get_mut(bufcnt + padlen..bufcnt + padlen + 8) {
             dst.copy_from_slice(&high);
         }
-        if let Some(dst) = ctx.buffer.get_mut(bufcnt + padlen + 8..bufcnt + padlen + 16) {
+        if let Some(dst) = ctx
+            .buffer
+            .get_mut(bufcnt + padlen + 8..bufcnt + padlen + 16)
+        {
             dst.copy_from_slice(&low);
         }
         ctx.bufcnt += (padlen + 16) as u32;
