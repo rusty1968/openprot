@@ -363,7 +363,8 @@ fn run_hace_sha2_kats() -> Result<(), &'static str> {
         let mut device = unsafe { HaceDevice::new_global(|_| core::hint::spin_loop()) };
         let mut dd = unsafe { HaceDigest::<Sha2_512>::from_device(&mut device) };
         let mut op = dd.init(Sha2_512).map_err(|_| ERR_HASH_FAILED)?;
-        op.update(&buf[..HMAC_K6.len()]).map_err(|_| ERR_HASH_FAILED)?;
+        op.update(&buf[..HMAC_K6.len()])
+            .map_err(|_| ERR_HASH_FAILED)?;
         let kh = op.finalize().map_err(|_| ERR_HASH_FAILED)?;
         check("dbg sha512 reduce-k6-via-bss", kh.as_bytes(), &K6_512)?;
     }

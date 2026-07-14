@@ -168,18 +168,19 @@ impl<'a> AesCipher<'a> {
             output
                 .get_mut(..n)
                 .ok_or(HaceError::InvalidInput)?
-                .copy_from_slice(
-                    self.ctx
-                        .data_out
-                        .get(..n)
-                        .ok_or(HaceError::InvalidInput)?,
-                );
+                .copy_from_slice(self.ctx.data_out.get(..n).ok_or(HaceError::InvalidInput)?);
             // Scrub staging buffers so plaintext/ciphertext doesn't linger.
-            if let Some(s) = self.ctx.data_in.get_mut(..n) { s.fill(0); }
-            if let Some(s) = self.ctx.data_out.get_mut(..n) { s.fill(0); }
+            if let Some(s) = self.ctx.data_in.get_mut(..n) {
+                s.fill(0);
+            }
+            if let Some(s) = self.ctx.data_out.get_mut(..n) {
+                s.fill(0);
+            }
             Ok(())
         } else {
-            if let Some(s) = self.ctx.data_in.get_mut(..input.len()) { s.fill(0); }
+            if let Some(s) = self.ctx.data_in.get_mut(..input.len()) {
+                s.fill(0);
+            }
             Err(HaceError::Timeout)
         }
     }
