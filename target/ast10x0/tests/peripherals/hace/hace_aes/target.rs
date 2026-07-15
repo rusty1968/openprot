@@ -84,6 +84,24 @@ macro_rules! kat {
     (@call $aes:ident, cbc_decrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
         $aes.cbc_decrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
     };
+    (@call $aes:ident, cfb_encrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
+        $aes.cfb_encrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
+    };
+    (@call $aes:ident, cfb_decrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
+        $aes.cfb_decrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
+    };
+    (@call $aes:ident, ofb_encrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
+        $aes.ofb_encrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
+    };
+    (@call $aes:ident, ofb_decrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
+        $aes.ofb_decrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
+    };
+    (@call $aes:ident, ctr_encrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
+        $aes.ctr_encrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
+    };
+    (@call $aes:ident, ctr_decrypt, $key:expr, $iv:expr, $inb:ident, $outb:ident, $n:expr) => {
+        $aes.ctr_decrypt($key, $iv, &$inb[..$n], &mut $outb[..$n]).map_err(|_| ERR_AES_FAILED)?
+    };
 }
 
 include!("vectors.rs");
@@ -164,6 +182,90 @@ fn run_hace_aes_kats() -> Result<(), &'static str> {
         &CBC_IV,
         &CBC256_CT,
         &PT64
+    );
+
+    // AES-192 (cross-driver vectors; see vectors.rs header).
+    kat!(
+        "ecb-192 encrypt",
+        ecb_encrypt,
+        &AES192_ECB_KEY,
+        &CBC_IV,
+        &AES192_ECB_PT,
+        &AES192_ECB_CT
+    );
+    kat!(
+        "ecb-192 decrypt",
+        ecb_decrypt,
+        &AES192_ECB_KEY,
+        &CBC_IV,
+        &AES192_ECB_CT,
+        &AES192_ECB_PT
+    );
+    kat!(
+        "cbc-192 encrypt",
+        cbc_encrypt,
+        &AES192_CBC_KEY,
+        &AES192_CBC_IV,
+        &AES192_CBC_PT,
+        &AES192_CBC_CT
+    );
+    kat!(
+        "cbc-192 decrypt",
+        cbc_decrypt,
+        &AES192_CBC_KEY,
+        &AES192_CBC_IV,
+        &AES192_CBC_CT,
+        &AES192_CBC_PT
+    );
+
+    // AES-128 CFB/OFB/CTR (cross-driver vectors; see vectors.rs header).
+    kat!(
+        "cfb-128 encrypt",
+        cfb_encrypt,
+        &AES128_CFB_KEY,
+        &AES128_CFB_IV,
+        &AES128_CFB_PT,
+        &AES128_CFB_CT
+    );
+    kat!(
+        "cfb-128 decrypt",
+        cfb_decrypt,
+        &AES128_CFB_KEY,
+        &AES128_CFB_IV,
+        &AES128_CFB_CT,
+        &AES128_CFB_PT
+    );
+    kat!(
+        "ofb-128 encrypt",
+        ofb_encrypt,
+        &AES128_OFB_KEY,
+        &AES128_OFB_IV,
+        &AES128_OFB_PT,
+        &AES128_OFB_CT
+    );
+    kat!(
+        "ofb-128 decrypt",
+        ofb_decrypt,
+        &AES128_OFB_KEY,
+        &AES128_OFB_IV,
+        &AES128_OFB_CT,
+        &AES128_OFB_PT
+    );
+    kat!(
+        "ctr-128 encrypt",
+        ctr_encrypt,
+        &AES128_CTR_KEY,
+        &AES128_CTR_IV,
+        &AES128_CTR_PT,
+        &AES128_CTR_CT
+    );
+    kat!(
+        "ctr-128 decrypt",
+        ctr_decrypt,
+        &AES128_CTR_KEY,
+        &AES128_CTR_IV,
+        &AES128_CTR_CT,
+        &AES128_CTR_PT
     );
 
     // Non-block-size input must return InvalidInput.

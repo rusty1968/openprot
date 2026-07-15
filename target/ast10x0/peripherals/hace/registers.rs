@@ -7,6 +7,17 @@ use core::marker::PhantomData;
 
 use ast1060_pac as device;
 
+/// Order all prior context/SG/buffer stores ahead of the engine-start MMIO
+/// write. The DMA descriptors live in Normal (`.ram_nc`) memory while the
+/// start register is Device memory; ARMv7-M does not order those writes
+/// relative to each other without an explicit barrier.
+#[inline(always)]
+fn dma_publish_barrier() {
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    // SAFETY: DSB only orders memory accesses; no other architectural effect.
+    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+}
+
 /// Safe wrapper around the AST10x0 HACE register block.
 #[derive(Copy, Clone)]
 pub struct HaceRegisters {
@@ -53,11 +64,10 @@ impl HaceRegisters {
         self.regs().hace1c().read().hash_intflag().bit_is_set()
     }
 
-    /// Returns `true` while the hash engine is actively processing (HACE1C bit 0).
-    /// Used to drain any in-progress bootloader operation before starting our own.
+    /// Raw HACE1C bits, for root-cause diagnostics only.
     #[inline]
-    pub(crate) fn hash_engine_is_busy(&self) -> bool {
-        self.regs().hace1c().read().hash_eng_sts_flag().bit_is_set()
+    pub(crate) fn hace1c_bits(&self) -> u32 {
+        self.regs().hace1c().read().bits()
     }
 
     #[inline]
@@ -77,6 +87,7 @@ impl HaceRegisters {
             .hace28()
             .write(|w| unsafe { w.bits(digest_addr) });
         self.regs().hace2c().write(|w| unsafe { w.bits(data_len) });
+        dma_publish_barrier();
         self.regs().hace30().write(|w| unsafe { w.bits(cmd) });
     }
 
@@ -134,6 +145,7 @@ impl HaceRegisters {
         self.regs().hace04().write(|w| unsafe { w.bits(dst_addr) });
         self.regs().hace08().write(|w| unsafe { w.bits(ctx_base) });
         self.regs().hace0c().write(|w| unsafe { w.bits(data_len) });
+        dma_publish_barrier();
         self.regs().hace10().write(|w| unsafe { w.bits(cmd) });
     }
 }

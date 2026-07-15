@@ -6,6 +6,7 @@
 mod aes;
 mod constants;
 mod context;
+mod des;
 mod device;
 mod digest;
 mod error;
@@ -13,7 +14,8 @@ mod helpers;
 mod hmac;
 mod registers;
 
-pub use aes::{AesCipher, AesKey, AesOp, AesSkin, Cbc, Ecb, AES_BLOCK};
+pub use aes::{AesCipher, AesKey, AesOp, AesSkin, Cbc, Cfb, Ctr, Ecb, Ofb, AES_BLOCK};
+pub use des::{DesCipher, DesKey, DES_BLOCK};
 pub use device::{HaceDevice, HashAlgo};
 pub use digest::HaceDigest;
 pub use error::HaceError;

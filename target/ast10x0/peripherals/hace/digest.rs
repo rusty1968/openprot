@@ -11,7 +11,7 @@ use super::context::{
     SHA384_DIGEST_SIZE, SHA384_IV, SHA512_DIGEST_SIZE, SHA512_IV,
 };
 use super::error::HaceError;
-use super::helpers::{fill_padding, load_iv, ptr_to_u32};
+use super::helpers::{dcache_invd_all, fill_padding, load_iv, ptr_to_u32};
 use super::registers::HaceRegisters;
 use core::marker::PhantomData;
 use openprot_hal_blocking::digest::scoped::{DigestCtrlReset, DigestInit, DigestOp};
@@ -308,12 +308,22 @@ where
 
         for _ in 0..this.poll_budget {
             if this.regs.hash_intflag_is_set() {
+                // HACE has just DMA-written the chaining value/digest.  The
+                // hardware cache still covers this address on AST10x0 even
+                // though the context is section-placed for DMA, so discard
+                // any line containing the IV that the CPU wrote before
+                // starting the engine.  This matches Zephyr's
+                // cache_data_invd_range(data->digest, 64) in hash_trigger().
+                dcache_invd_all();
                 let result = T::digest_from_context(this.ctx);
                 // Cleanup context (mirrors cleanup_context in aspeed-rust).
                 this.ctx.bufcnt = 0;
                 this.ctx.digcnt = [0; 2];
                 this.ctx.buffer.fill(0);
                 this.ctx.digest.fill(0);
+                // Return the hash engine to its idle state before the next
+                // operation. The reset-settle sequence in HaceDevice keeps
+                // this cleanup write from wedging a subsequent HACE start.
                 this.regs.stop_hash_operation();
                 return Ok(result);
             }
