@@ -71,8 +71,12 @@ pub(crate) const KEY_BUFFER_SIZE: usize = 128;
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct Sg {
-    pub(crate) len: u32,
+    /// Physical address of the data buffer. Must be first per hardware SG layout
+    /// (`aspeed_sg.addr` in `hace_aspeed.c`): HACE parses addr @ +0, len @ +4.
     pub(crate) addr: u32,
+    /// Byte length of the buffer, OR'd with `HACE_SG_LAST` (bit 31) for the
+    /// final/only entry in the scatter-gather list.
+    pub(crate) len: u32,
 }
 
 impl Sg {
