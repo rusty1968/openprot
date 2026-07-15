@@ -6,7 +6,7 @@
 use super::constants::DEFAULT_POLL_BUDGET;
 use super::context::{acquire_crypto_ctx, acquire_shared_ctx, CryptoContext, HashContext};
 use super::registers::HaceRegisters;
-use crate::scu::{ClockRegisterHalf, ScuRegisters};
+use crate::scu::{ClockRegisterHalf, ScuRegisterHalf, ScuRegisters};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum HashAlgo {
@@ -102,6 +102,11 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
         // contract as HaceRegisters::new_global — the caller guarantees exclusivity.
         let scu = unsafe { ScuRegisters::new_global_unlocked() };
         scu.ungate_clock_mask(ClockRegisterHalf::Lower, 1 << 13);
+        // SCU040 bit 4 = HACE reset. Write bit 4 to SCU044 to deassert reset and
+        // bring the HACE out of reset before accessing any HACE registers. Without
+        // this, the AHB bus hangs on the first HACE register read when the ROM
+        // bootloader (UART/fwspick mode) leaves HACE in reset.
+        scu.deassert_reset_mask(ScuRegisterHalf::Lower, 1 << 4);
 
         // SAFETY: Caller coordinates singleton access.
         let regs = unsafe { HaceRegisters::new_global() };

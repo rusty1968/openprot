@@ -144,8 +144,18 @@ impl<'a> AesCipher<'a> {
         let src_desc = ptr_to_u32(core::ptr::addr_of!(self.ctx.src))?;
         let dst_desc = ptr_to_u32(core::ptr::addr_of!(self.ctx.dst))?;
         let ctx_base = ptr_to_u32(self.ctx.ctx.as_ptr())?;
-        let data_len = self.ctx.src.len;
+        // HACE0C is the plain byte count (bits 0:27); HACE_SG_LAST lives only in
+        // the SG descriptor length words (ctx.src.len / ctx.dst.len), not here.
+        let data_len = len;
 
+        // Wait for any in-progress crypto operation to finish before re-programming.
+        // Mirrors Zephyr `regmap_read_poll_timeout(...HACE_CRYPTO_BUSY...)` in
+        // `hace_aspeed.c:83`. Without this drain, programming the engine while
+        // CryptoEngStsFlag is still set (from a prior encrypt) causes the new
+        // decrypt command to be ignored and `data_out` to read back as zeros.
+        while self.regs.crypto_engine_is_busy() {
+            (self.yield_fn)(POLL_YIELD_NS);
+        }
         self.regs.clear_crypto_intflag();
         self.regs
             .program_crypto_operation(src_desc, dst_desc, ctx_base, data_len, cmd);
