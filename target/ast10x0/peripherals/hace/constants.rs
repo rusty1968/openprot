@@ -39,8 +39,16 @@ pub const HACE_CMD_ECB: u32 = 0;
 pub const HACE_CMD_CBC: u32 = 0x1 << 4;
 /// `HACE_CMD_AES128 == 0` (`hace_aspeed.h:34`).
 pub const HACE_CMD_AES128: u32 = 0;
+/// `HACE_CMD_AES192` (`hace_aspeed.h:35`).
+pub const HACE_CMD_AES192: u32 = 0x1 << 2;
 /// `HACE_CMD_AES256` (`hace_aspeed.h:36`).
 pub const HACE_CMD_AES256: u32 = 0x2 << 2;
+/// `HACE_CMD_CFB` (`hace_aspeed.h:31`).
+pub const HACE_CMD_CFB: u32 = 0x2 << 4;
+/// `HACE_CMD_OFB` (`hace_aspeed.h:32`).
+pub const HACE_CMD_OFB: u32 = 0x3 << 4;
+/// `HACE_CMD_CTR` (`hace_aspeed.h:33`).
+pub const HACE_CMD_CTR: u32 = 0x4 << 4;
 
 /// Fixed AES session base, `aspeed_crypto_session_setup` (`hace_aspeed.c:264`,
 /// `:269`): SG control + MBUS sync + HW key expansion + AES select.
@@ -50,7 +58,22 @@ pub const AES_CMD_BASE: u32 = HACE_CMD_DES_SG_CTRL
     | HACE_CMD_AES_KEY_HW_EXP
     | HACE_CMD_AES_SELECT;
 
-pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
+/// `HACE_CMD_DES_SELECT` (`hace_aspeed.h:20`); AES is the absence of this bit.
+pub const HACE_CMD_DES_SELECT: u32 = 1 << 16;
+/// `HACE_CMD_SINGLE_DES == 0` (`hace_aspeed.h:23`).
+pub const HACE_CMD_SINGLE_DES: u32 = 0;
+/// `HACE_CMD_TRIPLE_DES` (`hace_aspeed.h:24`).
+pub const HACE_CMD_TRIPLE_DES: u32 = 1 << 17;
+
+/// Fixed DES/TDES session base: SG control + MBUS sync + DES select.
+/// Unlike AES, DES has no hardware key-expansion bit.
+pub const DES_CMD_BASE: u32 =
+    HACE_CMD_DES_SG_CTRL | HACE_CMD_SRC_SG_CTRL | HACE_CMD_MBUS_REQ_SYNC_EN | HACE_CMD_DES_SELECT;
+
+/// Three thousand polls matches the 3 ms completion timeout used by the
+/// aspeed-rust/Zephyr reference driver. A failed operation must return an
+/// error promptly instead of appearing to hang the whole firmware.
+pub const DEFAULT_POLL_BUDGET: u32 = 3_000;
 
 /// Suggested wait window, in nanoseconds, passed to the cooperative `yield_fn`
 /// between completion polls. Mirrors the reference HACE driver's 1 µs poll

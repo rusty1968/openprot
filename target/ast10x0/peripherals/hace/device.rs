@@ -6,11 +6,29 @@
 use super::constants::DEFAULT_POLL_BUDGET;
 use super::context::{acquire_crypto_ctx, acquire_shared_ctx, CryptoContext, HashContext};
 use super::registers::HaceRegisters;
-use crate::scu::{ClockRegisterHalf, ScuRegisters};
+use crate::scu::{ClockRegisterHalf, ScuRegisterHalf, ScuRegisters};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum HashAlgo {
     Sha256,
+}
+
+/// Spin iterations for the 100 µs post-reset-assert settle (authority:
+/// `hace_init`'s `k_usleep(100)`). ~3 cycles/iteration at 200 MHz HCLK
+/// puts 16k iterations around 240 µs — deliberately generous.
+const RESET_ASSERT_SETTLE_SPINS: u32 = 16_000;
+
+/// Spin iterations for the 10 ms clock-stabilization wait between clock
+/// ungate and reset deassert (authority: `hace_init`'s `k_msleep(10)`).
+/// ~1M iterations ≈ 15 ms at 200 MHz.
+const CLOCK_STABLE_SETTLE_SPINS: u32 = 1_000_000;
+
+/// Busy-wait used during device bring-up, before any timer service exists.
+#[inline(never)]
+fn spin_delay(iterations: u32) {
+    for _ in 0..iterations {
+        core::hint::spin_loop();
+    }
 }
 
 /// The one owned binding over the HACE engine.
@@ -101,23 +119,53 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
         // SAFETY: SCU is a singleton; this is called under the same single-instance
         // contract as HaceRegisters::new_global — the caller guarantees exclusivity.
         let scu = unsafe { ScuRegisters::new_global_unlocked() };
+        // Bring-up order follows the authority `hace_init`
+        // (`zephyr-reference/hace_aspeed.c:773-786`): assert reset, wait,
+        // ungate the clock, wait for it to stabilize, then deassert reset.
+        //
+        // SCU040 bit 4 = HACE reset (reset group 0, matches aspeed-rust's
+        // `ResetId::RstHACE = ASPEED_RESET_GRP_0_OFFSET + 4`); SCU040 is
+        // write-1-to-assert, SCU044 write-1-to-deassert. While held in reset
+        // the block doesn't respond to reads/writes at all (observed on real
+        // hardware as HACE1C reading back a fixed `0xaaaaffff` and writes
+        // being silently dropped).
+        //
+        // The settle delays are load-bearing. The authority sleeps 100 µs
+        // after asserting reset and 10 ms between clock-on and reset-deassert,
+        // and aspeed-rust's working bring-up gets milliseconds of UART output
+        // between its clock-enable and reset-deassert calls. Releasing the
+        // reset in the same instant the clock is ungated (the previous
+        // behavior here) left the crypto sub-engine glitched: hash ops still
+        // worked, but the first AES start (HACE10 write) kicked off a DMA
+        // that wedged the bus — the CPU hung on its next bus access, before
+        // any completion poll could time out.
+        scu.assert_reset_mask(ScuRegisterHalf::Lower, 1 << 4);
+        spin_delay(RESET_ASSERT_SETTLE_SPINS);
         scu.ungate_clock_mask(ClockRegisterHalf::Lower, 1 << 13);
-
+        spin_delay(CLOCK_STABLE_SETTLE_SPINS);
+        scu.deassert_reset_mask(ScuRegisterHalf::Lower, 1 << 4);
         // SAFETY: Caller coordinates singleton access.
         let regs = unsafe { HaceRegisters::new_global() };
 
-        // Drain any in-progress hash operation left by the bootloader.
-        // On real hardware the engine may be busy when firmware starts; the
-        // HACE W1C clear of `hash_intflag` is ignored while `HashEngStsFlag`
-        // (bit 0) is set, causing the first poll to return a stale flag and the
-        // digest buffer to read back as the IV (never written by the engine).
-        // We stop the engine, then spin until it goes idle, then clear the
-        // stale flag before handing the device to callers.
-        regs.stop_hash_operation();
-        while regs.hash_engine_is_busy() {
-            core::hint::spin_loop();
-        }
-        regs.clear_hash_intflag();
+        // Best-effort cleanup of any in-progress hash operation left by the
+        // bootloader: stop the engine and clear the stale interrupt flag.
+        //
+        // This used to also spin-wait on `HashEngStsFlag` (HACE1C bit 0)
+        // going idle before proceeding. That wait has been observed on real
+        // hardware (UART/bfu boot path) to read busy=1 immediately after the
+        // clock-ungate + reset-deassert above — i.e. before any hash/AES op
+        // has run at all — and to never clear, so it either hung (when
+        // unbounded) or ate the full poll budget every device construction
+        // (when bounded). aspeed-rust's driver never reads this bit at all
+        // and works correctly on the same hardware/boot path, so the wait is
+        // dropped rather than bounded: move on unconditionally.
+        // Do NOT write HACE30=0 ("stop hash") or W1C HACE1C here. Neither
+        // authority (Zephyr `hace_init`, aspeed-rust bring-up) touches any
+        // HACE register at init, and writing HACE30=0 on freshly-reset
+        // hardware has been observed to latch HACE1C bit 0 (hash engine
+        // busy) permanently — which then wedges the first crypto SG fetch
+        // (probe data: direct-mode AES works with bit0 stuck, SG-mode AES
+        // hangs the bus).
 
         Self {
             regs,

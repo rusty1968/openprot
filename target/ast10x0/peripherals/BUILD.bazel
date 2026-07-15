@@ -12,6 +12,7 @@ rust_library(
         "hace/aes.rs",
         "hace/constants.rs",
         "hace/context.rs",
+        "hace/des.rs",
         "hace/device.rs",
         "hace/digest.rs",
         "hace/error.rs",

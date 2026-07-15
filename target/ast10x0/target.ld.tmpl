@@ -35,7 +35,13 @@ MEMORY
               LENGTH = {{kernel.flash_size_bytes}}
   /* Internal SRAM */
   RAM(rwx) : ORIGIN = {{kernel.ram_start_address | hex}},
-             LENGTH = {{kernel.ram_size_bytes}}
+             /* Keep normal RAM below the fixed non-cacheable DMA window even
+              * when an older system config still describes the full SRAM. */
+             LENGTH = MIN({{kernel.ram_size_bytes}}, 0x000A0000 - {{kernel.ram_start_address | hex}})
+  /* AST10x0's upper 128 KiB SRAM window is non-cacheable and is the only
+   * safe location for buffers accessed by HACE and other MBUS DMA engines. */
+  RAM_NC(rwx) : ORIGIN = 0x000A0000,
+                LENGTH = 128K
 
   /* Each memory region above has an associated .*.unused_space section that
    * overlays the unused space at the end of the memory segment. These segments
@@ -149,6 +155,16 @@ SECTIONS
     *(.data*)
     . = ALIGN(4);
   } >RAM AT> FLASH
+
+  /* DMA contexts use #[link_section = ".ram_nc"].  Without this explicit
+   * output section lld treats it as an orphan and places it in ordinary,
+   * cacheable RAM, which can stall an HACE operation when MBUS sync is set. */
+  .ram_nc (NOLOAD) : ALIGN(64)
+  {
+    KEEP(*(.ram_nc))
+    KEEP(*(.ram_nc.*))
+    . = ALIGN(64);
+  } >RAM_NC
 
   /* Represents unused space in the FLASH segment. This MUST be the last section
    * assigned to the FLASH region.

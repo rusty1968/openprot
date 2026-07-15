@@ -10,6 +10,32 @@ pub(crate) fn ptr_to_u32<T>(ptr: *const T) -> Result<u32, HaceError> {
     u32::try_from(ptr as usize).map_err(|_| HaceError::InvalidInput)
 }
 
+/// Invalidate the entire AST10x0 data cache.
+///
+/// Toggles `DCACHE_CLEAN` (SCUA58 bit 1) low→high, mirroring the authority
+/// `cache_data_invd_all()` (`zephyr-reference/drivers/cache/cache_aspeed.c`,
+/// also called after every crypto op by `hace_aspeed.c:140`). The AST10x0
+/// SRAM cache is write-through, so only invalidation is ever needed — but it
+/// IS needed after any HACE DMA write into cacheable SRAM (below 0x000A0000),
+/// otherwise the CPU can read stale pre-DMA lines. Observed on hardware:
+/// an AES KAT whose output buffer was zero-filled before the op read back
+/// all-zeros through the cache while the engine had written correct
+/// ciphertext to SRAM underneath.
+///
+/// SCU write protection is unlocked once at boot (entry `pre_init`).
+pub(crate) fn dcache_invd_all() {
+    const DCACHE_CLEAN: u32 = 1 << 1;
+    // SAFETY: SCU MMIO read-modify-write; DSB only orders memory accesses.
+    unsafe {
+        let scu = &*ast1060_pac::Scu::ptr();
+        let ctrl = scu.scua58().read().bits();
+        scu.scua58().write(|w| w.bits(ctrl & !DCACHE_CLEAN));
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        scu.scua58().write(|w| w.bits(ctrl | DCACHE_CLEAN));
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+    }
+}
+
 /// Append SHA padding to `ctx.buffer` starting at `ctx.bufcnt`.
 ///
 /// Mirrors `aspeed-rust` `fill_padding`: uses `ctx.bufcnt` as the write

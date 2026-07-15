@@ -1,7 +1,7 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-//! HACE AES (128/256, ECB/CBC, raw-key path).
+//! HACE AES (128/192/256, ECB/CBC/CFB/OFB/CTR, raw-key path).
 //!
 //! Reference behavior follows pinned Zephyr `aspeed_hace` (`cfe94dc`).
 //! Correctness is checked with NIST AESAVS/CAVP KATs.
@@ -11,16 +11,16 @@
 //! - A2: ciphertext is plain `CT` (IV is separate)
 //! - A3: key/IV context bytes are zeroized after each op and on drop
 //! - A4: invalid block sizing returns `InvalidInput` before programming HW
-//! - A5: AES-192 and OTP/secret-vault keys are out of scope
+//! - A5: OTP/secret-vault keys are out of scope
 
 use super::constants::{
-    AES_CMD_BASE, HACE_CMD_AES128, HACE_CMD_AES256, HACE_CMD_CBC, HACE_CMD_ECB, HACE_CMD_ENCRYPT,
-    HACE_SG_LAST, POLL_YIELD_NS,
+    AES_CMD_BASE, HACE_CMD_AES128, HACE_CMD_AES192, HACE_CMD_AES256, HACE_CMD_CBC, HACE_CMD_CFB,
+    HACE_CMD_CTR, HACE_CMD_ECB, HACE_CMD_ENCRYPT, HACE_CMD_OFB, HACE_SG_LAST, POLL_YIELD_NS,
 };
-use super::context::{CryptoContext, AES_DATA_CAP};
+use super::context::CryptoContext;
 use super::device::HaceDevice;
 use super::error::HaceError;
-use super::helpers::ptr_to_u32;
+use super::helpers::{dcache_invd_all, ptr_to_u32};
 use super::registers::HaceRegisters;
 use core::marker::PhantomData;
 use openprot_hal_blocking::cipher::{
@@ -71,10 +71,11 @@ impl<'a> AesCipher<'a> {
         Self::new(regs, ctx, poll_budget, yield_fn)
     }
 
-    /// Map AES key length to command bits. Reject AES-192.
+    /// Map AES key length to command bits.
     fn keylen_bits(key: &[u8]) -> Result<u32, HaceError> {
         match key.len() {
             16 => Ok(HACE_CMD_AES128),
+            24 => Ok(HACE_CMD_AES192),
             32 => Ok(HACE_CMD_AES256),
             _ => Err(HaceError::InvalidInput),
         }
@@ -97,9 +98,6 @@ impl<'a> AesCipher<'a> {
         if input.is_empty() || input.len() % AES_BLOCK != 0 || output.len() < input.len() {
             return Err(HaceError::InvalidInput);
         }
-        if input.len() > AES_DATA_CAP {
-            return Err(HaceError::InvalidInput);
-        }
         let kbits = Self::keylen_bits(key)?;
         let len = u32::try_from(input.len()).map_err(|_| HaceError::InvalidInput)?;
 
@@ -119,19 +117,14 @@ impl<'a> AesCipher<'a> {
             dst.copy_from_slice(key);
         }
 
-        // DMA safety (D3): copy caller input into the .ram_nc staging buffer.
-        // The HACE engine reads/writes by physical address; if the caller's
-        // slice is in flash, rodata, or a cacheable stack frame the engine
-        // would silently read/write stale physical RAM. Staging through
-        // ctx.data_in / ctx.data_out (both inside the .ram_nc CryptoContext)
-        // guarantees the DMA addresses are always in non-cacheable SRAM.
-        if let Some(dst) = self.ctx.data_in.get_mut(..input.len()) {
-            dst.copy_from_slice(input);
-        }
-
-        // SG descriptors: addr = .ram_nc staging buffers, len = bytes | HACE_SG_LAST.
-        let in_ptr = ptr_to_u32(self.ctx.data_in.as_ptr())?;
-        let out_ptr = ptr_to_u32(self.ctx.data_out.as_ptr())?;
+        // The AST10x0 crypto MBUS reads payloads from ordinary SRAM.  The
+        // engine context and SG descriptors stay in `.ram_nc`, matching the
+        // working aspeed-rust implementation, but putting source/destination
+        // payloads in that window stalls the synchronous HACE10 start write.
+        // Callers must therefore provide readable/writable SRAM buffers (the
+        // KAT uses static RAM buffers); flash-backed input is unsupported.
+        let in_ptr = ptr_to_u32(input.as_ptr())?;
+        let out_ptr = ptr_to_u32(output.as_mut_ptr())?;
         self.ctx.src.addr = in_ptr;
         self.ctx.src.len = len | HACE_SG_LAST;
         self.ctx.dst.addr = out_ptr;
@@ -144,7 +137,10 @@ impl<'a> AesCipher<'a> {
         let src_desc = ptr_to_u32(core::ptr::addr_of!(self.ctx.src))?;
         let dst_desc = ptr_to_u32(core::ptr::addr_of!(self.ctx.dst))?;
         let ctx_base = ptr_to_u32(self.ctx.ctx.as_ptr())?;
-        let data_len = self.ctx.src.len;
+        // HACE0C takes the plain byte count.  Only the SG descriptor length
+        // words carry HACE_SG_LAST; passing that high bit here makes the
+        // engine attempt an invalid-sized transfer and never complete.
+        let data_len = len;
 
         self.regs.clear_crypto_intflag();
         self.regs
@@ -159,28 +155,24 @@ impl<'a> AesCipher<'a> {
             (self.yield_fn)(POLL_YIELD_NS);
         }
 
+        // The engine's DMA writes bypass the AST10x0 SRAM cache; the caller's
+        // output buffer may be in cacheable SRAM with stale (pre-op) lines
+        // resident. Invalidate before anyone reads the result (authority:
+        // `hace_aspeed.c` calls `cache_data_invd_all()` after every crypto op).
+        dcache_invd_all();
+
         // Always clear key/IV material from the DMA context buffer.
         self.ctx.ctx = [0u8; 64];
 
         if done {
-            // Copy result out of .ram_nc staging buffer to caller's output.
-            let n = input.len();
-            output
-                .get_mut(..n)
-                .ok_or(HaceError::InvalidInput)?
-                .copy_from_slice(self.ctx.data_out.get(..n).ok_or(HaceError::InvalidInput)?);
-            // Scrub staging buffers so plaintext/ciphertext doesn't linger.
-            if let Some(s) = self.ctx.data_in.get_mut(..n) {
-                s.fill(0);
-            }
-            if let Some(s) = self.ctx.data_out.get_mut(..n) {
-                s.fill(0);
-            }
             Ok(())
         } else {
-            if let Some(s) = self.ctx.data_in.get_mut(..input.len()) {
-                s.fill(0);
-            }
+            pw_log::error!(
+                "hace: AES timeout: HACE1C={:#010x}, cmd={:#010x}, len={}",
+                self.regs.hace1c_bits() as u32,
+                cmd as u32,
+                len as u32,
+            );
             Err(HaceError::Timeout)
         }
     }
@@ -219,6 +211,72 @@ impl<'a> AesCipher<'a> {
     ) -> Result<(), HaceError> {
         self.crypt(HACE_CMD_CBC, false, key, Some(iv), ct, pt)
     }
+
+    /// AES-CFB encrypt with a 16-byte IV.
+    pub fn cfb_encrypt(
+        &mut self,
+        key: &[u8],
+        iv: &[u8; AES_BLOCK],
+        pt: &[u8],
+        ct: &mut [u8],
+    ) -> Result<(), HaceError> {
+        self.crypt(HACE_CMD_CFB, true, key, Some(iv), pt, ct)
+    }
+
+    /// AES-CFB decrypt with a 16-byte IV.
+    pub fn cfb_decrypt(
+        &mut self,
+        key: &[u8],
+        iv: &[u8; AES_BLOCK],
+        ct: &[u8],
+        pt: &mut [u8],
+    ) -> Result<(), HaceError> {
+        self.crypt(HACE_CMD_CFB, false, key, Some(iv), ct, pt)
+    }
+
+    /// AES-OFB encrypt with a 16-byte IV.
+    pub fn ofb_encrypt(
+        &mut self,
+        key: &[u8],
+        iv: &[u8; AES_BLOCK],
+        pt: &[u8],
+        ct: &mut [u8],
+    ) -> Result<(), HaceError> {
+        self.crypt(HACE_CMD_OFB, true, key, Some(iv), pt, ct)
+    }
+
+    /// AES-OFB decrypt with a 16-byte IV.
+    pub fn ofb_decrypt(
+        &mut self,
+        key: &[u8],
+        iv: &[u8; AES_BLOCK],
+        ct: &[u8],
+        pt: &mut [u8],
+    ) -> Result<(), HaceError> {
+        self.crypt(HACE_CMD_OFB, false, key, Some(iv), ct, pt)
+    }
+
+    /// AES-CTR encrypt with a 16-byte initial counter block.
+    pub fn ctr_encrypt(
+        &mut self,
+        key: &[u8],
+        iv: &[u8; AES_BLOCK],
+        pt: &[u8],
+        ct: &mut [u8],
+    ) -> Result<(), HaceError> {
+        self.crypt(HACE_CMD_CTR, true, key, Some(iv), pt, ct)
+    }
+
+    /// AES-CTR decrypt with a 16-byte initial counter block.
+    pub fn ctr_decrypt(
+        &mut self,
+        key: &[u8],
+        iv: &[u8; AES_BLOCK],
+        ct: &[u8],
+        pt: &mut [u8],
+    ) -> Result<(), HaceError> {
+        self.crypt(HACE_CMD_CTR, false, key, Some(iv), ct, pt)
+    }
 }
 
 impl Drop for AesCipher<'_> {
@@ -240,20 +298,36 @@ pub struct Ecb;
 /// AES-CBC mode marker.
 #[derive(Debug, Clone, Copy)]
 pub struct Cbc;
+/// AES-CFB mode marker.
+#[derive(Debug, Clone, Copy)]
+pub struct Cfb;
+/// AES-OFB mode marker.
+#[derive(Debug, Clone, Copy)]
+pub struct Ofb;
+/// AES-CTR mode marker.
+#[derive(Debug, Clone, Copy)]
+pub struct Ctr;
 
 impl CipherMode for Ecb {}
 impl BlockCipherMode for Ecb {}
 impl CipherMode for Cbc {}
 impl BlockCipherMode for Cbc {}
+impl CipherMode for Cfb {}
+impl BlockCipherMode for Cfb {}
+impl CipherMode for Ofb {}
+impl BlockCipherMode for Ofb {}
+impl CipherMode for Ctr {}
+impl BlockCipherMode for Ctr {}
 
 /// Owned AES key for the trait skin (raw-key path only).
 ///
-/// Size selects variant: 16 => AES-128, 32 => AES-256.
+/// Size selects variant: 16 => AES-128, 24 => AES-192, 32 => AES-256.
 ///
 /// The key bytes are zeroized when this value is dropped.
 #[derive(Clone)]
 pub enum AesKey {
     Aes128([u8; 16]),
+    Aes192([u8; 24]),
     Aes256([u8; 32]),
 }
 
@@ -262,6 +336,7 @@ impl AesKey {
     fn as_slice(&self) -> &[u8] {
         match self {
             AesKey::Aes128(k) => k,
+            AesKey::Aes192(k) => k,
             AesKey::Aes256(k) => k,
         }
     }
@@ -269,6 +344,7 @@ impl AesKey {
     fn zeroize(&mut self) {
         match self {
             AesKey::Aes128(k) => k.fill(0),
+            AesKey::Aes192(k) => k.fill(0),
             AesKey::Aes256(k) => k.fill(0),
         }
     }
@@ -303,6 +379,11 @@ pub struct AesOp<'a, const N: usize, M> {
     core: AesCipher<'a>,
     key: AesKey,
     iv: [u8; AES_BLOCK],
+    /// Set after one `encrypt`/`decrypt` call. Only consulted by modes whose
+    /// HACE-side feedback/counter state can't be safely re-derived from a
+    /// second call's inputs (`Cfb`/`Ofb`/`Ctr`); `Ecb`/`Cbc` ignore it and
+    /// remain multi-call.
+    used: bool,
     _m: PhantomData<M>,
 }
 
@@ -347,6 +428,7 @@ macro_rules! cipher_init {
                     core,
                     key: key.clone(),
                     iv: *nonce,
+                    used: false,
                     _m: PhantomData,
                 })
             }
@@ -355,6 +437,9 @@ macro_rules! cipher_init {
 }
 cipher_init!(Ecb);
 cipher_init!(Cbc);
+cipher_init!(Cfb);
+cipher_init!(Ofb);
+cipher_init!(Ctr);
 
 impl<'a, const N: usize> CipherOp<Ecb> for AesOp<'a, N, Ecb> {
     fn encrypt(&mut self, plaintext: [u8; N]) -> Result<[u8; N], HaceError> {
@@ -404,3 +489,41 @@ impl<'a, const N: usize> CipherOp<Cbc> for AesOp<'a, N, Cbc> {
         Ok(pt)
     }
 }
+
+// CFB/OFB/CTR: single-shot only. Chaining a second call correctly needs the
+// keystream (OFB) or an externally-incremented counter (CTR), neither of
+// which the engine exposes after one op; CFB's feedback happens to equal the
+// last ciphertext block (same as CBC) but is kept single-shot here too so all
+// three new modes behave identically. A second `encrypt`/`decrypt` call on
+// the same context returns `HaceError::Busy`, matching aspeed-rust's own
+// one-shot-per-context discipline for these modes.
+macro_rules! cipher_op_single_shot {
+    ($mode:ty, $enc:ident, $dec:ident) => {
+        impl<'a, const N: usize> CipherOp<$mode> for AesOp<'a, N, $mode> {
+            fn encrypt(&mut self, plaintext: [u8; N]) -> Result<[u8; N], HaceError> {
+                const { assert!(N % AES_BLOCK == 0, "AesSkin<N>: N must be a multiple of 16") };
+                if core::mem::replace(&mut self.used, true) {
+                    return Err(HaceError::Busy);
+                }
+                let mut ct = [0u8; N];
+                self.core
+                    .$enc(self.key.as_slice(), &self.iv, &plaintext, &mut ct)?;
+                Ok(ct)
+            }
+
+            fn decrypt(&mut self, ciphertext: [u8; N]) -> Result<[u8; N], HaceError> {
+                const { assert!(N % AES_BLOCK == 0, "AesSkin<N>: N must be a multiple of 16") };
+                if core::mem::replace(&mut self.used, true) {
+                    return Err(HaceError::Busy);
+                }
+                let mut pt = [0u8; N];
+                self.core
+                    .$dec(self.key.as_slice(), &self.iv, &ciphertext, &mut pt)?;
+                Ok(pt)
+            }
+        }
+    };
+}
+cipher_op_single_shot!(Cfb, cfb_encrypt, cfb_decrypt);
+cipher_op_single_shot!(Ofb, ofb_encrypt, ofb_decrypt);
+cipher_op_single_shot!(Ctr, ctr_encrypt, ctr_decrypt);
