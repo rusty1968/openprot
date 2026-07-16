@@ -3,6 +3,7 @@
 
 //! AST10x0 System Control Unit (SCU) module.
 
+pub mod cache;
 pub mod clock;
 pub mod pinctrl;
 pub mod registers;

@@ -6,6 +6,7 @@
 use super::constants::DEFAULT_POLL_BUDGET;
 use super::context::{acquire_crypto_ctx, acquire_shared_ctx, CryptoContext, HashContext};
 use super::registers::HaceRegisters;
+use crate::scu::cache::dcache_invd_all as scu_dcache_invd_all;
 use crate::scu::{ClockRegisterHalf, ScuRegisterHalf, ScuRegisters};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -54,7 +55,15 @@ pub struct HaceDevice<Y: FnMut(u32)> {
     /// Argument is a suggested wait window in nanoseconds.
     pub(crate) yield_fn: Y,
     pub(crate) poll_budget: u32,
+    /// Cache flush hook called after HACE DMA writes to invalidate stale CPU
+    /// cache lines. Injected at construction so operation modules (digest,
+    /// aes) have no direct SCU dependency.
+    pub(crate) cache_flush: fn(),
 }
+
+/// No-op cache flush for devices constructed without a SCU reference (e.g.
+/// unit-test stubs using a raw register base pointer via `new`/`new_with_yield`).
+fn fn_noop_flush() {}
 
 impl<Y: FnMut(u32)> HaceDevice<Y> {
     /// Create a device bound to a raw HACE register block with a caller-provided
@@ -76,6 +85,7 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
             crypto_ctx: unsafe { acquire_crypto_ctx() },
             yield_fn,
             poll_budget: DEFAULT_POLL_BUDGET,
+            cache_flush: fn_noop_flush,
         }
     }
 
@@ -126,6 +136,7 @@ impl<Y: FnMut(u32)> HaceDevice<Y> {
 
         Self {
             regs,
+            cache_flush: scu_dcache_invd_all,
             // SAFETY: the `unsafe fn new*` single-instance contract makes this
             // the sole live device, hence the sole holder of these pointers.
             ctx: unsafe { acquire_shared_ctx() },

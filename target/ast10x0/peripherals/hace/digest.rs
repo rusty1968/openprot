@@ -103,6 +103,9 @@ pub struct HaceDigest<'a, T: DigestAlgorithm> {
     /// invoked once between every completion poll. Type-erased so the adapter
     /// (and the `Digest*` trait impls) need not be generic over the strategy.
     pub(crate) yield_fn: &'a mut dyn FnMut(u32),
+    /// Cache flush hook: invalidates stale CPU cache lines after HACE DMA.
+    /// Injected from [`HaceDevice`] so this module has no direct SCU dependency.
+    pub(crate) cache_flush: fn(),
     _algo: PhantomData<T>,
 }
 
@@ -114,12 +117,14 @@ impl<'a, T: DigestAlgorithm> HaceDigest<'a, T> {
         ctx: &'a mut HashContext,
         poll_budget: u32,
         yield_fn: &'a mut dyn FnMut(u32),
+        cache_flush: fn(),
     ) -> Self {
         Self {
             regs,
             ctx,
             poll_budget,
             yield_fn,
+            cache_flush,
             _algo: PhantomData,
         }
     }
@@ -141,13 +146,14 @@ impl<'a, T: DigestAlgorithm> HaceDigest<'a, T> {
         // (`borrow-arbitrated-engine-exclusivity`, Checklist box 2/4).
         let regs = device.regs;
         let poll_budget = device.poll_budget;
+        let cache_flush = device.cache_flush;
         // SAFETY: the device holds the sole pointer to this `.ram_nc` context
         // (acquired once at its `unsafe fn new*` single-instance gate); the
         // caller upholds non-reentrancy and the live `&'a mut device` (pinned
         // by `yield_fn` below) gates it, so no other `&mut` to it is live.
         let ctx: &'a mut HashContext = unsafe { &mut *device.ctx };
         let yield_fn: &'a mut dyn FnMut(u32) = &mut device.yield_fn;
-        Self::new(regs, ctx, poll_budget, yield_fn)
+        Self::new(regs, ctx, poll_budget, yield_fn, cache_flush)
     }
 
     /// DMA one full block held in `ctx.buffer` (always `.ram_nc`) to the engine.
@@ -215,6 +221,7 @@ where
             ctx: &mut *self.ctx,
             poll_budget: self.poll_budget,
             yield_fn: &mut *self.yield_fn,
+            cache_flush: self.cache_flush,
             _algo: PhantomData,
         })
     }
@@ -308,6 +315,8 @@ where
 
         for _ in 0..this.poll_budget {
             if this.regs.hash_intflag_is_set() {
+                // Invalidate stale CPU cache lines over the digest buffer.
+                (this.cache_flush)();
                 let result = T::digest_from_context(this.ctx);
                 // Cleanup context (mirrors cleanup_context in aspeed-rust).
                 this.ctx.bufcnt = 0;
