@@ -17,7 +17,7 @@ use super::constants::{
     AES_CMD_BASE, HACE_CMD_AES128, HACE_CMD_AES256, HACE_CMD_CBC, HACE_CMD_ECB, HACE_CMD_ENCRYPT,
     HACE_SG_LAST, POLL_YIELD_NS,
 };
-use super::context::{CryptoContext, AES_DATA_CAP};
+use super::context::CryptoContext;
 use super::device::HaceDevice;
 use super::error::HaceError;
 use super::helpers::ptr_to_u32;
@@ -40,6 +40,9 @@ pub struct AesCipher<'a> {
     poll_budget: u32,
     /// Cooperative yield hook called once per completion poll.
     yield_fn: &'a mut dyn FnMut(u32),
+    /// Cache flush hook: invalidates stale CPU cache lines after HACE DMA.
+    /// Injected from [`HaceDevice`] so this module has no direct SCU dependency.
+    cache_flush: fn(),
 }
 
 impl<'a> AesCipher<'a> {
@@ -48,12 +51,14 @@ impl<'a> AesCipher<'a> {
         ctx: &'a mut CryptoContext,
         poll_budget: u32,
         yield_fn: &'a mut dyn FnMut(u32),
+        cache_flush: fn(),
     ) -> Self {
         Self {
             regs,
             ctx,
             poll_budget,
             yield_fn,
+            cache_flush,
         }
     }
 
@@ -65,10 +70,11 @@ impl<'a> AesCipher<'a> {
         // Borrow split; retained `yield_fn` keeps the device exclusively borrowed.
         let regs = device.regs;
         let poll_budget = device.poll_budget;
+        let cache_flush = device.cache_flush;
         // SAFETY: single-instance device + exclusive live borrow gate access.
         let ctx: &'a mut CryptoContext = unsafe { &mut *device.crypto_ctx };
         let yield_fn: &'a mut dyn FnMut(u32) = &mut device.yield_fn;
-        Self::new(regs, ctx, poll_budget, yield_fn)
+        Self::new(regs, ctx, poll_budget, yield_fn, cache_flush)
     }
 
     /// Map AES key length to command bits. Reject AES-192.
@@ -93,22 +99,16 @@ impl<'a> AesCipher<'a> {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<(), HaceError> {
-        // Enforce block-aligned sizing and DMA staging cap before programming.
+        // Enforce block-aligned sizing before programming.
         if input.is_empty() || input.len() % AES_BLOCK != 0 || output.len() < input.len() {
-            return Err(HaceError::InvalidInput);
-        }
-        if input.len() > AES_DATA_CAP {
             return Err(HaceError::InvalidInput);
         }
         let kbits = Self::keylen_bits(key)?;
         let len = u32::try_from(input.len()).map_err(|_| HaceError::InvalidInput)?;
 
-        // Engine context: IV at [0..16) for CBC, key at [16..16+keylen).
+        // Engine context: IV at [0..16) for IV modes, key at [16..16+keylen).
         self.ctx.ctx = [0u8; 64];
         if let Some(iv) = iv {
-            // Length-proven array assignment: `iv` is `&[u8; AES_BLOCK]`, so cast
-            // the destination prefix to `&mut [u8; AES_BLOCK]` and copy as fixed
-            // arrays. `copy_from_slice` would keep a length-mismatch panic branch.
             if let Some(dst) = self.ctx.ctx.get_mut(..AES_BLOCK) {
                 if let Ok(dst) = <&mut [u8; AES_BLOCK]>::try_from(dst) {
                     *dst = *iv;
@@ -119,43 +119,37 @@ impl<'a> AesCipher<'a> {
             dst.copy_from_slice(key);
         }
 
-        // DMA safety (D3): copy caller input into the .ram_nc staging buffer.
-        // The HACE engine reads/writes by physical address; if the caller's
-        // slice is in flash, rodata, or a cacheable stack frame the engine
-        // would silently read/write stale physical RAM. Staging through
-        // ctx.data_in / ctx.data_out (both inside the .ram_nc CryptoContext)
-        // guarantees the DMA addresses are always in non-cacheable SRAM.
-        if let Some(dst) = self.ctx.data_in.get_mut(..input.len()) {
-            dst.copy_from_slice(input);
-        }
-
-        // SG descriptors: addr = .ram_nc staging buffers, len = bytes | HACE_SG_LAST.
-        let in_ptr = ptr_to_u32(self.ctx.data_in.as_ptr())?;
-        let out_ptr = ptr_to_u32(self.ctx.data_out.as_ptr())?;
+        // Point SG descriptors directly at the caller's SRAM buffers.
+        //
+        // The AST10x0 crypto MBUS reads and writes payload data from ordinary
+        // cacheable SRAM (below 0x000A0000). Staging through the `.ram_nc`
+        // window (0x000A0000+) works for the engine context and SG descriptors
+        // but not for source/destination payload data: putting payloads in
+        // `.ram_nc` causes the engine to fire the completion intflag without
+        // writing any output (observed on hardware). Callers must therefore
+        // supply buffers in ordinary SRAM (e.g. `static mut` or heap); the
+        // KAT uses `static mut AES_IN / AES_OUT` which are in `.bss` / regular
+        // SRAM and work correctly.
+        //
+        // After the engine completes, `dcache_invd_all()` is called to
+        // invalidate any stale cache lines over the output buffer so the CPU
+        // reads the engine-written data rather than pre-op cached zeros
+        // (authority: `hace_aspeed.c` calls `cache_data_invd_all()` after
+        // every crypto op; `aspeed-rust` does the same).
+        let in_ptr = ptr_to_u32(input.as_ptr())?;
+        let out_ptr = ptr_to_u32(output.as_mut_ptr())?;
         self.ctx.src.addr = in_ptr;
         self.ctx.src.len = len | HACE_SG_LAST;
         self.ctx.dst.addr = out_ptr;
         self.ctx.dst.len = len | HACE_SG_LAST;
 
         let cmd = AES_CMD_BASE | kbits | mode_bits | if encrypt { HACE_CMD_ENCRYPT } else { 0 };
-        self.ctx.cmd = cmd;
 
-        // Program descriptor addresses, ctx base, and data length.
         let src_desc = ptr_to_u32(core::ptr::addr_of!(self.ctx.src))?;
         let dst_desc = ptr_to_u32(core::ptr::addr_of!(self.ctx.dst))?;
         let ctx_base = ptr_to_u32(self.ctx.ctx.as_ptr())?;
-        // HACE0C is the plain byte count (bits 0:27); HACE_SG_LAST lives only in
-        // the SG descriptor length words (ctx.src.len / ctx.dst.len), not here.
         let data_len = len;
 
-        // Wait for any in-progress crypto operation to finish before re-programming.
-        // Mirrors Zephyr `regmap_read_poll_timeout(...HACE_CRYPTO_BUSY...)` in
-        // `hace_aspeed.c:83`. Without this drain, programming the engine while
-        // CryptoEngStsFlag is still set (from a prior encrypt) causes the new
-        // decrypt command to be ignored and `data_out` to read back as zeros.
-        while self.regs.crypto_engine_is_busy() {
-            (self.yield_fn)(POLL_YIELD_NS);
-        }
         self.regs.clear_crypto_intflag();
         self.regs
             .program_crypto_operation(src_desc, dst_desc, ctx_base, data_len, cmd);
@@ -169,28 +163,21 @@ impl<'a> AesCipher<'a> {
             (self.yield_fn)(POLL_YIELD_NS);
         }
 
+        // Invalidate the data cache so the CPU reads what the engine wrote.
+        (self.cache_flush)();
+
         // Always clear key/IV material from the DMA context buffer.
         self.ctx.ctx = [0u8; 64];
 
         if done {
-            // Copy result out of .ram_nc staging buffer to caller's output.
-            let n = input.len();
-            output
-                .get_mut(..n)
-                .ok_or(HaceError::InvalidInput)?
-                .copy_from_slice(self.ctx.data_out.get(..n).ok_or(HaceError::InvalidInput)?);
-            // Scrub staging buffers so plaintext/ciphertext doesn't linger.
-            if let Some(s) = self.ctx.data_in.get_mut(..n) {
-                s.fill(0);
-            }
-            if let Some(s) = self.ctx.data_out.get_mut(..n) {
-                s.fill(0);
-            }
             Ok(())
         } else {
-            if let Some(s) = self.ctx.data_in.get_mut(..input.len()) {
-                s.fill(0);
-            }
+            pw_log::error!(
+                "hace: AES timeout: HACE1C={:#010x}, cmd={:#010x}, len={}",
+                self.regs.read_hace1c() as u32,
+                cmd as u32,
+                len as u32,
+            );
             Err(HaceError::Timeout)
         }
     }

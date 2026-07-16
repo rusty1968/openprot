@@ -107,17 +107,15 @@ impl HaceRegisters {
     }
 
     #[inline]
-    pub(crate) fn crypto_engine_is_busy(&self) -> bool {
-        self.regs()
-            .hace1c()
-            .read()
-            .crypto_eng_sts_flag()
-            .bit_is_set()
-    }
 
-    #[inline]
     pub(crate) fn crypto_intflag_is_set(&self) -> bool {
         self.regs().hace1c().read().crypto_intflag().bit_is_set()
+    }
+
+    /// Read the raw HACE1C status register value (for diagnostics).
+    #[inline]
+    pub(crate) fn read_hace1c(&self) -> u32 {
+        self.regs().hace1c().read().bits()
     }
 
     /// Program one crypto (AES) pass and start the engine.

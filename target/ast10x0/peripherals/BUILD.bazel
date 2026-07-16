@@ -35,6 +35,7 @@ rust_library(
         "i2c/transfer.rs",
         "i2c/types.rs",
         "lib.rs",
+        "scu/cache.rs",
         "scu/clock.rs",
         "scu/mod.rs",
         "scu/pinctrl.rs",
