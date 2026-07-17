@@ -188,6 +188,18 @@ component, not the whole chain (INV5).
 produces the event internally, the orchestrator intercepts and re-dispatches it
 before returning, and the decision is visible in the effect trace.
 
+**Why re-walk from `cursor = 0`?** After restoring a component the machine
+re-enters `VerifyingPlatform` and re-verifies the entire chain from scratch
+rather than resuming at the failed component. This is a deliberate conservative
+policy: a corruption event may indicate a broader integrity problem, and the
+CSA architecture's core principle — "no component executes unverified firmware"
+(NIST SP 800-193) — requires that trust be re-established end-to-end before the
+platform is considered healthy again. The CSA document does not prescribe the
+exact recovery sequencing, but the re-walk implements the spirit of that
+principle. Optional components that fail during the re-walk are skipped (held in
+reset) as during initial boot; they are re-released only if they pass
+`VerificationPassed` in the new walk.
+
 ---
 
 ### `Locked`
@@ -207,8 +219,9 @@ When a leaf state returns `Outcome::Super`, `statig` calls the superstate handle
 | Event | Effects | Next state |
 |---|---|---|
 | `AttestationChallenge` | `SignAttestation` | `Handled` (no transition — INV6) |
-| `CorruptionDetected(id)` | — | `Recovering` (failed = Some(id) — INV5) |
-| anything else | — | `Outcome::Super` (discarded) |
+| `CorruptionDetected(id)` | `attrs.required == true` | — | `Recovering` (failed = Some(id) — INV5) |
+| `CorruptionDetected(id)` | `attrs.required == false` | `AssertReset(id)` | `Handled` (component gated; machine stays in current state) |
+| anything else | — | — | `Outcome::Super` (discarded) |
 
 ---
 
