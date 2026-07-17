@@ -153,6 +153,10 @@ pub enum Effect {
     ReadFirmware(ComponentId),
     VerifyFirmware(ComponentId),
     ReleaseReset(ComponentId),
+    /// Assert reset on a component that is already running — the inverse of
+    /// [`ReleaseReset`]. Emitted when an optional component is found corrupt at
+    /// runtime: the component is gated without triggering a recovery cycle.
+    AssertReset(ComponentId),
     SignAttestation,
     AuthenticateUpdate,
     StageUpdate,
@@ -447,8 +451,25 @@ impl<const N: usize> StatigSuperstate<Rot<N>> for Superstate<'_> {
                     Outcome::Handled
                 }
                 Event::CorruptionDetected(id) => {
-                    rot.failed = Some(*id);
-                    Outcome::Transition(State::Recovering)
+                    // Respect the per-component policy encoded at chain-build time.
+                    // required: true  → recover (halt chain, restore, re-walk)
+                    // required: false → ignore corruption; component stays running
+                    //                   but is not considered trusted by the core.
+                    let required = rot
+                        .chain
+                        .iter()
+                        .find(|(cid, _)| cid == id)
+                        .map(|(_, attrs)| attrs.required)
+                        .unwrap_or(true); // unknown id: treat as required (safe default)
+                    if required {
+                        rot.failed = Some(*id);
+                        Outcome::Transition(State::Recovering)
+                    } else {
+                        // Optional: gate the component (put it back in reset) but
+                        // do not halt the chain or trigger recovery.
+                        ctx.emit(Effect::AssertReset(*id));
+                        Outcome::Handled
+                    }
                 }
                 _ => Outcome::Super,
             },
@@ -906,5 +927,47 @@ mod tests {
         assert_eq!(state, State::Ready);
         assert!(!effects.contains(&Effect::ReleaseReset(C1)));
         assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+    }
+
+    /// Runtime corruption of a `required: false` component gates the component
+    /// (AssertReset) but does not trigger recovery — the machine stays in Ready.
+    #[test]
+    fn optional_runtime_corruption_is_ignored() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::passive_required()),
+                (C1, ComponentAttrs::passive_optional()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationPassed(C1),
+                Event::CorruptionDetected(C1), // optional → gate, no recovery
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        assert!(effects.contains(&Effect::AssertReset(C1)));
+        assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+        assert!(!effects.contains(&Effect::LatchLockdown));
+    }
+
+    /// Runtime corruption of a `required: true` component still triggers
+    /// recovery as before.
+    #[test]
+    fn required_runtime_corruption_triggers_recovery() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::passive_required()),
+                (C1, ComponentAttrs::passive_optional()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationPassed(C1),
+                Event::CorruptionDetected(C0), // required → Recovering
+            ],
+        );
+        assert_eq!(state, State::Recovering);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
     }
 }
