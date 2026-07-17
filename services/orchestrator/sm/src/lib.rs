@@ -1,3 +1,6 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
 //! `openprot_orchestrator_sm` — the eRoT boot-sequence state machine.
 //!
 //! This is the pure-reducer core ported from `rot_reducer`. It describes side
@@ -85,16 +88,28 @@ pub struct ComponentAttrs {
 
 impl ComponentAttrs {
     pub const fn active_required() -> Self {
-        Self { kind: ComponentKind::Active, required: true }
+        Self {
+            kind: ComponentKind::Active,
+            required: true,
+        }
     }
     pub const fn passive_required() -> Self {
-        Self { kind: ComponentKind::Passive, required: true }
+        Self {
+            kind: ComponentKind::Passive,
+            required: true,
+        }
     }
     pub const fn active_optional() -> Self {
-        Self { kind: ComponentKind::Active, required: false }
+        Self {
+            kind: ComponentKind::Active,
+            required: false,
+        }
     }
     pub const fn passive_optional() -> Self {
-        Self { kind: ComponentKind::Passive, required: false }
+        Self {
+            kind: ComponentKind::Passive,
+            required: false,
+        }
     }
 }
 
@@ -537,7 +552,9 @@ mod tests {
 
     impl Recorder {
         fn new() -> Self {
-            Self { recorded: Vec::new() }
+            Self {
+                recorded: Vec::new(),
+            }
         }
     }
 
@@ -565,7 +582,11 @@ mod tests {
     fn cold_boot_walks_chain_in_order() {
         let (effects, state) = drive(
             passive_required(&[C0, C1]),
-            &[BOOT, Event::VerificationPassed(C0), Event::VerificationPassed(C1)],
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationPassed(C1),
+            ],
         );
         assert_eq!(
             effects,
@@ -609,7 +630,11 @@ mod tests {
     fn attestation_shared_across_operational_states() {
         let (effects, state) = drive(
             passive_required(&[C0]),
-            &[BOOT, Event::VerificationPassed(C0), Event::AttestationChallenge],
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::AttestationChallenge,
+            ],
         );
         assert_eq!(effects.last(), Some(&Effect::SignAttestation));
         assert_eq!(state, State::Ready);
@@ -643,7 +668,11 @@ mod tests {
         let tail = &effects[effects.len() - 3..];
         assert_eq!(
             tail,
-            &[Effect::AuthenticateUpdate, Effect::StageUpdate, Effect::DiscardStaged],
+            &[
+                Effect::AuthenticateUpdate,
+                Effect::StageUpdate,
+                Effect::DiscardStaged
+            ],
         );
         assert_eq!(state, State::Ready);
         assert!(!effects.contains(&Effect::LatchLockdown));
@@ -664,7 +693,10 @@ mod tests {
             ],
         );
         let tail = &effects[effects.len() - 2..];
-        assert_eq!(tail, &[Effect::ReadFirmware(C0), Effect::VerifyFirmware(C0)]);
+        assert_eq!(
+            tail,
+            &[Effect::ReadFirmware(C0), Effect::VerifyFirmware(C0)]
+        );
         assert_eq!(state, State::VerifyingPlatform);
     }
 
@@ -693,7 +725,8 @@ mod tests {
     #[test]
     fn retry_count_resets_after_successful_recovery() {
         let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
-        c.push((C0, ComponentAttrs::passive_required())).expect("fits");
+        c.push((C0, ComponentAttrs::passive_required()))
+            .expect("fits");
         let mut orch = Orchestrator::new(c, 2);
         let mut effects = Vec::new();
 
@@ -725,7 +758,8 @@ mod tests {
     #[test]
     fn custom_retry_cap_latches_sooner() {
         let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
-        c.push((C0, ComponentAttrs::passive_required())).expect("fits");
+        c.push((C0, ComponentAttrs::passive_required()))
+            .expect("fits");
         let mut orch = Orchestrator::new(c, 1);
         let mut effects = Vec::new();
         for ev in [
@@ -745,7 +779,8 @@ mod tests {
     fn custom_capacity_walks_full_chain() {
         let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), 3>::new();
         for &id in &[C0, C1, C2] {
-            c.push((id, ComponentAttrs::passive_required())).expect("3 fits");
+            c.push((id, ComponentAttrs::passive_required()))
+                .expect("3 fits");
         }
         let mut orch = Orchestrator::new(c, MAX_RETRY);
         let mut effects = Vec::new();
@@ -818,7 +853,11 @@ mod tests {
                 (C0, ComponentAttrs::active_required()),
                 (C1, ComponentAttrs::passive_required()),
             ]),
-            &[BOOT, Event::VerificationPassed(C0), Event::AttestationChallenge],
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::AttestationChallenge,
+            ],
         );
         assert_eq!(state, State::AwaitingReady);
         assert_eq!(effects.last(), Some(&Effect::SignAttestation));
@@ -833,7 +872,11 @@ mod tests {
                 (C0, ComponentAttrs::passive_required()),
                 (C1, ComponentAttrs::passive_optional()),
             ]),
-            &[BOOT, Event::VerificationPassed(C0), Event::VerificationFailed(C1)],
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationFailed(C1),
+            ],
         );
         assert_eq!(state, State::Ready);
         // C1 must never be released.
@@ -855,9 +898,9 @@ mod tests {
             ]),
             &[
                 BOOT,
-                Event::VerificationPassed(C0),   // → AwaitingReady; spec ReadFirmware(C1)
-                Event::VerificationFailed(C1),   // optional → skip C1
-                Event::ComponentReady(C0),        // iRoT gate clears; cursor past end → Ready
+                Event::VerificationPassed(C0), // → AwaitingReady; spec ReadFirmware(C1)
+                Event::VerificationFailed(C1), // optional → skip C1
+                Event::ComponentReady(C0),     // iRoT gate clears; cursor past end → Ready
             ],
         );
         assert_eq!(state, State::Ready);
