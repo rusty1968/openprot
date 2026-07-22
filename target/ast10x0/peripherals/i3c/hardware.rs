@@ -765,6 +765,9 @@ pub struct Ast1060I3c<Y: FnMut(u32)> {
     /// suggested wait window in nanoseconds (advisory). Private so external
     /// code cannot swap the wait policy out from under an active driver.
     yield_fn: Y,
+    /// Sticky transfer fault: set when timeout recovery fails and cleared only
+    /// by a successful controller init/re-init.
+    xfer_faulted: AtomicBool,
 }
 
 impl<Y: FnMut(u32)> Ast1060I3c<Y> {
@@ -783,7 +786,11 @@ impl<Y: FnMut(u32)> Ast1060I3c<Y> {
     pub unsafe fn new(bus: u8, yield_fn: Y) -> Option<Self> {
         // SAFETY: forwarded — see this function's contract above.
         let regs = unsafe { I3cRegisters::new(bus) }?;
-        Some(Self { regs, yield_fn })
+        Some(Self {
+            regs,
+            yield_fn,
+            xfer_faulted: AtomicBool::new(false),
+        })
     }
 
     /// Bus index this driver was constructed for.
@@ -838,6 +845,31 @@ where
 }
 
 impl<Y: FnMut(u32)> Ast1060I3c<Y> {
+    #[inline]
+    fn ensure_xfer_ready(&self) -> Result<(), I3cDrvError> {
+        if self.xfer_faulted.load(Ordering::Acquire) {
+            return Err(I3cDrvError::IoError);
+        }
+        Ok(())
+    }
+
+    /// Best-effort timeout recovery for transfer engine state.
+    ///
+    /// Runs all recovery steps (no short-circuit), latches a sticky fault if
+    /// any step fails, and always re-arms transfer IRQ sources.
+    fn recover_timeout_xfer(&mut self, config: &mut I3cConfig) {
+        i3c_debug!(self.logger, "wait_xfer_complete: timeout");
+        let halt_ok = self.enter_halt(true, config).is_ok();
+        let reset_ok = self.reset_ctrl(RESET_CTRL_XFER_QUEUES).is_ok();
+        let exit_ok = self.exit_halt(config).is_ok();
+        if !(halt_ok && reset_ok && exit_ok) {
+            // Sticky until a full init/re-init; blocks new transfers after a
+            // failed timeout recovery sequence.
+            self.xfer_faulted.store(true, Ordering::Release);
+        }
+        self.regs.unmask_master_xfer_irqs();
+    }
+
     fn toggle_scl_in(&mut self, count: u32) {
         for _ in 0..count {
             self.regs.i3cg_reg1_clear_bits(I3CG_REG1_SCL_IN_SW_MODE_VAL);
@@ -1041,6 +1073,10 @@ impl<Y: FnMut(u32)> HardwareCore for Ast1060I3c<Y> {
         }
         self.regs.set_hot_join_nack(false);
         i3c_debug!(self.logger, "i3c init done");
+
+        // A full successful init/re-init is the boundary that clears a
+        // previously latched transfer fault.
+        self.xfer_faulted.store(false, Ordering::Release);
 
         // Safety: Ensure memory barrier and init completion before interrupts are enabled by the caller
         core::sync::atomic::compiler_fence(Ordering::SeqCst);
@@ -1518,13 +1554,8 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
             left -= 1;
         }
 
-        // Timeout: recover the engine and re-arm the IRQ sources. Recovery is
-        // best-effort — the `false` return already reports the timeout.
-        i3c_debug!(self.logger, "wait_xfer_complete: timeout");
-        let _ = self.enter_halt(true, config);
-        let _ = self.reset_ctrl(RESET_CTRL_XFER_QUEUES);
-        let _ = self.exit_halt(config);
-        self.regs.unmask_master_xfer_irqs();
+        // Timeout: recover the engine and re-arm the IRQ sources.
+        self.recover_timeout_xfer(config);
         false
     }
 
@@ -1561,6 +1592,7 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
         pos: u8,
         ops: &mut [I2cOp<'a>],
     ) -> Result<(), I3cDrvError> {
+        self.ensure_xfer_ready()?;
         if ops.is_empty() {
             return Ok(());
         }
@@ -1649,6 +1681,7 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
         config: &mut I3cConfig,
         payload: &mut CccPayload<'_, '_>,
     ) -> Result<(), I3cDrvError> {
+        self.ensure_xfer_ready()?;
         let mut cmds = [I3cCmd {
             cmd_lo: 0,
             cmd_hi: 0,
@@ -1777,10 +1810,9 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
         let mut xfer = I3cXfer::new(&mut cmds[..]);
         self.start_xfer(config, &mut xfer);
 
-        // On timeout `wait_xfer_complete` already recovered the engine;
-        // `xfer.ret` stays -1 and falls through to the error mapping below
-        // (same outcome as the reference's timeout path).
-        let _ = self.wait_xfer_complete(config, &mut xfer, I3C_OP_TIMEOUT_US);
+        if !self.wait_xfer_complete(config, &mut xfer, I3C_OP_TIMEOUT_US) {
+            return Err(I3cDrvError::Timeout);
+        }
 
         let ret = xfer.ret;
         if ret == i32::try_from(RESPONSE_ERROR_IBA_NACK).map_err(|_| I3cDrvError::Invalid)? {
@@ -1801,6 +1833,7 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
     }
 
     fn do_entdaa(&mut self, config: &mut I3cConfig, pos: u32) -> Result<(), I3cDrvError> {
+        self.ensure_xfer_ready()?;
         i3c_debug!(self.logger, "do_entdaa: pos={}", pos);
         let cmd = I3cCmd {
             cmd_lo: field_prep(COMMAND_PORT_ATTR, COMMAND_ATTR_ADDR_ASSGN_CMD)
@@ -1950,6 +1983,7 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
         pid: u64,
         msgs: &mut [I3cMsg],
     ) -> Result<(), I3cDrvError> {
+        self.ensure_xfer_ready()?;
         let pos_opt = config.attached.pos_of_pid(pid);
         let pos: u8 = pos_opt.ok_or(I3cDrvError::NoDatPos)?;
 
