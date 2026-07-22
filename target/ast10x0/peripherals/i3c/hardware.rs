@@ -2028,11 +2028,7 @@ impl<Y: FnMut(u32)> HardwareTransfer for Ast1060I3c<Y> {
             .map_err(|_| I3cDrvError::TooManyMsgs)?;
         }
 
-        let ret = self.priv_xfer_build_cmds(cmds.as_mut_slice(), msgs, pos);
-        match ret {
-            Ok(()) => {}
-            Err(e) => return Err(e),
-        }
+        self.priv_xfer_build_cmds(cmds.as_mut_slice(), msgs, pos)?;
 
         let mut xfer = I3cXfer::new(cmds.as_mut_slice());
         self.start_xfer(config, &mut xfer);
