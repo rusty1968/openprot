@@ -31,7 +31,8 @@ signals) arrives in event payloads.
 **Feedback as data.** Internal follow-up signals (e.g. the retry-cap lockdown
 `RecoveryFailed`) are emitted as `Effect::Emit(event)`. The orchestrator queues
 and handles them immediately, making them visible in the effect trace rather than
-hiding them as implicit state changes.
+hiding them as implicit state changes. See the
+[`Recovering` state](./orchestrator-machine.md#recovering) for a worked example.
 
 **Board-supplied policy.** The core hard-codes no deployment-specific values.
 The shell supplies the trust chain (component ids, kinds, and required/optional
@@ -47,4 +48,45 @@ the CSA architecture document:
 | eRoT holds component in reset until firmware verified | `VerifyingPlatform` emits `ReleaseReset` only on `VerificationPassed` |
 | Component with Caliptra iRoT requires two independent checks | `ComponentKind::Active` → `AwaitingReady` until `ComponentReady` |
 | Passive component (no iRoT): eRoT check only | `ComponentKind::Passive` → advance immediately after `ReleaseReset` |
-| Optional component: failure skips, not blocks | `ComponentAttrs::required = false` → advance without `Recovering` |
+| Isolable component: failure skips, not blocks | `FailurePolicy::Isolable` → skip (held in reset); advance without `Recovering`; no cascade |
+| Cascading skip: failure also holds dependents | `FailurePolicy::Cascading` + `ComponentAttrs::depends_on` → cascade-skip in `Rot.held` |
+| Boot-progress watchdog: component must signal readiness in time | `Timeout(ComponentId)` event → `AwaitingReady` → `Recovering` |
+| Recovery scope groups components that restore together | `ComponentAttrs::recovery_region` (`RegionId`) → shell restores full region on `RestoreGoldenImage` |
+
+## Applicability Across Admissible Architectures
+
+The orchestrator is **eRoT-scoped**: one instance runs per discrete eRoT chip
+running OpenPRoT firmware. The same crate and binary are used at every such
+tier — the only difference between deployments is the chain configuration
+supplied at startup. eRoT chips not running OpenPRoT (e.g. a third-party AMC
+or a legacy DC-SCM implementation) appear as opaque `ComponentId` entries in
+the chain of the nearest OpenPRoT eRoT above them.
+
+**Model 1 — Module** (single PCIe add-in card): a discrete eRoT is optional.
+When present, it runs one orchestrator instance with a short chain containing
+the card's SoC. When absent, the module relies on the parent node's eRoT
+instance to verify and release it as a `ComponentId` in the node's chain.
+
+**Model 2 — Single Node Compute**: the DC-SCM discrete eRoT runs one
+orchestrator instance whose chain covers all critical node devices (CPU, BMC,
+NIC, storage). This is the canonical single-instance deployment.
+
+**Model 3 — Complex Heterogeneous Compute**: the three-tier hierarchy maps to
+independent orchestrator instances at each tier:
+
+- Each **AMC / EAM** (subsystem eRoT) runs one instance whose chain covers the
+  GPU or AI accelerator devices it manages.
+- The **DC-SCM node eRoT** runs one instance whose chain covers CPUs, BMC,
+  SmartNICs, storage, and the AMC/EAM chips themselves.
+
+The node eRoT treats each AMC/EAM as just another `ComponentId` — `Active` if
+the AMC has its own integrated iRoT, `Passive` if not. It has no visibility
+into the AMC's internal chain walk; it only observes the AMC's
+`VerificationPassed` / `ComponentReady` signals, like any other component.
+
+| Admissible Architecture | Orchestrator instances | Chain scope per instance |
+|---|---|---|
+| Module (eRoT present) | 1 | Card SoC |
+| Module (no eRoT) | 0 | — (verified by parent node eRoT) |
+| Single Node Compute | 1 | All node critical devices |
+| Complex Heterogeneous Compute | 1 per subsystem eRoT + 1 node eRoT | Subsystem devices / all node devices including subsystem eRoTs |
