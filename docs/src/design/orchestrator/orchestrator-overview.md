@@ -47,4 +47,7 @@ the CSA architecture document:
 | eRoT holds component in reset until firmware verified | `VerifyingPlatform` emits `ReleaseReset` only on `VerificationPassed` |
 | Component with Caliptra iRoT requires two independent checks | `ComponentKind::Active` → `AwaitingReady` until `ComponentReady` |
 | Passive component (no iRoT): eRoT check only | `ComponentKind::Passive` → advance immediately after `ReleaseReset` |
-| Optional component: failure skips, not blocks | `ComponentAttrs::required = false` → advance without `Recovering` |
+| Isolable component: failure skips, not blocks | `FailurePolicy::Isolable` → skip (held in reset); advance without `Recovering`; no cascade |
+| Cascading skip: failure also holds dependents | `FailurePolicy::Cascading` + `ComponentAttrs::depends_on` → cascade-skip in `Rot.held` |
+| Boot-progress watchdog: component must signal readiness in time | `Timeout(ComponentId)` event → `AwaitingReady` → `Recovering` |
+| Recovery scope groups components that restore together | `ComponentAttrs::recovery_region` (`RegionId`) → shell restores full region on `RestoreGoldenImage` |

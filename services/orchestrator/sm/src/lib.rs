@@ -970,4 +970,201 @@ mod tests {
         assert_eq!(state, State::Recovering);
         assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
     }
+
+    /// Boot-time VerificationFailed on a required component → Recovering.
+    /// (Distinct from CorruptionDetected: this is a failed eRoT-side check
+    /// before the component is ever released from reset.)
+    #[test]
+    fn boot_failure_required_enters_recovering() {
+        let (effects, state) = drive(
+            passive_required(&[C0, C1]),
+            &[BOOT, Event::VerificationFailed(C0)],
+        );
+        assert_eq!(state, State::Recovering);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+        // Component must never be released when its eRoT check failed.
+        assert!(!effects.contains(&Effect::ReleaseReset(C0)));
+    }
+
+    /// Full boot-failure recovery cycle: VerificationFailed → Recovering →
+    /// Restored → re-walk from top → VerificationPassed → Ready.
+    #[test]
+    fn boot_failure_recovery_cycle_completes() {
+        let (effects, state) = drive(
+            passive_required(&[C0]),
+            &[
+                BOOT,
+                Event::VerificationFailed(C0),
+                Event::Restored(C0),
+                Event::VerificationPassed(C0),
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+        // ReleaseReset only after the recovery re-walk passes.
+        assert!(effects.contains(&Effect::ReleaseReset(C0)));
+    }
+
+    /// VerificationFailed (required) on a speculative check while the machine
+    /// is in AwaitingReady → enters Recovering without releasing the component.
+    #[test]
+    fn required_failure_in_awaiting_ready_enters_recovering() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::active_required()),
+                (C1, ComponentAttrs::passive_required()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0), // → AwaitingReady; spec check of C1 starts
+                Event::VerificationFailed(C1), // required → Recovering
+            ],
+        );
+        assert_eq!(state, State::Recovering);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C1)));
+        assert!(!effects.contains(&Effect::ReleaseReset(C1)));
+    }
+
+    /// CorruptionDetected while in AwaitingReady (required component) →
+    /// Recovering via the Operational superstate handler.
+    #[test]
+    fn corruption_in_awaiting_ready_triggers_recovery() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::active_required()),
+                (C1, ComponentAttrs::passive_required()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0), // → AwaitingReady
+                Event::CorruptionDetected(C0),
+            ],
+        );
+        assert_eq!(state, State::Recovering);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+    }
+
+    /// CorruptionDetected while in Updating (required component) → Recovering
+    /// via the Operational superstate handler.
+    #[test]
+    fn corruption_in_updating_triggers_recovery() {
+        let (effects, state) = drive(
+            passive_required(&[C0]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::UpdateRequest,
+                Event::CorruptionDetected(C0),
+            ],
+        );
+        assert_eq!(state, State::Recovering);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+    }
+
+    /// UpdateVerified activates the staged image and returns to Ready.
+    /// (Complements update_rollback_is_not_recovery which tests UpdateRejected.)
+    #[test]
+    fn update_verified_activates_update() {
+        let (effects, state) = drive(
+            passive_required(&[C0]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::UpdateRequest,
+                Event::UpdateVerified,
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        assert!(effects.contains(&Effect::ActivateUpdate));
+        assert!(!effects.contains(&Effect::DiscardStaged));
+        assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
+    }
+
+    /// Locked is a terminal state: no effects are produced in response to any
+    /// event after the machine latches.
+    #[test]
+    fn locked_is_terminal() {
+        let mut c: heapless::Vec<(ComponentId, ComponentAttrs), CAPACITY> =
+            heapless::Vec::new();
+        c.push((C0, ComponentAttrs::passive_required())).unwrap();
+        // max_retry = 1 so the first failed restore latches immediately.
+        let mut orch = Orchestrator::new(c, 1);
+        let mut effects: Vec<Effect> = Vec::new();
+
+        for ev in [BOOT, Event::VerificationFailed(C0), Event::Restored(C0)] {
+            orch.dispatch_with(ev, |e| effects.push(e));
+        }
+        assert_eq!(orch.state(), State::Locked);
+
+        let count_before = effects.len();
+        for ev in [
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::AttestationChallenge,
+            Event::UpdateRequest,
+            Event::CorruptionDetected(C0),
+        ] {
+            orch.dispatch_with(ev, |e| effects.push(e));
+        }
+        assert_eq!(
+            effects.len(),
+            count_before,
+            "Locked state must produce no effects"
+        );
+    }
+
+    /// An optional component at the head of the chain can fail and the walk
+    /// continues to the remaining required components.
+    #[test]
+    fn optional_first_component_skipped_walk_continues() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::passive_optional()),
+                (C1, ComponentAttrs::passive_required()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationFailed(C0), // optional → skip C0
+                Event::VerificationPassed(C1),
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        assert!(!effects.contains(&Effect::ReleaseReset(C0)));
+        assert!(effects.contains(&Effect::ReleaseReset(C1)));
+        assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
+    }
+
+    /// The speculative read emits ReleaseReset · ReadFirmware · VerifyFirmware
+    /// all in the same handler as VerificationPassed for an Active component,
+    /// before ComponentReady has arrived. Verifies both presence and order.
+    #[test]
+    fn speculative_read_effects_are_emitted_together() {
+        let mut orch = Orchestrator::<CAPACITY>::new(
+            chain(&[
+                (C0, ComponentAttrs::active_required()),
+                (C1, ComponentAttrs::passive_required()),
+            ]),
+            MAX_RETRY,
+        );
+        let mut effects: Vec<Effect> = Vec::new();
+
+        orch.dispatch_with(BOOT, |e| effects.push(e));
+        assert_eq!(
+            effects,
+            std::vec![Effect::ReadFirmware(C0), Effect::VerifyFirmware(C0)],
+        );
+
+        effects.clear();
+        orch.dispatch_with(Event::VerificationPassed(C0), |e| effects.push(e));
+        // All three effects emitted in the same handler, before ComponentReady.
+        assert_eq!(
+            effects,
+            std::vec![
+                Effect::ReleaseReset(C0),
+                Effect::ReadFirmware(C1),
+                Effect::VerifyFirmware(C1),
+            ],
+        );
+        assert_eq!(orch.state(), State::AwaitingReady);
+    }
 }

@@ -15,15 +15,16 @@ stateDiagram-v2
     VerifyingPlatform --> VerifyingPlatform : VerificationPassed [more, Passive]\n/ ReleaseReset · ReadFirmware · VerifyFirmware
     VerifyingPlatform --> AwaitingReady     : VerificationPassed [more, Active]\n/ ReleaseReset · ReadFirmware · VerifyFirmware
     VerifyingPlatform --> Ready             : VerificationPassed [chain done]\n/ ReleaseReset
-    VerifyingPlatform --> VerifyingPlatform : VerificationFailed [optional]\n(skip — held in reset)
-    VerifyingPlatform --> Recovering        : VerificationFailed [required]\n/ RestoreGoldenImage
+    VerifyingPlatform --> VerifyingPlatform : VerificationFailed [Isolable or Cascading]\n(skip — held in reset)
+    VerifyingPlatform --> Recovering        : VerificationFailed [Required]\n/ RestoreGoldenImage
 
     AwaitingReady --> AwaitingReady : VerificationPassed [more]\n/ ReleaseReset · ReadFirmware · VerifyFirmware
     AwaitingReady --> Ready         : ComponentReady [chain done or cursor past end]
     AwaitingReady --> AwaitingReady : ComponentReady [more]
-    AwaitingReady --> AwaitingReady : VerificationFailed [optional, iRoT pending]
-    AwaitingReady --> Ready         : VerificationFailed [optional, no iRoT pending, chain done]
-    AwaitingReady --> Recovering    : VerificationFailed [required]\n/ RestoreGoldenImage
+    AwaitingReady --> AwaitingReady : VerificationFailed [Isolable or Cascading, iRoT pending]
+    AwaitingReady --> Ready         : VerificationFailed [Isolable or Cascading, no iRoT pending, chain done]
+    AwaitingReady --> Recovering    : VerificationFailed [Required]\n/ RestoreGoldenImage
+    AwaitingReady --> Recovering    : Timeout(id) [id == awaiting]\n/ RestoreGoldenImage
 
     state Operational {
         [*]           --> Ready
@@ -52,8 +53,9 @@ mutable state lives here.
 | Field | Type | Purpose |
 |---|---|---|
 | `chain` | `Vec<(ComponentId, ComponentAttrs), N>` | Ordered trust chain, supplied by the shell at construction time. Never mutated after build. |
-| `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `VerifyingPlatform` entry. Advances on each `VerificationPassed` (and on optional `VerificationFailed`) via `Outcome::Handled`. |
-| `failed` | `Option<ComponentId>` | The component that triggered the current recovery episode; `None` while healthy. Set on required `VerificationFailed` or `CorruptionDetected`. |
+| `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `VerifyingPlatform` entry. Advances on each `VerificationPassed` (and on `Isolable`/`Cascading` `VerificationFailed`, or cascade-skip) via `Outcome::Handled`. |
+| `held` | `Vec<ComponentId, N>` | Set of component IDs held in reset due to `Cascading` failure or cascade-skip (`Isolable` failures do not populate this set). Checked before emitting `ReadFirmware` for each new component to evaluate `depends_on`. Cleared on `VerifyingPlatform` entry alongside `cursor`. |
+| `failed` | `Option<ComponentId>` | The component that triggered the current recovery episode; `None` while healthy. Set on `Required` `VerificationFailed`, `Timeout`, or `CorruptionDetected`. |
 | `retry_count` | `u8` | Number of consecutive failed restore attempts. Cleared to 0 in `Ready`'s entry action — consecutive only (INV7). |
 | `max_retry` | `u8` | Shell-chosen ceiling for `retry_count`. When `retry_count >= max_retry` the machine self-emits `RecoveryFailed` instead of re-walking the chain. |
 | `awaiting` | `Option<ComponentId>` | The `Active` component whose iRoT readiness is currently outstanding. `Some` only while in `AwaitingReady`; `None` everywhere else (INV9). |
@@ -105,8 +107,9 @@ and reset the cursor.
 | `VerificationPassed(id)` | more, current `Passive` | `ReleaseReset` · `ReadFirmware(next)` · `VerifyFirmware(next)` | `Handled` (cursor ++) |
 | `VerificationPassed(id)` | more, current `Active` | `ReleaseReset` · `ReadFirmware(next)` · `VerifyFirmware(next)` | `AwaitingReady` (awaiting = Some(id)) |
 | `VerificationPassed(id)` | chain done | `ReleaseReset(id)` | `Ready` |
-| `VerificationFailed(id)` | `attrs.required` | — | `Recovering` (failed = Some(id)) |
-| `VerificationFailed(id)` | `!attrs.required` | — | `Handled` (skip; cursor ++; if chain done → `Ready`) |
+| `VerificationFailed(id)` | `attrs.failure_policy == Required` | — | `Recovering` (failed = Some(id)) |
+| `VerificationFailed(id)` | `Isolable` | — | `Handled` (skip; cursor ++; if chain done → `Ready`) |
+| `VerificationFailed(id)` | `Cascading` | — | `Handled` (add to `held`; cascade-skip dependents; cursor ++; if chain done → `Ready`) |
 | anything else | — | — | `Outcome::Super` → `Operational` |
 
 ---
@@ -128,9 +131,13 @@ transition.
 | `ComponentReady(id)` | `id == awaiting`, cursor past end | — | `Ready` |
 | `VerificationPassed(id)` | more | `ReleaseReset` · `ReadFirmware(next)` · `VerifyFirmware(next)` | `Handled` (cursor ++) |
 | `VerificationPassed(id)` | chain done | `ReleaseReset(id)` | `Ready` |
-| `VerificationFailed(id)` | `attrs.required` | — | `Recovering` (failed = Some(id), awaiting = None) |
-| `VerificationFailed(id)` | `!attrs.required`, iRoT pending | — | `Handled` (skip; cursor ++) |
-| `VerificationFailed(id)` | `!attrs.required`, no iRoT pending, chain done | — | `Ready` |
+| `Timeout(id)` | `id == awaiting` | — | `Recovering` (failed = Some(id), awaiting = None) |
+| `Timeout(id)` | `id != awaiting` | — | `Handled` (stale — ignore) |
+| `VerificationFailed(id)` | `attrs.failure_policy == Required` | — | `Recovering` (failed = Some(id), awaiting = None) |
+| `VerificationFailed(id)` | `Isolable`, iRoT pending | — | `Handled` (skip; cursor ++) |
+| `VerificationFailed(id)` | `Isolable`, no iRoT pending, chain done | — | `Ready` |
+| `VerificationFailed(id)` | `Cascading`, iRoT pending | — | `Handled` (add to `held`; cascade-skip dependents; cursor ++) |
+| `VerificationFailed(id)` | `Cascading`, no iRoT pending, chain done | — | `Ready` |
 | anything else | — | — | `Outcome::Super` → `Operational` |
 
 `ComponentReady` and `VerificationPassed` are independent and may arrive in
@@ -174,8 +181,11 @@ An update is in progress.
 
 The machine is attempting to restore a corrupted or rejected component.
 
-**Entry action**: emit `RestoreGoldenImage(rot.failed)` — exactly the named
-component, not the whole chain (INV5).
+**Entry action**: emit `RestoreGoldenImage(rot.failed)` — targets the failed
+component's *recovery region*: all components sharing the same `RegionId` are
+restored together. The core supplies the failed component ID; the shell resolves
+region membership from the chain at startup. Only the named component triggers
+the restore, but the entire region is affected (not the whole chain — INV5).
 
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
@@ -196,8 +206,8 @@ CSA architecture's core principle — "no component executes unverified firmware
 (NIST SP 800-193) — requires that trust be re-established end-to-end before the
 platform is considered healthy again. The CSA document does not prescribe the
 exact recovery sequencing, but the re-walk implements the spirit of that
-principle. Optional components that fail during the re-walk are skipped (held in
-reset) as during initial boot; they are re-released only if they pass
+principle. `Isolable` and `Cascading` components that fail during the re-walk are skipped
+(held in reset) as during initial boot; they are re-released only if they pass
 `VerificationPassed` in the new walk.
 
 ---
