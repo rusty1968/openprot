@@ -15,15 +15,12 @@ stateDiagram-v2
     VerifyingPlatform --> VerifyingPlatform : VerificationPassed [more, Passive]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
     VerifyingPlatform --> AwaitingReady     : VerificationPassed [more, Active]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
     VerifyingPlatform --> Ready             : VerificationPassed [chain done]<br/>/ ReleaseReset
-    VerifyingPlatform --> VerifyingPlatform : VerificationFailed [Isolable or Cascading]<br/>(skip — held in reset)
-    VerifyingPlatform --> Recovering        : VerificationFailed [Required]<br/>/ RestoreGoldenImage
+    VerifyingPlatform --> Recovering        : VerificationFailed (any policy)<br/>/ RestoreGoldenImage
 
     AwaitingReady --> AwaitingReady : VerificationPassed [more]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
     AwaitingReady --> Ready         : ComponentReady [chain done or cursor past end]
     AwaitingReady --> AwaitingReady : ComponentReady [more]
-    AwaitingReady --> AwaitingReady : VerificationFailed [Isolable or Cascading, iRoT pending]
-    AwaitingReady --> Ready         : VerificationFailed [Isolable or Cascading, no iRoT pending, chain done]
-    AwaitingReady --> Recovering    : VerificationFailed [Required]<br/>/ RestoreGoldenImage
+    AwaitingReady --> Recovering    : VerificationFailed (any policy)<br/>/ RestoreGoldenImage
     AwaitingReady --> Recovering    : Timeout(id) [id == awaiting]<br/>/ RestoreGoldenImage
 
     state Operational {
@@ -36,8 +33,9 @@ stateDiagram-v2
         AwaitingReady --> Recovering    : CorruptionDetected<br/>/ RestoreGoldenImage
     }
 
-    Recovering --> VerifyingPlatform : Restored [retry < max_retry]
-    Recovering --> Locked    : Restored [retry ≥ max_retry]<br/>(self-emits RecoveryFailed)<br/>/ LatchLockdown
+    Recovering --> VerifyingPlatform : Restored [retry < max_retry]<br/>(re-verify)
+    Recovering --> VerifyingPlatform : Restored [retry ≥ max_retry, Isolable/Cascading]<br/>/ AssertReset (skip — held)
+    Recovering --> Locked    : Restored [retry ≥ max_retry, PlatformHalt]<br/>(self-emits RecoveryFailed) / LatchLockdown
     Locked     --> Locked    : (terminal — all events ignored)
 ```
 
@@ -53,11 +51,11 @@ mutable state lives here.
 | Field | Type | Purpose |
 |---|---|---|
 | `chain` | `Vec<(ComponentId, ComponentAttrs), N>` | Ordered trust chain, supplied by the shell at construction time. Never mutated after build. |
-| `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `VerifyingPlatform` entry. Advances on each `VerificationPassed` (and on `Isolable`/`Cascading` `VerificationFailed`, or cascade-skip) via `Outcome::Handled`. |
-| `held` | `Vec<ComponentId, N>` | Set of component IDs held in reset due to `Cascading` failure or cascade-skip (`Isolable` failures do not populate this set). Checked before emitting `ReadFirmware` for each new component to evaluate `depends_on`. Cleared on `VerifyingPlatform` entry alongside `cursor`. |
-| `failed` | `Option<ComponentId>` | The component that triggered the current recovery episode; `None` while healthy. Set on `Required` `VerificationFailed`, `Timeout`, or `CorruptionDetected`. |
-| `retry_count` | `u8` | Number of consecutive failed restore attempts. Cleared to 0 in `Ready`'s entry action — consecutive only (INV7). |
-| `max_retry` | `u8` | Shell-chosen ceiling for `retry_count`. When `retry_count >= max_retry` the machine self-emits `RecoveryFailed` instead of re-walking the chain. |
+| `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `VerifyingPlatform` entry. Advances on each `VerificationPassed`, and past any component in `held` (skipped without verification), via `Outcome::Handled`. |
+| `held` | `Vec<ComponentId, N>` | Components skipped because their recovery was **exhausted**: an `Isolable` component, or a `Cascading` component plus its `depends_on` dependents. Not verified during the walk — held in reset, cursor advances past them. Populated in `Recovering` when `retry_count` reaches `max_retry`; persists across re-walks; cleared on `Ready` entry. |
+| `failed` | `Option<ComponentId>` | The component whose recovery episode is in progress; `None` while healthy. Set on any `VerificationFailed`, `Timeout`, or `CorruptionDetected` of a managed component. |
+| `retry_count` | `u8` | Number of consecutive failed restore attempts in the current recovery episode. Cleared to 0 in `Ready`'s entry action — consecutive only (INV7). |
+| `max_retry` | `u8` | Shell-chosen ceiling for `retry_count`. When `retry_count >= max_retry` recovery is **exhausted** and the failed component's recovery-failure policy (`Isolable`/`Cascading`/`PlatformHalt`) is applied. |
 | `awaiting` | `Option<ComponentId>` | The `Active` component whose iRoT readiness is currently outstanding. `Some` only while in `AwaitingReady`; `None` everywhere else (INV9). |
 
 The effect buffer is deliberately **absent** from `Rot`. Effects flow through the
@@ -99,18 +97,24 @@ Walks the trust chain component-by-component. The cursor advances on each
 rather than a self-transition — a self-transition would re-run the entry action
 and reset the cursor.
 
-**Entry action**: reset `cursor` to 0, `awaiting` to `None`, emit
-`ReadFirmware(chain[0])` + `VerifyFirmware(chain[0])`.
+**Entry action**: reset `cursor` to 0, set `awaiting` to `None`, emit
+`ReadFirmware` + `VerifyFirmware` for the first component **not** in `held`
+(`held` components stay in reset and are skipped). `held` is *not* cleared here —
+it persists across re-walks so exhausted components are not re-verified.
 
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
 | `VerificationPassed(id)` | more, current `Passive` | `ReleaseReset` · `ReadFirmware(next)` · `VerifyFirmware(next)` | `Handled` (cursor ++) |
 | `VerificationPassed(id)` | more, current `Active` | `ReleaseReset` · `ReadFirmware(next)` · `VerifyFirmware(next)` | `AwaitingReady` (awaiting = Some(id)) |
 | `VerificationPassed(id)` | chain done | `ReleaseReset(id)` | `Ready` |
-| `VerificationFailed(id)` | `attrs.failure_policy == Required` | — | `Recovering` (failed = Some(id)) |
-| `VerificationFailed(id)` | `Isolable` | — | `Handled` (skip; cursor ++; if chain done → `Ready`) |
-| `VerificationFailed(id)` | `Cascading` | — | `Handled` (add to `held`; cascade-skip dependents; cursor ++; if chain done → `Ready`) |
-| anything else | — | — | `Outcome::Super` → `Operational` |
+| `VerificationFailed(id)` | — | — | `Recovering` (failed = Some(id)) — recovery is attempted first, regardless of the component's recovery-failure policy |
+| anything else | — | — | `Outcome::Super` (top level — discarded) |
+
+When advancing the cursor, any component in `held` is skipped without
+verification — it stays in reset and no `ReadFirmware`/`VerifyFirmware` is emitted
+for it. The recovery-failure policy (`Isolable`/`Cascading`/`PlatformHalt`) is
+**not** consulted here; it is applied later, in `Recovering`, only if the restore
+attempts are exhausted.
 
 ---
 
@@ -133,11 +137,7 @@ transition.
 | `VerificationPassed(id)` | chain done | `ReleaseReset(id)` | `Ready` |
 | `Timeout(id)` | `id == awaiting` | — | `Recovering` (failed = Some(id), awaiting = None) |
 | `Timeout(id)` | `id != awaiting` | — | `Handled` (stale — ignore) |
-| `VerificationFailed(id)` | `attrs.failure_policy == Required` | — | `Recovering` (failed = Some(id), awaiting = None) |
-| `VerificationFailed(id)` | `Isolable`, iRoT pending | — | `Handled` (skip; cursor ++) |
-| `VerificationFailed(id)` | `Isolable`, no iRoT pending, chain done | — | `Ready` |
-| `VerificationFailed(id)` | `Cascading`, iRoT pending | — | `Handled` (add to `held`; cascade-skip dependents; cursor ++) |
-| `VerificationFailed(id)` | `Cascading`, no iRoT pending, chain done | — | `Ready` |
+| `VerificationFailed(id)` | — | — | `Recovering` (failed = Some(id), awaiting = None) — recovery attempted first |
 | anything else | — | — | `Outcome::Super` → `Operational` |
 
 `ComponentReady` and `VerificationPassed` are independent and may arrive in
@@ -154,7 +154,8 @@ components are released, and the machine handles attestation, update requests,
 and corruption events.
 
 **Entry action**: reset `retry_count` to 0 (makes the cap count *consecutive*
-failures — INV7).
+failures — INV7), and clear `held` and `failed` (a clean boot ends any recovery
+episode and the skip set).
 
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
@@ -189,18 +190,42 @@ the restore, but the entire region is affected (not the whole chain — INV5).
 
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
-| `Restored(_)` | `retry_count + 1 < max_retry` | — | `VerifyingPlatform` (re-walk from top) |
-| `Restored(_)` | `retry_count + 1 >= max_retry` | `Effect::Emit(RecoveryFailed)` | `Handled` (orchestrator queues `RecoveryFailed` next — INV7) |
+| `Restored(_)` | `retry_count + 1 < max_retry` | — | `VerifyingPlatform` (re-verify — the restored image may pass) |
+| `Restored(_)` | cap reached, `failed` `Isolable` | `AssertReset(failed)` | `VerifyingPlatform` (recovery exhausted: add `failed` to `held`, clear `failed`; the re-walk skips it) |
+| `Restored(_)` | cap reached, `failed` `Cascading` | `AssertReset(failed)` · `AssertReset(dependent…)` | `VerifyingPlatform` (recovery exhausted: add `failed` + `depends_on` dependents to `held`, clear `failed`) |
+| `Restored(_)` | cap reached, `failed` `PlatformHalt` | `Effect::Emit(RecoveryFailed)` | `Handled` (orchestrator queues `RecoveryFailed` next — INV7) |
 | `RecoveryFailed` | — | — | `Locked` |
 | anything else | — | — | `Outcome::Super` → `Operational` |
 
+("cap reached" = `retry_count + 1 >= max_retry`.)
+
+**Two-stage recovery (CSA-aligned).** A verification failure never skips a
+component outright. Every failure — during initial boot or a re-walk — first
+brings the machine here, to `Recovering`, which restores the failed component's
+recovery region and re-verifies. Only when the restore attempts are *exhausted*
+(`retry_count` reaches `max_retry` and the restored image still fails) does the
+component's **recovery-failure policy** decide what happens next:
+
+- `Isolable` — skip just this component; hold it in reset (`held`) and continue
+  booting the rest of the platform.
+- `Cascading` — skip this component *and* its `depends_on` dependents; continue
+  booting the remainder.
+- `PlatformHalt` — stop entirely: self-emit `RecoveryFailed`, which drives the
+  machine to `Locked`.
+
+This mirrors the CSA Boot Sequence **Recovery Policy**: recovery (region restore)
+is attempted for *every* failed device first, and the `Isolable`/`Cascading`/
+`Platform-halt` classification applies only *after* a recovery attempt itself
+fails.
+
 `Effect::Emit(RecoveryFailed)` is the *feedback-as-data* mechanism. It is easiest
 to understand by asking why the machine doesn't just jump straight to `Locked`
-when the retry cap is hit.
+when a `PlatformHalt` component's retry cap is hit.
 
-When the last restore attempt fails, the machine has a decision to make: give up
-and lock down. It could act on that decision silently, transitioning directly
-from `Recovering` to `Locked` inside the handler. Instead it does something that
+When a `PlatformHalt` component's last restore attempt fails, the machine has a
+decision to make: give up and lock down. It could act on that decision silently,
+transitioning directly from `Recovering` to `Locked` inside the handler. Instead
+it does something that
 looks indirect at first: it emits `RecoveryFailed` as an *effect* — a piece of
 data saying "a follow-up event named `RecoveryFailed` should happen next" — and
 returns. The orchestrator sees that effect, puts `RecoveryFailed` at the front of
@@ -223,9 +248,10 @@ CSA architecture's core principle — "no component executes unverified firmware
 (NIST SP 800-193) — requires that trust be re-established end-to-end before the
 platform is considered healthy again. The CSA document does not prescribe the
 exact recovery sequencing, but the re-walk implements the spirit of that
-principle. `Isolable` and `Cascading` components that fail during the re-walk are skipped
-(held in reset) as during initial boot; they are re-released only if they pass
-`VerificationPassed` in the new walk.
+principle. Components already in `held` — those whose recovery was exhausted
+under an `Isolable` or `Cascading` policy — are skipped during the re-walk: they
+stay in reset and are not re-verified. Every other component is re-verified from
+scratch, and a fresh failure restarts the two-stage recovery for that component.
 
 ---
 
@@ -243,9 +269,9 @@ components in reset permanently.
 `Ready`, `Updating`, `Recovering`, and `AwaitingReady` share this superstate.
 When a leaf state returns `Outcome::Super`, `statig` calls the superstate handler.
 
-| Event | Effects | Next state |
-|---|---|---|
-| `AttestationChallenge` | `SignAttestation` | `Handled` (no transition — INV6) |
+| Event | Guard | Effects | Next state |
+|---|---|---|---|
+| `AttestationChallenge` | — | `SignAttestation` | `Handled` (no transition — INV6) |
 | `CorruptionDetected(id)` | `attrs.required == true` | — | `Recovering` (failed = Some(id) — INV5) |
 | `CorruptionDetected(id)` | `attrs.required == false` | `AssertReset(id)` | `Handled` (component gated; machine stays in current state) |
 | anything else | — | — | `Outcome::Super` (discarded) |
