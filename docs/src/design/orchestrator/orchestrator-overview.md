@@ -10,6 +10,43 @@ hardware directly. Every action is described as an [`Effect`] value that the
 surrounding shell carries out; every piece of outside information arrives as an
 [`Event`]. This keeps the core testable without hardware and free of I/O.
 
+## State Topology
+
+The diagram below shows the reachable states and the events (with guards) that
+drive transitions between them. Effects are omitted here to keep the topology
+readable — see [State Machine](./orchestrator-machine.md) for the full diagram
+with entry actions and effects.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PowerOnReset
+
+    PowerOnReset --> VerifyingPlatform : PowerGood [Provisioned]
+    PowerOnReset --> Locked            : PowerGood [Unprovisioned]
+    PowerOnReset --> Locked            : PowerGood [SelfVerificationFailed]
+
+    VerifyingPlatform --> VerifyingPlatform : VerificationPassed [more, Passive]
+    VerifyingPlatform --> Operational       : VerificationPassed [more, Active]
+    VerifyingPlatform --> Operational       : VerificationPassed [chain done]
+    VerifyingPlatform --> Recovering        : VerificationFailed
+
+    Operational --> Recovering  : VerificationFailed [Required]
+    Operational --> Recovering  : Timeout [id == awaiting]
+    Operational --> Recovering  : CorruptionDetected [required]
+    Operational --> Operational : ComponentReady
+    Operational --> Operational : CorruptionDetected [optional]
+    Operational --> Operational : AttestationChallenge
+    Operational --> Operational : UpdateRequest
+    Operational --> Operational : UpdateVerified
+    Operational --> Operational : UpdateRejected
+
+    Recovering --> VerifyingPlatform : Restored [retry < max_retry]
+    Recovering --> VerifyingPlatform : Restored [retry >= max_retry, Isolable or Cascading]
+    Recovering --> Locked            : Restored [retry >= max_retry, PlatformHalt]
+
+    Locked --> [*]
+```
+
 ## Documents
 
 - [**Verification Model**](./orchestrator-model.md): The two-tier firmware
