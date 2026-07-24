@@ -35,3 +35,5 @@
   * [Orchestrator](./design/orchestrator/orchestrator-overview.md)
     * [Verification Model](./design/orchestrator/orchestrator-model.md)
     * [State Machine](./design/orchestrator/orchestrator-machine.md)
+    * [State Machine Walkthrough](./design/orchestrator/orchestrator-sm-walkthru.md)
+    * [State Machine Transitions](./design/orchestrator/orchestrator-sm-transitions.md)
