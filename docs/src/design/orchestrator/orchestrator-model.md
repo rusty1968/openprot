@@ -149,7 +149,7 @@ them out; the core never touches hardware.
 ```
 chain: [(C0, {Active, Required}), (C1, {Passive, Required})]
 
-VerifyingPlatform (entry):
+PreSupervision (entry):
   emit ReadFirmware(C0)
   emit VerifyFirmware(C0)
 
@@ -196,7 +196,7 @@ This matches the CSA single-node boot sequence.
 ```
 chain: [(BMC, {Active, Required}), (HOST, {Active, Required}), (NIC, {Passive, Isolable})]
 
-VerifyingPlatform (entry):
+PreSupervision (entry):
   emit ReadFirmware(BMC)
   emit VerifyFirmware(BMC)          ← eRoT reads and checks BMC firmware from SPI flash
 
@@ -291,7 +291,7 @@ It only emits descriptions. The complete split:
   (eRoT ROM + measuring bootloader) before this machine runs. The result is
   delivered as `PowerOnResult` in `Event::PowerGood`.
 - **Attestation** (`AttestationChallenge` / `SignAttestation`): handled in the
-  `Operational` superstate, not part of the boot-time verification chain.
+  `SupervisingPlatform` superstate, not part of the boot-time verification chain.
 - **Firmware update verification** (`AuthenticateUpdate`): handled in the
   `Updating` state, distinct from boot-time chain verification.
 - **Multiple intermediate boot-progress checkpoints per component**: the CSA

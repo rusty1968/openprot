@@ -69,47 +69,128 @@ pub enum ComponentKind {
     Passive,
 }
 
+/// Recovery-failure classification: what the machine does once a required
+/// component's restore attempts are **exhausted** (`retry_count` reaches
+/// `max_retry`). Every verification or corruption failure enters
+/// [`State::Recovering`] and is retried first, regardless of this
+/// classification — CSA's "recover first" principle. This value is consulted
+/// only after retries are exhausted.
+///
+/// (The narrative design docs sometimes call the `Required` outcome "platform
+/// halt" — same behavior, this is the type-level name.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FailurePolicy {
+    /// Stop the boot sequence entirely: self-emits [`Event::RecoveryFailed`],
+    /// which drives the machine to [`State::Locked`].
+    Required,
+    /// Hold this component in reset (added to `Rot.held`) and continue
+    /// booting the rest of the platform.
+    Isolable,
+    /// Hold this component **and** any component whose `depends_on` names it
+    /// (transitively), then continue booting the rest of the platform.
+    Cascading,
+}
+
+/// Opaque recovery-region key supplied by the board at chain-build time.
+/// Components sharing a `RegionId` are restored together: when any region
+/// member enters [`State::Recovering`], the shell resolves and restores the
+/// whole region. The core treats this as an equality key only and never
+/// inspects membership itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RegionId(u8);
+
+impl RegionId {
+    pub const fn new(id: u8) -> Self {
+        Self(id)
+    }
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 /// Per-component attributes supplied by the board at chain-build time.
 ///
-/// Two orthogonal axes:
+/// Three orthogonal axes:
 /// - [`kind`](ComponentAttrs::kind): controls the iRoT gate (Active vs Passive).
-/// - [`required`](ComponentAttrs::required): controls failure policy.
-///   * `true` — verification failure triggers recovery and halts the chain walk.
-///   * `false` — verification failure holds the component in reset and skips it;
-///     the chain walk continues to the next component without recovery.
+/// - [`failure_policy`](ComponentAttrs::failure_policy): controls what happens
+///   once this component's recovery is exhausted.
+/// - [`recovery_region`](ComponentAttrs::recovery_region) /
+///   [`depends_on`](ComponentAttrs::depends_on): control restore grouping and
+///   cascade-skip on exhaustion.
 ///
-/// A `required: false` component is never released from reset on failure — running
-/// untrusted firmware would break the trust invariant regardless of policy.
+/// A component that fails verification is never released from reset —
+/// running untrusted firmware would break the trust invariant regardless of
+/// `failure_policy`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ComponentAttrs {
     pub kind: ComponentKind,
-    pub required: bool,
+    pub failure_policy: FailurePolicy,
+    pub recovery_region: RegionId,
+    pub depends_on: Option<ComponentId>,
 }
 
 impl ComponentAttrs {
     pub const fn active_required() -> Self {
         Self {
             kind: ComponentKind::Active,
-            required: true,
+            failure_policy: FailurePolicy::Required,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
         }
     }
     pub const fn passive_required() -> Self {
         Self {
             kind: ComponentKind::Passive,
-            required: true,
+            failure_policy: FailurePolicy::Required,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
         }
     }
-    pub const fn active_optional() -> Self {
+    pub const fn active_isolable() -> Self {
         Self {
             kind: ComponentKind::Active,
-            required: false,
+            failure_policy: FailurePolicy::Isolable,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
         }
     }
-    pub const fn passive_optional() -> Self {
+    pub const fn passive_isolable() -> Self {
         Self {
             kind: ComponentKind::Passive,
-            required: false,
+            failure_policy: FailurePolicy::Isolable,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
         }
+    }
+    pub const fn active_cascading() -> Self {
+        Self {
+            kind: ComponentKind::Active,
+            failure_policy: FailurePolicy::Cascading,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+    pub const fn passive_cascading() -> Self {
+        Self {
+            kind: ComponentKind::Passive,
+            failure_policy: FailurePolicy::Cascading,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+
+    /// Builder: assign a non-default recovery region (default is region `0`).
+    pub const fn with_region(mut self, region: RegionId) -> Self {
+        self.recovery_region = region;
+        self
+    }
+
+    /// Builder: mark this component as cascade-held whenever `dependency` is
+    /// held. Only meaningful in combination with `FailurePolicy::Cascading`
+    /// on the *dependency*, not on this component.
+    pub const fn with_depends_on(mut self, dependency: ComponentId) -> Self {
+        self.depends_on = Some(dependency);
+        self
     }
 }
 
@@ -154,8 +235,9 @@ pub enum Effect {
     VerifyFirmware(ComponentId),
     ReleaseReset(ComponentId),
     /// Assert reset on a component that is already running — the inverse of
-    /// [`ReleaseReset`]. Emitted when an optional component is found corrupt at
-    /// runtime: the component is gated without triggering a recovery cycle.
+    /// [`ReleaseReset`]. Emitted when an `Isolable`/`Cascading` component is
+    /// found corrupt at runtime, or is held after recovery is exhausted: the
+    /// component is gated without triggering (or continuing) a recovery cycle.
     AssertReset(ComponentId),
     SignAttestation,
     AuthenticateUpdate,
@@ -174,7 +256,7 @@ pub enum Effect {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     PowerOnReset,
-    VerifyingPlatform,
+    PreSupervision,
     /// eRoT has released an `Active` component; waiting for its iRoT to finish
     /// local verification and signal [`Event::ComponentReady`].
     AwaitingReady,
@@ -184,10 +266,16 @@ pub enum State {
     Locked,
 }
 
-/// Group state shared by the operational states.
+/// Superstate entered on the eRoT's first component release and held until
+/// [`State::Locked`]. Provides two platform-wide guarantees that must hold
+/// across all four sub-states ([`State::AwaitingReady`], [`State::Ready`],
+/// [`State::Updating`], [`State::Recovering`]):
+///
+/// - Attestation challenges are always answered.
+/// - Corruption of a required component always triggers recovery.
 #[derive(Debug)]
 pub enum Superstate<'sub> {
-    Operational(PhantomData<&'sub ()>),
+    SupervisingPlatform(PhantomData<&'sub ()>),
 }
 
 /// The effect buffer handed to every handler (statig's `Context`).
@@ -221,6 +309,10 @@ impl Sink {
 pub struct Rot<const N: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
     cursor: u8,
+    /// Components skipped because their recovery was exhausted under
+    /// `FailurePolicy::Isolable` or `Cascading`. Held in reset; not
+    /// re-verified on subsequent re-walks. Cleared on `Ready` entry.
+    held: heapless::Vec<ComponentId, N>,
     failed: Option<ComponentId>,
     retry_count: u8,
     max_retry: u8,
@@ -234,10 +326,67 @@ impl<const N: usize> Rot<N> {
         Self {
             chain,
             cursor: 0,
+            held: heapless::Vec::new(),
             failed: None,
             retry_count: 0,
             max_retry,
             awaiting: None,
+        }
+    }
+
+    /// Look up a component's attributes by id. `None` if the id is not in the
+    /// chain (should never happen for ids the core itself produced).
+    fn attrs_of(&self, id: ComponentId) -> Option<ComponentAttrs> {
+        self.chain.iter().find(|(cid, _)| *cid == id).map(|(_, a)| *a)
+    }
+
+    fn is_held(&self, id: ComponentId) -> bool {
+        self.held.iter().any(|h| *h == id)
+    }
+
+    /// Advance `cursor` from `start_idx` to the first component not in
+    /// `held`, emitting its `ReadFirmware`/`VerifyFirmware`. Returns `true` if
+    /// found. If the rest of the chain is exhausted or entirely held, sets
+    /// `cursor` to a past-the-end sentinel (`chain.len()`) and returns
+    /// `false` — the caller should treat that as "chain done".
+    fn advance_to_next_unheld(&mut self, ctx: &mut Sink, start_idx: usize) -> bool {
+        let mut idx = start_idx;
+        while let Some(&(id, _)) = self.chain.get(idx) {
+            if !self.is_held(id) {
+                // `idx < chain.len() <= N`; chain capacity is board-chosen and
+                // assumed to fit `u8`, matching the existing `cursor: u8` contract.
+                self.cursor = idx as u8;
+                ctx.emit(Effect::ReadFirmware(id));
+                ctx.emit(Effect::VerifyFirmware(id));
+                return true;
+            }
+            idx += 1;
+        }
+        self.cursor = self.chain.len() as u8;
+        false
+    }
+
+    /// Hold `root` and cascade-hold every component whose `depends_on`
+    /// (transitively) names it. Emits `AssertReset` for each newly held
+    /// component, including `root` itself.
+    fn cascade_hold(&mut self, ctx: &mut Sink, root: ComponentId) {
+        if !self.is_held(root) {
+            ctx.emit(Effect::AssertReset(root));
+            let _ = self.held.push(root);
+        }
+        let mut i = 0;
+        while let Some(&holder) = self.held.get(i) {
+            i += 1;
+            let mut newly_held: heapless::Vec<ComponentId, N> = heapless::Vec::new();
+            for &(id, attrs) in self.chain.iter() {
+                if attrs.depends_on == Some(holder) && !self.is_held(id) {
+                    let _ = newly_held.push(id);
+                }
+            }
+            for id in newly_held {
+                ctx.emit(Effect::AssertReset(id));
+                let _ = self.held.push(id);
+            }
         }
     }
 }
@@ -258,7 +407,7 @@ impl<const N: usize> StatigState<Rot<N>> for State {
         match self {
             State::PowerOnReset => match event {
                 Event::PowerGood(PowerOnResult::Provisioned) => {
-                    Outcome::Transition(State::VerifyingPlatform)
+                    Outcome::Transition(State::PreSupervision)
                 }
                 Event::PowerGood(PowerOnResult::Unprovisioned) => {
                     Outcome::Transition(State::Locked)
@@ -270,46 +419,29 @@ impl<const N: usize> StatigState<Rot<N>> for State {
             },
 
             // Cursor walk via Outcome::Handled — a self-transition would reset cursor.
-            State::VerifyingPlatform => match event {
+            State::PreSupervision => match event {
                 Event::VerificationPassed(id) => {
                     ctx.emit(Effect::ReleaseReset(*id));
-                    let current_attrs = rot.chain[rot.cursor as usize].1;
-                    let next_idx = (rot.cursor as usize) + 1;
-                    if next_idx < rot.chain.len() {
-                        let (next_id, _) = rot.chain[next_idx];
-                        rot.cursor += 1;
-                        // Speculative: start next eRoT check while current Active iRoT boots.
-                        ctx.emit(Effect::ReadFirmware(next_id));
-                        ctx.emit(Effect::VerifyFirmware(next_id));
-                        match current_attrs.kind {
-                            ComponentKind::Active => {
+                    let current_kind = rot.chain.get(rot.cursor as usize).map(|(_, a)| a.kind);
+                    let next_idx = (rot.cursor as usize).saturating_add(1);
+                    if rot.advance_to_next_unheld(ctx, next_idx) {
+                        match current_kind {
+                            Some(ComponentKind::Active) => {
                                 rot.awaiting = Some(*id);
                                 Outcome::Transition(State::AwaitingReady)
                             }
-                            ComponentKind::Passive => Outcome::Handled,
+                            _ => Outcome::Handled,
                         }
                     } else {
                         Outcome::Transition(State::Ready)
                     }
                 }
                 Event::VerificationFailed(id) => {
-                    let attrs = rot.chain[rot.cursor as usize].1;
-                    if attrs.required {
-                        rot.failed = Some(*id);
-                        Outcome::Transition(State::Recovering)
-                    } else {
-                        // Optional: hold in reset, skip, advance walk.
-                        let next_idx = (rot.cursor as usize) + 1;
-                        rot.cursor += 1;
-                        if next_idx < rot.chain.len() {
-                            let (next_id, _) = rot.chain[next_idx];
-                            ctx.emit(Effect::ReadFirmware(next_id));
-                            ctx.emit(Effect::VerifyFirmware(next_id));
-                            Outcome::Handled
-                        } else {
-                            Outcome::Transition(State::Ready)
-                        }
-                    }
+                    // Recovery is attempted first for every failure, regardless
+                    // of the component's recovery-failure policy (CSA: recover
+                    // first, classify only once retries are exhausted).
+                    rot.failed = Some(*id);
+                    Outcome::Transition(State::Recovering)
                 }
                 _ => Outcome::Super,
             },
@@ -320,8 +452,9 @@ impl<const N: usize> StatigState<Rot<N>> for State {
                         return Outcome::Handled; // spurious / stale (INV9)
                     }
                     rot.awaiting = None;
-                    // If cursor is past the end, the last component was skipped
-                    // (optional failure) — nothing left to verify, we're done.
+                    // If cursor is past the end, the eRoT side of the walk has
+                    // already finished (chain done, or the remainder is held) —
+                    // nothing left to verify, we're done.
                     if (rot.cursor as usize) >= rot.chain.len() {
                         Outcome::Transition(State::Ready)
                     } else {
@@ -330,40 +463,19 @@ impl<const N: usize> StatigState<Rot<N>> for State {
                 }
                 Event::VerificationPassed(id) => {
                     ctx.emit(Effect::ReleaseReset(*id));
-                    let next_idx = (rot.cursor as usize) + 1;
-                    if next_idx < rot.chain.len() {
-                        let (next_id, _) = rot.chain[next_idx];
-                        rot.cursor += 1;
-                        ctx.emit(Effect::ReadFirmware(next_id));
-                        ctx.emit(Effect::VerifyFirmware(next_id));
+                    let next_idx = (rot.cursor as usize).saturating_add(1);
+                    if rot.advance_to_next_unheld(ctx, next_idx) {
                         Outcome::Handled
                     } else {
                         Outcome::Transition(State::Ready)
                     }
                 }
                 Event::VerificationFailed(id) => {
-                    let attrs = rot.chain[rot.cursor as usize].1;
-                    if attrs.required {
-                        rot.failed = Some(*id);
-                        rot.awaiting = None;
-                        Outcome::Transition(State::Recovering)
-                    } else {
-                        // Optional: hold in reset, skip, advance walk.
-                        let next_idx = (rot.cursor as usize) + 1;
-                        rot.cursor += 1;
-                        if next_idx < rot.chain.len() {
-                            let (next_id, _) = rot.chain[next_idx];
-                            ctx.emit(Effect::ReadFirmware(next_id));
-                            ctx.emit(Effect::VerifyFirmware(next_id));
-                            Outcome::Handled
-                        } else if rot.awaiting.is_none() {
-                            // No iRoT gate pending — done.
-                            Outcome::Transition(State::Ready)
-                        } else {
-                            // Still waiting for ComponentReady; it will fire Ready.
-                            Outcome::Handled
-                        }
-                    }
+                    // Recovery is attempted first for every failure, regardless
+                    // of the component's recovery-failure policy.
+                    rot.failed = Some(*id);
+                    rot.awaiting = None;
+                    Outcome::Transition(State::Recovering)
                 }
                 _ => Outcome::Super,
             },
@@ -388,11 +500,33 @@ impl<const N: usize> StatigState<Rot<N>> for State {
             State::Recovering => match event {
                 Event::Restored(_) => {
                     rot.retry_count = rot.retry_count.saturating_add(1);
-                    if rot.retry_count >= rot.max_retry {
-                        ctx.emit(Effect::Emit(Event::RecoveryFailed));
-                        Outcome::Handled
+                    if rot.retry_count < rot.max_retry {
+                        Outcome::Transition(State::PreSupervision)
                     } else {
-                        Outcome::Transition(State::VerifyingPlatform)
+                        // Retries exhausted: consult the recovery-failure policy.
+                        let classification = rot.failed.and_then(|id| {
+                            rot.attrs_of(id).map(|attrs| (id, attrs.failure_policy))
+                        });
+                        match classification {
+                            Some((id, FailurePolicy::Isolable)) => {
+                                ctx.emit(Effect::AssertReset(id));
+                                let _ = rot.held.push(id);
+                                rot.failed = None;
+                                rot.retry_count = 0;
+                                Outcome::Transition(State::PreSupervision)
+                            }
+                            Some((id, FailurePolicy::Cascading)) => {
+                                rot.cascade_hold(ctx, id);
+                                rot.failed = None;
+                                rot.retry_count = 0;
+                                Outcome::Transition(State::PreSupervision)
+                            }
+                            // `Required` (or an unknown/missing id — safe default): halt.
+                            _ => {
+                                ctx.emit(Effect::Emit(Event::RecoveryFailed));
+                                Outcome::Handled
+                            }
+                        }
                     }
                 }
                 Event::RecoveryFailed => Outcome::Transition(State::Locked),
@@ -405,13 +539,9 @@ impl<const N: usize> StatigState<Rot<N>> for State {
 
     fn call_entry_action(&mut self, rot: &mut Rot<N>, ctx: &mut Sink) {
         match self {
-            State::VerifyingPlatform => {
-                rot.cursor = 0;
+            State::PreSupervision => {
                 rot.awaiting = None;
-                if let Some(&(first_id, _)) = rot.chain.first() {
-                    ctx.emit(Effect::ReadFirmware(first_id));
-                    ctx.emit(Effect::VerifyFirmware(first_id));
-                }
+                let _ = rot.advance_to_next_unheld(ctx, 0);
             }
             State::Updating => {
                 ctx.emit(Effect::AuthenticateUpdate);
@@ -427,6 +557,8 @@ impl<const N: usize> StatigState<Rot<N>> for State {
             }
             State::Ready => {
                 rot.retry_count = 0;
+                rot.held.clear();
+                rot.failed = None;
             }
             _ => {}
         }
@@ -435,7 +567,7 @@ impl<const N: usize> StatigState<Rot<N>> for State {
     fn superstate(&mut self) -> Option<Superstate<'_>> {
         match self {
             State::Ready | State::Updating | State::Recovering | State::AwaitingReady => {
-                Some(Superstate::Operational(PhantomData))
+                Some(Superstate::SupervisingPlatform(PhantomData))
             }
             _ => None,
         }
@@ -445,28 +577,27 @@ impl<const N: usize> StatigState<Rot<N>> for State {
 impl<const N: usize> StatigSuperstate<Rot<N>> for Superstate<'_> {
     fn call_handler(&mut self, rot: &mut Rot<N>, event: &Event, ctx: &mut Sink) -> Outcome<State> {
         match self {
-            Superstate::Operational(_) => match event {
+            Superstate::SupervisingPlatform(_) => match event {
                 Event::AttestationChallenge => {
                     ctx.emit(Effect::SignAttestation);
                     Outcome::Handled
                 }
                 Event::CorruptionDetected(id) => {
                     // Respect the per-component policy encoded at chain-build time.
-                    // required: true  → recover (halt chain, restore, re-walk)
-                    // required: false → ignore corruption; component stays running
-                    //                   but is not considered trusted by the core.
+                    // `FailurePolicy::Required` → recover (halt chain, restore, re-walk)
+                    // `Isolable` / `Cascading` → gate the component; it stays running
+                    //   but is not considered trusted by the core, and no recovery
+                    //   episode is started (it is already known to be skippable).
                     let required = rot
-                        .chain
-                        .iter()
-                        .find(|(cid, _)| cid == id)
-                        .map(|(_, attrs)| attrs.required)
+                        .attrs_of(*id)
+                        .map(|attrs| matches!(attrs.failure_policy, FailurePolicy::Required))
                         .unwrap_or(true); // unknown id: treat as required (safe default)
                     if required {
                         rot.failed = Some(*id);
                         Outcome::Transition(State::Recovering)
                     } else {
-                        // Optional: gate the component (put it back in reset) but
-                        // do not halt the chain or trigger recovery.
+                        // Isolable/Cascading: gate the component (put it back in
+                        // reset) but do not halt the chain or trigger recovery.
                         ctx.emit(Effect::AssertReset(*id));
                         Outcome::Handled
                     }
@@ -635,7 +766,7 @@ mod tests {
     }
 
     /// INV11: SelfVerificationFailed latches immediately without entering
-    /// VerifyingPlatform.
+    /// PreSupervision.
     #[test]
     fn self_verification_failure_latches_immediately() {
         let (effects, state) = drive(
@@ -646,9 +777,9 @@ mod tests {
         assert_eq!(state, State::Locked);
     }
 
-    /// INV6: AttestationChallenge is answerable from every Operational state.
+    /// INV6: AttestationChallenge is answerable from every SupervisingPlatform state.
     #[test]
-    fn attestation_shared_across_operational_states() {
+    fn attestation_shared_across_supervising_platform_states() {
         let (effects, state) = drive(
             passive_required(&[C0]),
             &[
@@ -718,7 +849,7 @@ mod tests {
             tail,
             &[Effect::ReadFirmware(C0), Effect::VerifyFirmware(C0)]
         );
-        assert_eq!(state, State::VerifyingPlatform);
+        assert_eq!(state, State::PreSupervision);
     }
 
     /// INV7 (feedback-as-data): after MAX_RETRY restores the core self-emits
@@ -884,65 +1015,72 @@ mod tests {
         assert_eq!(effects.last(), Some(&Effect::SignAttestation));
     }
 
-    /// Optional component: VerificationFailed skips it (held in reset), chain
-    /// continues to Ready.
+    /// Isolable component: every `VerificationFailed` is retried through a full
+    /// recovery episode first; only once retries are exhausted does the
+    /// component get held in reset and the walk continue to `Ready`.
     #[test]
-    fn optional_component_failure_skips_and_continues() {
+    fn isolable_component_exhausts_recovery_then_skips() {
+        let mut script = std::vec![BOOT, Event::VerificationPassed(C0)];
+        for _ in 0..MAX_RETRY {
+            script.push(Event::VerificationFailed(C1));
+            script.push(Event::Restored(C1));
+            script.push(Event::VerificationPassed(C0));
+        }
         let (effects, state) = drive(
             chain(&[
                 (C0, ComponentAttrs::passive_required()),
-                (C1, ComponentAttrs::passive_optional()),
+                (C1, ComponentAttrs::passive_isolable()),
             ]),
-            &[
-                BOOT,
-                Event::VerificationPassed(C0),
-                Event::VerificationFailed(C1),
-            ],
+            &script,
         );
         assert_eq!(state, State::Ready);
         // C1 must never be released.
         assert!(!effects.contains(&Effect::ReleaseReset(C1)));
-        // No recovery triggered.
-        assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+        // Recovery IS attempted before C1 is classified and held.
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C1)));
+        assert!(effects.contains(&Effect::AssertReset(C1)));
         assert!(!effects.contains(&Effect::LatchLockdown));
     }
 
-    /// Optional Active component failure in AwaitingReady: skipped, held in
-    /// reset, chain reaches Ready once ComponentReady clears awaiting.
+    /// Isolable Active component failure in AwaitingReady: retried through a
+    /// full recovery episode, then held once exhausted; the walk still
+    /// reaches Ready once the remaining chain (past the held component) drains.
     #[test]
-    fn optional_active_failure_in_awaiting_ready_skips() {
-        // C0 Active required, C1 Active optional.
+    fn isolable_active_component_exhausted_in_awaiting_ready_skips() {
+        // C0 Active required, C1 Active isolable.
+        let mut script = std::vec![BOOT, Event::VerificationPassed(C0)]; // → AwaitingReady; spec ReadFirmware(C1)
+        for _ in 0..MAX_RETRY {
+            script.push(Event::VerificationFailed(C1));
+            script.push(Event::Restored(C1));
+            script.push(Event::VerificationPassed(C0)); // re-walk restarts at C0 each episode
+        }
         let (effects, state) = drive(
             chain(&[
                 (C0, ComponentAttrs::active_required()),
-                (C1, ComponentAttrs::active_optional()),
+                (C1, ComponentAttrs::active_isolable()),
             ]),
-            &[
-                BOOT,
-                Event::VerificationPassed(C0), // → AwaitingReady; spec ReadFirmware(C1)
-                Event::VerificationFailed(C1), // optional → skip C1
-                Event::ComponentReady(C0),     // iRoT gate clears; cursor past end → Ready
-            ],
+            &script,
         );
         assert_eq!(state, State::Ready);
         assert!(!effects.contains(&Effect::ReleaseReset(C1)));
-        assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C1)));
+        assert!(effects.contains(&Effect::AssertReset(C1)));
     }
 
-    /// Runtime corruption of a `required: false` component gates the component
+    /// Runtime corruption of an `Isolable` component gates the component
     /// (AssertReset) but does not trigger recovery — the machine stays in Ready.
     #[test]
-    fn optional_runtime_corruption_is_ignored() {
+    fn isolable_runtime_corruption_is_ignored() {
         let (effects, state) = drive(
             chain(&[
                 (C0, ComponentAttrs::passive_required()),
-                (C1, ComponentAttrs::passive_optional()),
+                (C1, ComponentAttrs::passive_isolable()),
             ]),
             &[
                 BOOT,
                 Event::VerificationPassed(C0),
                 Event::VerificationPassed(C1),
-                Event::CorruptionDetected(C1), // optional → gate, no recovery
+                Event::CorruptionDetected(C1), // Isolable → gate, no recovery
             ],
         );
         assert_eq!(state, State::Ready);
@@ -951,14 +1089,14 @@ mod tests {
         assert!(!effects.contains(&Effect::LatchLockdown));
     }
 
-    /// Runtime corruption of a `required: true` component still triggers
+    /// Runtime corruption of a `Required` component still triggers
     /// recovery as before.
     #[test]
     fn required_runtime_corruption_triggers_recovery() {
         let (effects, state) = drive(
             chain(&[
                 (C0, ComponentAttrs::passive_required()),
-                (C1, ComponentAttrs::passive_optional()),
+                (C1, ComponentAttrs::passive_isolable()),
             ]),
             &[
                 BOOT,
@@ -1026,7 +1164,7 @@ mod tests {
     }
 
     /// CorruptionDetected while in AwaitingReady (required component) →
-    /// Recovering via the Operational superstate handler.
+    /// Recovering via the SupervisingPlatform superstate handler.
     #[test]
     fn corruption_in_awaiting_ready_triggers_recovery() {
         let (effects, state) = drive(
@@ -1045,7 +1183,7 @@ mod tests {
     }
 
     /// CorruptionDetected while in Updating (required component) → Recovering
-    /// via the Operational superstate handler.
+    /// via the SupervisingPlatform superstate handler.
     #[test]
     fn corruption_in_updating_triggers_recovery() {
         let (effects, state) = drive(
@@ -1113,25 +1251,30 @@ mod tests {
         );
     }
 
-    /// An optional component at the head of the chain can fail and the walk
-    /// continues to the remaining required components.
+    /// An Isolable component at the head of the chain exhausts its recovery
+    /// retries, gets held, and the walk continues to the remaining required
+    /// components.
     #[test]
-    fn optional_first_component_skipped_walk_continues() {
+    fn isolable_first_component_exhausts_then_walk_continues() {
+        let mut script = std::vec![BOOT];
+        for _ in 0..MAX_RETRY {
+            script.push(Event::VerificationFailed(C0));
+            script.push(Event::Restored(C0));
+        }
+        script.push(Event::VerificationPassed(C1));
         let (effects, state) = drive(
             chain(&[
-                (C0, ComponentAttrs::passive_optional()),
+                (C0, ComponentAttrs::passive_isolable()),
                 (C1, ComponentAttrs::passive_required()),
             ]),
-            &[
-                BOOT,
-                Event::VerificationFailed(C0), // optional → skip C0
-                Event::VerificationPassed(C1),
-            ],
+            &script,
         );
         assert_eq!(state, State::Ready);
         assert!(!effects.contains(&Effect::ReleaseReset(C0)));
         assert!(effects.contains(&Effect::ReleaseReset(C1)));
-        assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
+        // Recovery IS attempted before C0 is classified and held.
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+        assert!(effects.contains(&Effect::AssertReset(C0)));
     }
 
     /// The speculative read emits ReleaseReset · ReadFirmware · VerifyFirmware
@@ -1170,7 +1313,7 @@ mod tests {
 
     /// A chain with a single Active component goes directly to Ready on
     /// VerificationPassed — no AwaitingReady, no ComponentReady required.
-    /// This exercises the `chain done` branch of VerifyingPlatform for an
+    /// This exercises the `chain done` branch of PreSupervision for an
     /// Active component (distinct from the multi-component Active path which
     /// transitions to AwaitingReady).
     #[test]
