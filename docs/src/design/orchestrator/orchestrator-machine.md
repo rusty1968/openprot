@@ -2,20 +2,20 @@
 
 This document describes the state machine that lives in
 `services/orchestrator/sm/src/lib.rs`: its states, shared storage, entry
-actions, transition table, and the `Operational` superstate.
+actions, transition table, and the `SupervisingPlatform` superstate.
 
 ```mermaid
 stateDiagram-v2
     [*] --> PowerOnReset
 
-    PowerOnReset --> VerifyingPlatform : PowerGood(Provisioned)
+    PowerOnReset --> PreSupervision : PowerGood(Provisioned)
     PowerOnReset --> Locked             : PowerGood(Unprovisioned)
     PowerOnReset --> Locked             : PowerGood(SelfVerificationFailed)
 
-    VerifyingPlatform --> VerifyingPlatform : VerificationPassed [more, Passive]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
-    VerifyingPlatform --> AwaitingReady     : VerificationPassed [more, Active]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
-    VerifyingPlatform --> Ready             : VerificationPassed [chain done]<br/>/ ReleaseReset
-    VerifyingPlatform --> Recovering        : VerificationFailed (any policy)<br/>/ RestoreGoldenImage
+    PreSupervision --> PreSupervision : VerificationPassed [more, Passive]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
+    PreSupervision --> AwaitingReady     : VerificationPassed [more, Active]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
+    PreSupervision --> Ready             : VerificationPassed [chain done]<br/>/ ReleaseReset
+    PreSupervision --> Recovering        : VerificationFailed (any policy)<br/>/ RestoreGoldenImage
 
     AwaitingReady --> AwaitingReady : VerificationPassed [more]<br/>/ ReleaseReset · ReadFirmware · VerifyFirmware
     AwaitingReady --> Ready         : ComponentReady [chain done or cursor past end]
@@ -23,7 +23,7 @@ stateDiagram-v2
     AwaitingReady --> Recovering    : VerificationFailed (any policy)<br/>/ RestoreGoldenImage
     AwaitingReady --> Recovering    : Timeout(id) [id == awaiting]<br/>/ RestoreGoldenImage
 
-    state Operational {
+    state SupervisingPlatform {
         [*]           --> Ready
         Ready         --> Updating      : UpdateRequest<br/>/ AuthenticateUpdate · StageUpdate
         Updating      --> Ready         : UpdateVerified / ActivateUpdate
@@ -33,8 +33,8 @@ stateDiagram-v2
         AwaitingReady --> Recovering    : CorruptionDetected<br/>/ RestoreGoldenImage
     }
 
-    Recovering --> VerifyingPlatform : Restored [retry < max_retry]<br/>(re-verify)
-    Recovering --> VerifyingPlatform : Restored [retry ≥ max_retry, Isolable/Cascading]<br/>/ AssertReset (skip — held)
+    Recovering --> PreSupervision : Restored [retry < max_retry]<br/>(re-verify)
+    Recovering --> PreSupervision : Restored [retry ≥ max_retry, Isolable/Cascading]<br/>/ AssertReset (skip — held)
     Recovering --> Locked    : Restored [retry ≥ max_retry, PlatformHalt]<br/>(self-emits RecoveryFailed) / LatchLockdown
     Locked     --> Locked    : (terminal — all events ignored)
 ```
@@ -51,7 +51,7 @@ mutable state lives here.
 | Field | Type | Purpose |
 |---|---|---|
 | `chain` | `Vec<(ComponentId, ComponentAttrs), N>` | Ordered trust chain, supplied by the shell at construction time. Never mutated after build. |
-| `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `VerifyingPlatform` entry. Advances on each `VerificationPassed`, and past any component in `held` (skipped without verification), via `Outcome::Handled`. |
+| `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `PreSupervision` entry. Advances on each `VerificationPassed`, and past any component in `held` (skipped without verification), via `Outcome::Handled`. |
 | `held` | `Vec<ComponentId, N>` | Components skipped because their recovery was **exhausted**: an `Isolable` component, or a `Cascading` component plus its `depends_on` dependents. Not verified during the walk — held in reset, cursor advances past them. Populated in `Recovering` when `retry_count` reaches `max_retry`; persists across re-walks; cleared on `Ready` entry. |
 | `failed` | `Option<ComponentId>` | The component whose recovery episode is in progress; `None` while healthy. Set on any `VerificationFailed`, `Timeout`, or `CorruptionDetected` of a managed component. |
 | `retry_count` | `u8` | Number of consecutive failed restore attempts in the current recovery episode. Cleared to 0 in `Ready`'s entry action — consecutive only (INV7). |
@@ -83,14 +83,14 @@ The machine's initial state. The first event is always `PowerGood(PowerOnResult)
 
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
-| `PowerGood(Provisioned)` | — | — | `VerifyingPlatform` |
+| `PowerGood(Provisioned)` | — | — | `PreSupervision` |
 | `PowerGood(Unprovisioned)` | — | — | `Locked` |
 | `PowerGood(SelfVerificationFailed)` | — | — | `Locked` |
 | anything else | — | — | `Outcome::Super` (top level — discarded) |
 
 ---
 
-### `VerifyingPlatform`
+### `PreSupervision`
 
 Walks the trust chain component-by-component. The cursor advances on each
 `VerificationPassed` (or optional `VerificationFailed`) using `Outcome::Handled`
@@ -123,7 +123,7 @@ attempts are exhausted.
 Reached when an `Active` component passes eRoT authentication. The machine waits
 here until the component's iRoT signals readiness via `ComponentReady`. The
 speculative eRoT check for the next component (`ReadFirmware` + `VerifyFirmware`)
-was already emitted by the `VerifyingPlatform` handler that triggered this
+was already emitted by the `PreSupervision` handler that triggered this
 transition.
 
 **Entry action**: none.
@@ -138,7 +138,7 @@ transition.
 | `Timeout(id)` | `id == awaiting` | — | `Recovering` (failed = Some(id), awaiting = None) |
 | `Timeout(id)` | `id != awaiting` | — | `Handled` (stale — ignore) |
 | `VerificationFailed(id)` | — | — | `Recovering` (failed = Some(id), awaiting = None) — recovery attempted first |
-| anything else | — | — | `Outcome::Super` → `Operational` |
+| anything else | — | — | `Outcome::Super` → `SupervisingPlatform` |
 
 `ComponentReady` and `VerificationPassed` are independent and may arrive in
 either order. Both must be seen before the walk advances. `awaiting` tracks
@@ -160,7 +160,7 @@ episode and the skip set).
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
 | `UpdateRequest` | — | — | `Updating` |
-| anything else | — | — | `Outcome::Super` → `Operational` |
+| anything else | — | — | `Outcome::Super` → `SupervisingPlatform` |
 
 ---
 
@@ -174,7 +174,7 @@ An update is in progress.
 |---|---|---|---|
 | `UpdateVerified` | — | `ActivateUpdate` | `Ready` |
 | `UpdateRejected` | — | `DiscardStaged` | `Ready` (rejected update is not corruption — INV4) |
-| anything else | — | — | `Outcome::Super` → `Operational` |
+| anything else | — | — | `Outcome::Super` → `SupervisingPlatform` |
 
 ---
 
@@ -190,12 +190,12 @@ the restore, but the entire region is affected (not the whole chain — INV5).
 
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
-| `Restored(_)` | `retry_count + 1 < max_retry` | — | `VerifyingPlatform` (re-verify — the restored image may pass) |
-| `Restored(_)` | cap reached, `failed` `Isolable` | `AssertReset(failed)` | `VerifyingPlatform` (recovery exhausted: add `failed` to `held`, clear `failed`; the re-walk skips it) |
-| `Restored(_)` | cap reached, `failed` `Cascading` | `AssertReset(failed)` · `AssertReset(dependent…)` | `VerifyingPlatform` (recovery exhausted: add `failed` + `depends_on` dependents to `held`, clear `failed`) |
+| `Restored(_)` | `retry_count + 1 < max_retry` | — | `PreSupervision` (re-verify — the restored image may pass) |
+| `Restored(_)` | cap reached, `failed` `Isolable` | `AssertReset(failed)` | `PreSupervision` (recovery exhausted: add `failed` to `held`, clear `failed`; the re-walk skips it) |
+| `Restored(_)` | cap reached, `failed` `Cascading` | `AssertReset(failed)` · `AssertReset(dependent…)` | `PreSupervision` (recovery exhausted: add `failed` + `depends_on` dependents to `held`, clear `failed`) |
 | `Restored(_)` | cap reached, `failed` `PlatformHalt` | `Effect::Emit(RecoveryFailed)` | `Handled` (orchestrator queues `RecoveryFailed` next — INV7) |
 | `RecoveryFailed` | — | — | `Locked` |
-| anything else | — | — | `Outcome::Super` → `Operational` |
+| anything else | — | — | `Outcome::Super` → `SupervisingPlatform` |
 
 ("cap reached" = `retry_count + 1 >= max_retry`.)
 
@@ -241,7 +241,7 @@ including its own internally-generated ones, travels through the same event path
 and shows up in the same trace.
 
 **Why re-walk from `cursor = 0`?** After restoring a component the machine
-re-enters `VerifyingPlatform` and re-verifies the entire chain from scratch
+re-enters `PreSupervision` and re-verifies the entire chain from scratch
 rather than resuming at the failed component. This is a deliberate conservative
 policy: a corruption event may indicate a broader integrity problem, and the
 CSA architecture's core principle — "no component executes unverified firmware"
@@ -264,7 +264,7 @@ components in reset permanently.
 
 ---
 
-## Superstate — `Operational`
+## Superstate — `SupervisingPlatform`
 
 `Ready`, `Updating`, `Recovering`, and `AwaitingReady` share this superstate.
 When a leaf state returns `Outcome::Super`, `statig` calls the superstate handler.
@@ -278,12 +278,12 @@ When a leaf state returns `Outcome::Super`, `statig` calls the superstate handle
 
 ---
 
-## Centralizing the Operational Contract
+## Centralizing the Supervision Contract
 
 Four states run once the platform is up: `Ready`, `Updating`, `Recovering`, and
 `AwaitingReady`. Two things must be true in all four, no matter which one the
 machine is in — an attestation challenge always gets answered, and a corruption
-report always starts recovery. Call those two shared rules the **operational
+report always starts recovery. Call those two shared rules the **supervision
 contract**.
 
 The question is where to write the contract down. One option is to copy it into
@@ -298,8 +298,8 @@ state machine every state handles its own events and nothing more. An HSM adds a
 *superstate* — a parent that several states sit under. When a state does not
 handle an event itself, the event falls through to the parent. So each state
 handles what is unique to it, and the parent handles what they all share. Our
-four operational states sit under one superstate, `Operational`, and that is
-where the operational contract lives — written exactly once.
+four states sit under one superstate, `SupervisingPlatform`, and that is
+where the supervision contract lives — written exactly once.
 
 To be fair to the alternative: a careful flat state machine could get the same
 result by giving every state a default branch that calls one shared function.
@@ -311,13 +311,13 @@ that difference is worth having.
 The first reason is that there is only one copy to get right. In the flat
 version each state's default branch is written by hand, so they can quietly
 diverge — one calls the shared function, another does something slightly
-different. With the superstate, each state points at the one `Operational`
+different. With the superstate, each state points at the one `SupervisingPlatform`
 handler and nothing else. What that single copy buys us for auditing and
 verification is covered in [Invariant Verification](#invariant-verification)
 below.
 
 The second reason is that the superstate also covers the *in-between* states,
-which are the easy ones to forget. `Operational` includes not just the settled
+which are the easy ones to forget. `SupervisingPlatform` includes not just the settled
 `Ready` state but also `AwaitingReady` (still booting) and `Recovering` (still
 restoring). Corruption has to be handled even during those brief windows — and
 those are exactly the states a developer is tempted to skip as "temporary."
@@ -341,7 +341,7 @@ platform's corruption response — not on saving lines.
 
 The cost is that reading one state no longer tells the whole story. To know what
 `Ready` does with an event, you also have to know it falls through to
-`Operational` and go read that. This is a trade, not a free win: the design takes
+`SupervisingPlatform` and go read that. This is a trade, not a free win: the design takes
 on more indirection \u2014 and a bit more machinery, since a flat state machine is just\na match on state and event while this adds superstates and the fall-through rule \u2014\nin exchange for removing duplication of the one rule where duplication is most\ndangerous. We accept that because the `statig` library is
 used here without macros, so the fall-through is plain, visible code rather than
 hidden generation, and the small amount of library machinery involved is
@@ -361,23 +361,23 @@ choice worth reconsidering.
 
 ## Invariant Verification
 
-The invariants for the operational regime describe the whole regime, not one
+The invariants for the `SupervisingPlatform` regime describe the whole regime, not one
 state at a time. Because the hierarchy stores each rule at that same whole-regime
 level, checking that the code matches the spec stays simple instead of turning
 into a state-by-state comparison.
 
-Take INV6: *"an attestation challenge is answered in any operational state
-without changing state."* In this design the rule itself is one line of code —
-the `AttestationChallenge` row in the `Operational` handler. Reading that row
+Take INV6: *"an attestation challenge is answered in any `SupervisingPlatform`
+state without changing state."* In this design the rule itself is one line of code —
+the `AttestationChallenge` row in the `SupervisingPlatform` handler. Reading that row
 tells you *what* happens; to know it happens *everywhere it should*, you also
-check that each of the four operational states is linked to the superstate (its
-`superstate()` points at `Operational`) and does not handle the event itself.
+check that each of the four states is linked to the superstate (its
+`superstate()` points at `SupervisingPlatform`) and does not handle the event itself.
 That is one row plus four link checks:
 
 | Invariant | Where it lives | To verify |
 |---|---|---|
-| INV6 — attestation answered in any operational state, no transition | `AttestationChallenge → SignAttestation`, `Handled` (one row in `Operational`) | Read one row + confirm four states link to `Operational` |
-| INV5 — corruption triggers recovery from any operational state | `CorruptionDetected → Recovering` (one row in `Operational`) | Read one row + confirm four states link to `Operational` |
+| INV6 — attestation answered in any `SupervisingPlatform` state, no transition | `AttestationChallenge → SignAttestation`, `Handled` (one row in `SupervisingPlatform`) | Read one row + confirm four states link to `SupervisingPlatform` |
+| INV5 — corruption triggers recovery from any `SupervisingPlatform` state | `CorruptionDetected → Recovering` (one row in `SupervisingPlatform`) | Read one row + confirm four states link to `SupervisingPlatform` |
 
 This is not free — the four links matter, because a state that forgets to link,
 or handles the event itself, silently drops out of the rule. But it is far less

@@ -20,12 +20,12 @@ it; the core itself never touches hardware.
 The machine's initial state. It waits for the platform's first event, which is
 always `PowerGood`, carrying the result of the eRoT's power-on self-check.
 
-### `PowerGood(Provisioned)` → `VerifyingPlatform`
+### `PowerGood(Provisioned)` → `PreSupervision`
 
 The eRoT is provisioned and passed its own self-verification, so it is entitled
 to vouch for the rest of the platform. The machine leaves the gate and begins
 walking the trust chain. No effects are emitted by the transition itself; the
-`VerifyingPlatform` entry action starts the first verification.
+`PreSupervision` entry action starts the first verification.
 
 ### `PowerGood(Unprovisioned)` → `Locked`
 
@@ -41,25 +41,26 @@ machine locks down immediately.
 
 ### anything else → discarded
 
-`PowerOnReset` sits outside the `Operational` superstate, so any event other than
+`PowerOnReset` sits outside the `SupervisingPlatform` superstate, so any event other than
 `PowerGood` falls through to the top level and is discarded. The machine does not
 answer attestation or act on corruption before it has even begun verifying.
 
 ---
 
-## From `VerifyingPlatform`
+## From `PreSupervision`
 
 Walks the trust chain component by component. The entry action points the cursor
 at the first component not already in `held` and asks the platform to read and
-verify its firmware. The transitions below react to the platform's verdicts.
+verify its firmware. The transitions below react to the platform's firmware
+verification results.
 
-### `VerificationPassed` [more components, current is `Passive`] → `VerifyingPlatform` (self)
+### `VerificationPassed` [more components, current is `Passive`] → `PreSupervision` (self)
 
 The current component is a symbiont device with no root of trust of its own, and
 its single eRoT-side check just passed. The machine releases it (`ReleaseReset`),
 asks the platform to read and verify the next component
 (`ReadFirmware` · `VerifyFirmware`), and advances the cursor — all while staying
-in `VerifyingPlatform`. This is the self-loop that rolls the walk forward through
+in `PreSupervision`. This is the self-loop that rolls the walk forward through
 symbiont devices. It uses `Outcome::Handled` rather than a real self-transition so
 the entry action does not re-run and reset the cursor.
 
@@ -96,7 +97,7 @@ reset; the cursor simply moves past it to the next candidate.
 
 ### anything else → discarded
 
-`VerifyingPlatform` also sits outside `Operational`, so unrelated events fall
+`PreSupervision` also sits outside `SupervisingPlatform`, so unrelated events fall
 through to the top level and are discarded. Attestation challenges and corruption
 reports are not serviced during the initial chain walk.
 
@@ -120,7 +121,7 @@ put, so a late or duplicated signal can never push the walk forward incorrectly.
 
 The awaited component's iRoT has come up. The machine clears `awaiting` to record
 that the readiness gate is satisfied, but stays in `AwaitingReady` because the
-next component's eRoT verdict is still outstanding.
+next component's firmware verification result is still outstanding.
 
 ### `ComponentReady` [id = `awaiting`, cursor past end] → `Ready`
 
@@ -133,7 +134,7 @@ skipped or resolved). With both gates now clear, the machine transitions to
 
 The speculative eRoT check for the next component passed. The machine releases
 that component, starts reading and verifying the one after it, and advances the
-cursor — mirroring the `VerifyingPlatform` walk — while remaining in
+cursor — mirroring the `PreSupervision` walk — while remaining in
 `AwaitingReady` because it may still be waiting on an iRoT readiness signal.
 
 ### `VerificationPassed` [chain done] → `Ready`
@@ -161,10 +162,10 @@ walk, recovery is attempted first: the machine records the component in `failed`
 clears `awaiting` (abandoning the in-flight readiness wait), and enters
 `Recovering`.
 
-### anything else → `Operational`
+### anything else → `SupervisingPlatform`
 
-`AwaitingReady` is one of the four operational states, so unrelated events fall
-through to the `Operational` superstate — which answers attestation challenges
+`AwaitingReady` is one of the four `SupervisingPlatform` states, so unrelated events fall
+through to the `SupervisingPlatform` superstate — which answers attestation challenges
 and acts on corruption reports even while the platform is still coming up.
 
 ---
@@ -180,10 +181,10 @@ means the platform booted clean.
 The platform has requested a firmware update. The machine transitions to
 `Updating`, whose entry action begins authenticating and staging the new image.
 
-### anything else → `Operational`
+### anything else → `SupervisingPlatform`
 
 Everything else `Ready` does — answering attestation, handling corruption — is
-inherited from the `Operational` superstate via fall-through.
+inherited from the `SupervisingPlatform` superstate via fall-through.
 
 ---
 
@@ -204,9 +205,9 @@ throw it away and returns to `Ready`, continuing to run the image it already had
 A rejected update is deliberately **not** treated as corruption — nothing trusted
 was damaged, so there is no reason to enter recovery.
 
-### anything else → `Operational`
+### anything else → `SupervisingPlatform`
 
-Attestation and corruption handling during an update come from the `Operational`
+Attestation and corruption handling during an update come from the `SupervisingPlatform`
 superstate.
 
 ---
@@ -219,7 +220,7 @@ component's entire recovery region (all components sharing its `RegionId`). The
 transitions below fire on `Restored` and branch on how many attempts remain and,
 once exhausted, on the component's recovery-failure policy.
 
-### `Restored` [`retry_count + 1 < max_retry`] → `VerifyingPlatform`
+### `Restored` [`retry_count + 1 < max_retry`] → `PreSupervision`
 
 The restore completed and attempts remain. The machine re-walks the chain from
 the top to re-verify — the restored image may now pass. Re-verifying end to end
@@ -227,7 +228,7 @@ the top to re-verify — the restored image may now pass. Re-verifying end to en
 whole platform, which is the conservative reading of the "no component executes
 unverified firmware" principle.
 
-### `Restored` [cap reached, `failed` is `Isolable`] → `VerifyingPlatform`
+### `Restored` [cap reached, `failed` is `Isolable`] → `PreSupervision`
 
 Restore attempts are exhausted and the recovery image still fails, and the
 component's policy is `Isolable`. The machine gives up on this one component
@@ -235,7 +236,7 @@ only: it emits `AssertReset(failed)` to keep it held, adds it to `held`, clears
 `failed`, and re-walks to continue booting the rest of the platform. The re-walk
 skips the now-`held` component.
 
-### `Restored` [cap reached, `failed` is `Cascading`] → `VerifyingPlatform`
+### `Restored` [cap reached, `failed` is `Cascading`] → `PreSupervision`
 
 As with `Isolable`, but the failed component's dependents go down with it. The
 machine emits `AssertReset` for the component and each component whose
@@ -257,10 +258,10 @@ The follow-up event emitted above (or any `RecoveryFailed`) drives the machine t
 `Locked`. Routing lockdown through this single event means `Locked` is only ever
 entered one way, no matter where the give-up decision originated.
 
-### anything else → `Operational`
+### anything else → `SupervisingPlatform`
 
-`Recovering` is an operational state, so attestation and corruption events fall
-through to the `Operational` superstate and are handled even mid-recovery.
+`Recovering` is a `SupervisingPlatform` state, so attestation and corruption events fall
+through to the `SupervisingPlatform` superstate and are handled even mid-recovery.
 
 ---
 
@@ -277,17 +278,17 @@ the power cycle.
 
 ---
 
-## From the `Operational` superstate
+## From the `SupervisingPlatform` superstate
 
 `Ready`, `Updating`, `Recovering`, and `AwaitingReady` share this parent. When
 one of them returns `Outcome::Super`, these handlers run. Centralizing them here
 guarantees the two platform-wide behaviors apply identically in all four states.
 
-### `AttestationChallenge` → `Operational` (no transition)
+### `AttestationChallenge` → `SupervisingPlatform` (no transition)
 
 The machine emits `SignAttestation` to answer the challenge and stays exactly
 where it is. Answering an attestation challenge never changes state, so it is safe
-to service from any operational state — including mid-boot (`AwaitingReady`) and
+to service from any `SupervisingPlatform` state — including mid-boot (`AwaitingReady`) and
 mid-recovery (`Recovering`).
 
 ### `CorruptionDetected` [component required] → `Recovering`
@@ -296,7 +297,7 @@ A trusted-critical component was reported corrupt at runtime. The machine record
 it in `failed` and drops into `Recovering`, re-entering the same two-stage
 recovery flow used at boot.
 
-### `CorruptionDetected` [component not required] → `Operational` (no transition)
+### `CorruptionDetected` [component not required] → `SupervisingPlatform` (no transition)
 
 The corrupt component is not required for the platform to run. Rather than tear
 down the platform, the machine emits `AssertReset` to gate the component (put it

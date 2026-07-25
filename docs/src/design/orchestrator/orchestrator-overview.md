@@ -21,27 +21,31 @@ with entry actions and effects.
 stateDiagram-v2
     [*] --> PowerOnReset
 
-    PowerOnReset --> VerifyingPlatform : PowerGood [Provisioned]
+    PowerOnReset --> PreSupervision : PowerGood [Provisioned]
     PowerOnReset --> Locked            : PowerGood [Unprovisioned]
     PowerOnReset --> Locked            : PowerGood [SelfVerificationFailed]
 
-    VerifyingPlatform --> VerifyingPlatform : VerificationPassed [more, Passive]
-    VerifyingPlatform --> Operational       : VerificationPassed [more, Active]
-    VerifyingPlatform --> Operational       : VerificationPassed [chain done]
-    VerifyingPlatform --> Recovering        : VerificationFailed
+    PreSupervision --> PreSupervision : VerificationPassed [more, Passive]
 
-    Operational --> Recovering  : VerificationFailed [Required]
-    Operational --> Recovering  : Timeout [id == awaiting]
-    Operational --> Recovering  : CorruptionDetected [required]
-    Operational --> Operational : ComponentReady
-    Operational --> Operational : CorruptionDetected [optional]
-    Operational --> Operational : AttestationChallenge
-    Operational --> Operational : UpdateRequest
-    Operational --> Operational : UpdateVerified
-    Operational --> Operational : UpdateRejected
+    state SupervisingPlatform {
+        AwaitingReady --> Ready      : ComponentReady [chain done]
+        AwaitingReady --> Recovering : VerificationFailed [Required]
+        AwaitingReady --> Recovering : Timeout [id == awaiting]
+        Ready     --> Updating       : UpdateRequest
+        Updating  --> Ready          : UpdateVerified / UpdateRejected
+        Ready     --> Recovering     : CorruptionDetected [required]
+        Updating  --> Recovering     : CorruptionDetected [required]
+    }
 
-    Recovering --> VerifyingPlatform : Restored [retry < max_retry]
-    Recovering --> VerifyingPlatform : Restored [retry >= max_retry, Isolable or Cascading]
+    SupervisingPlatform --> SupervisingPlatform : AttestationChallenge
+    SupervisingPlatform --> SupervisingPlatform : CorruptionDetected [optional]
+
+    PreSupervision --> AwaitingReady : VerificationPassed [more, Active]
+    PreSupervision --> Ready         : VerificationPassed [chain done]
+    PreSupervision --> Recovering    : VerificationFailed
+
+    Recovering --> PreSupervision : Restored [retry < max_retry]
+    Recovering --> PreSupervision : Restored [retry >= max_retry, Isolable or Cascading]
     Recovering --> Locked            : Restored [retry >= max_retry, PlatformHalt]
 
     Locked --> [*]
@@ -53,7 +57,7 @@ stateDiagram-v2
   verification model (eRoT gate + optional iRoT gate), the verification
   boundary, `ComponentAttrs`, and concrete sequencing examples.
 - [**State Machine**](./orchestrator-machine.md): All states, shared storage, entry
-  actions, transition table, and the `Operational` superstate.
+  actions, transition table, and the `SupervisingPlatform` superstate.
 
 ## Design Principles
 
@@ -82,7 +86,7 @@ the CSA architecture document:
 
 | CSA concept | State machine encoding |
 |---|---|
-| eRoT holds component in reset until firmware verified | `VerifyingPlatform` emits `ReleaseReset` only on `VerificationPassed` |
+| eRoT holds component in reset until firmware verified | `PreSupervision` emits `ReleaseReset` only on `VerificationPassed` |
 | Component with Caliptra iRoT requires two independent checks | `ComponentKind::Active` → `AwaitingReady` until `ComponentReady` |
 | Passive component (no iRoT): eRoT check only | `ComponentKind::Passive` → advance immediately after `ReleaseReset` |
 | Isolable component: failure skips, not blocks | `FailurePolicy::Isolable` → skip (held in reset); advance without `Recovering`; no cascade |

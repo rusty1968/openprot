@@ -13,7 +13,7 @@ and Example Mechanisms sections). The orchestrator is the concrete state-machine
 encoding of that flow for a discrete eRoT running OpenPRoT.
 
 > **How to read this alongside the reference.** Every state named here
-> (`PowerOnReset`, `VerifyingPlatform`, …) has a full entry in
+> (`PowerOnReset`, `PreSupervision`, …) has a full entry in
 > [State Machine](./orchestrator-machine.md) with its entry action and transition
 > table. This document explains *why* the transitions are shaped the way they are
 > and *which CSA guarantee* each one upholds. When a claim needs the exact guard,
@@ -23,39 +23,70 @@ encoding of that flow for a discrete eRoT running OpenPRoT.
 
 ## The shape of the journey
 
-At the highest level the machine moves through three phases:
+At the highest level the machine has two operating regimes, a provisioning gate,
+and a terminal exit:
 
 ```mermaid
 stateDiagram-v2
     direction LR
-    [*] --> Boot
-    state Boot {
-        PowerOnReset --> VerifyingPlatform
-        VerifyingPlatform --> AwaitingReady
-        AwaitingReady --> VerifyingPlatform
-    }
-    Boot --> Operate : chain verified
-    state Operate {
+    [*] --> PowerOnReset
+    PowerOnReset --> PreSupervision : provisioned, self-check passed
+    PreSupervision --> PreSupervision : Passive component verified (self-loop)
+    state SupervisingPlatform {
+        AwaitingReady --> Ready : iRoT ready, chain done
         Ready --> Updating
         Updating --> Ready
+        Ready --> Recovering : corruption
+        Updating --> Recovering : corruption
+        AwaitingReady --> Recovering : timeout / failure
     }
-    Boot --> Recover : verification / readiness failure
-    Operate --> Recover : corruption
-    Recover --> Boot : restored (re-verify)
-    Recover --> Operate : restored (re-verify)
-    Boot --> Halt : unprovisioned / self-check failed
-    Recover --> Halt : recovery exhausted (PlatformHalt)
-    Halt --> [*]
+    PowerOnReset --> Locked : unprovisioned / self-check failed
+    PreSupervision --> AwaitingReady : Active component verified
+    PreSupervision --> Ready : Passive chain verified
+    PreSupervision --> Recovering : verification failure
+    Recovering --> PreSupervision : restored (re-verify)
+    Recovering --> Locked : recovery exhausted (PlatformHalt)
+    Locked --> [*]
 ```
 
-- **Boot** establishes the trust chain: verify each component, release it, and —
-  for components with their own root of trust — wait for it to come up.
-- **Operate** is steady state: answer attestation challenges, apply firmware
-  updates, and watch for corruption.
-- **Recover / Halt** handle failure: restore a component and re-verify, or, when
-  restoration is hopeless, stop.
+**Two operating modes, never simultaneous.** `PreSupervision` and
+`SupervisingPlatform` are mutually exclusive. The distinction is not about which
+activities are happening — `AwaitingReady` sits inside `SupervisingPlatform` and
+continues the chain walk — but about whether the **supervision contract is active**.
+In `PreSupervision`, attestation challenges are not answered and corruption
+events are not acted on. The moment `PreSupervision` exits, the supervision
+contract switches on and stays on: attestation is always answered and corruption
+is always acted on, regardless of whether the chain walk is still in progress.
 
-The rest of this document walks each phase.
+The threshold is one firmware verification result — passed or failed — not all
+components having passed verification. CSA does not define a safe window before
+supervision begins. A remote verifier may issue an attestation challenge as soon
+as the first component's measurements exist. A corruption can be detected the
+moment a component is running. The supervision contract — attestation always
+answered, corruption always acted on — must therefore hold continuously from the
+first result onward, including during recovery before anything has been released.
+Deferring supervision until `Ready` would leave a gap that CSA does not permit.
+
+During recovery the machine temporarily exits supervision
+(`SupervisingPlatform::Recovering` → `PreSupervision`), gating all components
+back into reset. `SupervisingPlatform` is re-entered on the first transition
+back out of `PreSupervision`.
+
+- **`PowerOnReset`** is the provisioning gate: the eRoT checks its own integrity
+  before it vouches for anything else.
+- **`PreSupervision`** is regime one — supervision contract off: the eRoT walks
+  the trust chain, verifying and releasing components without yet answering
+  attestation challenges or acting on corruption.
+- **`SupervisingPlatform`** is regime two — supervision contract on: attestation,
+  firmware updates, iRoT gating (`AwaitingReady`), and active recovery
+  (`SupervisingPlatform::Recovering`) all run under one shared superstate.
+  `PreSupervision` drives into it; `SupervisingPlatform::Recovering` drives
+  back out to re-walk the chain.
+- **`Locked`** is the terminal exit: the platform stops and holds every component
+  in reset when provisioning is absent, the self-check fails, or recovery is
+  exhausted.
+
+The rest of this document walks each state.
 
 ---
 
@@ -66,12 +97,11 @@ The rest of this document walks each phase.
 > **CSA:** *"The eRoT is the first component to execute after standby power is
 > applied. It is the trust anchor for the entire boot sequence."*
 
-The machine starts in `PowerOnReset` and does nothing until the shell delivers
-the first event, `PowerGood`, carrying the result of the eRoT's own power-on
-self-check. That single event fans out three ways:
+The machine starts in `PowerOnReset` and does nothing until `PowerGood` is
+received, carrying the result of the eRoT's own power-on self-check. That single event fans out three ways:
 
 - `PowerGood(Provisioned)` — the eRoT is provisioned and self-verified, so it is
-  entitled to vouch for others. The machine advances to `VerifyingPlatform` and
+  entitled to vouch for others. The machine advances to `PreSupervision` and
   begins the chain walk.
 - `PowerGood(Unprovisioned)` — there is nothing to verify against, so the machine
   goes straight to `Locked`.
@@ -86,7 +116,7 @@ leaves the gate.
 
 ## Phase 2 — Walking the trust chain
 
-**State: `VerifyingPlatform`.**
+**State: `PreSupervision`.**
 
 > **CSA:** *"No downstream component boots until the eRoT has verified its
 > firmware. The eRoT holds each downstream component in reset until verification
@@ -96,10 +126,15 @@ leaves the gate.
 > releases it from reset, then waits for that device's boot-progress signal
 > before proceeding."*
 
-`VerifyingPlatform` walks the shell-supplied trust chain one component at a time.
-On entry it points the cursor at the first component not already skipped and asks
-the shell to read and verify that component's firmware (`ReadFirmware` +
-`VerifyFirmware`). From then on it reacts to the shell's verdicts.
+`PreSupervision` is the phase before the supervision contract is active:
+attestation challenges are not answered and corruption events are not acted on.
+The eRoT processes firmware verification results here — one component at a time,
+advancing the cursor and releasing each verified component — but it may exit after
+a single result (on the first Active component or the first failure) or only after
+walking the entire Passive chain. How much of the chain it covers depends on the
+platform topology. On entry it points the cursor at the first component not
+already skipped and emits `ReadFirmware` and `VerifyFirmware` for that
+component. From then on it reacts to incoming firmware verification results.
 
 The machine is **device-agnostic**, exactly as CSA requires: the chain is a list
 of opaque `ComponentId`s with per-component `ComponentAttrs`. The core never
@@ -117,7 +152,7 @@ A component's `ComponentKind` decides what "verified" means:
 - **`Passive`** — a *symbiont device* (e.g. a NIC): no root of trust of its own.
   The eRoT's signature/SVN check is the only gate. On `VerificationPassed` the
   machine releases it (`ReleaseReset`), immediately starts the next component's
-  read, advances the cursor, and stays in `VerifyingPlatform`. This is the
+  read, advances the cursor, and stays in `PreSupervision`. This is the
   self-loop: the walk rolls forward through symbiont devices.
 - **`Active`** — a *SoC with an integrated iRoT* (e.g. a BMC or CPU with
   Caliptra): it must clear **two independent gates**. When it passes the eRoT
@@ -171,20 +206,21 @@ independently and in either order:
   finished its local self-verification and the component is operational (e.g. its
   MCTP channel is up).
 - The **next eRoT check** — the speculative `VerificationPassed` for the following
-  component, which the `VerifyingPlatform` handler kicked off on the way in.
+  component, which the `PreSupervision` handler kicked off on the way in.
 
 The `awaiting` field remembers which component's readiness is still outstanding;
-the state itself remembers whether the next component's eRoT verdict is still
-pending. Both must resolve before the walk moves on, which is why the machine can
-loop back into `AwaitingReady` several times:
+the state itself remembers whether the next component's firmware verification
+result is still pending. Both must resolve before the walk moves on, which is why
+the machine can loop back into `AwaitingReady` several times:
 
 - `ComponentReady` from the awaited component clears the readiness gate. If there
-  is still chain left it stays here (now waiting only on the next eRoT verdict);
+  is still chain left it stays here (now waiting only on the next firmware
+  verification result);
   if the chain is already complete it advances to `Ready`.
 - `ComponentReady` for any *other* id is stale or spurious and is ignored — a
   guard so a late or duplicated signal cannot push the walk forward incorrectly.
 - `VerificationPassed` for the next component advances the walk the same way
-  `VerifyingPlatform` does.
+  `PreSupervision` does.
 
 ### The boot-progress watchdog
 
@@ -203,9 +239,9 @@ this window behaves identically to the boot-time case: recovery first.
 
 ---
 
-## Phase 4 — The operational regime
+## Phase 4 — The `SupervisingPlatform` superstate
 
-**States: `Ready`, `Updating`, and the `Operational` superstate.**
+**States: `Ready`, `Updating`, `Recovering`, `AwaitingReady`, and the `SupervisingPlatform` superstate.**
 
 Once the whole chain is verified and released, the machine settles in `Ready`.
 On entry it clears the recovery bookkeeping (`retry_count`, `held`, `failed`) —
@@ -213,16 +249,16 @@ reaching `Ready` means the platform booted clean, so any prior recovery episode
 is over.
 
 `Ready` itself does only one state-changing thing: on `UpdateRequest` it moves to
-`Updating`, which asks the shell to authenticate and stage the new image, then
-waits for a verdict — `UpdateVerified` activates the staged image and returns to
+`Updating`, which issues a request to authenticate and stage the new image, then
+waits for a result — `UpdateVerified` activates the staged image and returns to
 `Ready`; `UpdateRejected` discards it and returns to `Ready`. A rejected update is
 explicitly **not** treated as corruption: the platform simply keeps running the
 image it already had.
 
-### The operational contract
+### The supervision contract
 
 `Ready`, `Updating`, `Recovering`, and `AwaitingReady` all sit under one shared
-parent, `Operational`, which handles the two events that must behave identically
+parent, `SupervisingPlatform`, which handles the two events that must behave identically
 no matter which of those states is active:
 
 - **`AttestationChallenge`** → the machine signs an attestation response and stays
@@ -240,9 +276,10 @@ no matter which of those states is active:
   re-enters the recovery flow rather than being ignored.
 
 Because these live in the parent, they apply during boot-time waiting
-(`AwaitingReady`) and during recovery (`Recovering`) just as much as in `Ready`.
-They do **not** apply in `PowerOnReset` or `VerifyingPlatform`, which sit outside
-`Operational`: the eRoT does not answer attestation challenges or act on
+(`AwaitingReady`) and during recovery (`SupervisingPlatform::Recovering`) just
+as much as in `Ready`.
+They do **not** apply in `PowerOnReset` or `PreSupervision`, which sit outside
+`SupervisingPlatform`: the eRoT does not answer attestation challenges or act on
 corruption reports while it is still establishing the chain.
 
 ---
@@ -319,8 +356,8 @@ the "feedback as data" principle; see the
 > **CSA:** *"Platform halt — stop the boot sequence entirely and enter a manual or
 > out-of-band recovery mode."*
 
-`Locked` is terminal. On entry it instructs the shell to hold every component in
-reset permanently (`LatchLockdown`), and from then on every event is ignored. The
+`Locked` is terminal. On entry `LatchLockdown` is emitted, holding every
+component in reset permanently, and from then on every event is ignored. The
 machine reaches here from exactly three places, all meaning "no trustworthy state
 could be established, so refuse to run one":
 
@@ -335,7 +372,7 @@ could be established, so refuse to run one":
 | CSA principle / policy | Where the machine upholds it |
 |---|---|
 | eRoT is the trust anchor, first to execute | `PowerOnReset` + `PowerGood` self-check gate |
-| No downstream boots until eRoT verifies it; held in reset until release | `VerifyingPlatform` emits `ReleaseReset` only on `VerificationPassed` |
+| No downstream boots until eRoT verifies it; held in reset until release | `PreSupervision` emits `ReleaseReset` only on `VerificationPassed` |
 | iRoT independently verifies; complementary eRoT/iRoT gates | `Active` → `AwaitingReady` on `ComponentReady`; `Passive` → immediate |
 | Device-agnostic ordered walk | Opaque `ComponentId` chain with `ComponentAttrs` |
 | Symbiont devices (NIST SP 800-193 §3.4) | `ComponentKind::Passive` |
@@ -344,7 +381,7 @@ could be established, so refuse to run one":
 | Recover first for every failed device | Any `VerificationFailed` → `Recovering` |
 | Classify only after recovery fails (Isolable/Cascading/halt) | `Recovering` applies the policy when `retry_count` reaches `max_retry` |
 | Platform halt on unrecoverable failure | `PlatformHalt` → `RecoveryFailed` → `Locked` |
-| Measurements form attestation evidence | `AttestationChallenge` → `SignAttestation` in `Operational` |
+| Measurements form attestation evidence | `AttestationChallenge` → `SignAttestation` in `SupervisingPlatform` |
 
 ---
 
