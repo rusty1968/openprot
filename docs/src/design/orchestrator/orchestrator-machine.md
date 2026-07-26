@@ -115,6 +115,17 @@ for it. The recovery-failure policy (`Isolable`/`Cascading`/`Required`) is
 **not** consulted here; it is applied later, in `Recovering`, only if the restore
 attempts are exhausted.
 
+> **Deliberate exclusion, not an oversight.** Because `PreSupervision` has no
+> `superstate()` link, a `CorruptionDetected` on an already-released component
+> is discarded (the `anything else` row above) for as long as the machine
+> keeps self-looping here — which, for an all-`Passive` chain, can span the
+> entire walk. This is a current, intended decision: CSA defines no mechanism
+> for detecting corruption of an already-released component's *live,
+> executing* state, so there is no confirmed CSA requirement forcing
+> continuous coverage from a component's own release. See
+> `corruption_during_presupervision_selfloop_is_dropped` in `lib.rs` and the
+> "Decision" note in [orchestrator-sm-walkthru.md](./orchestrator-sm-walkthru.md).
+
 ---
 
 ### `AwaitingReady`
@@ -272,8 +283,8 @@ When a leaf state returns `Outcome::Super`, `statig` calls the superstate handle
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
 | `AttestationChallenge` | — | `SignAttestation` | `Handled` (no transition — INV6) |
-| `CorruptionDetected(id)` | `attrs.required == true` | — | `Recovering` (failed = Some(id) — INV5) |
-| `CorruptionDetected(id)` | `attrs.required == false` | `AssertReset(id)` | `Handled` (component gated; machine stays in current state) |
+| `CorruptionDetected(id)` | `attrs.failure_policy == Required` | — | `Recovering` (failed = Some(id) — INV5) |
+| `CorruptionDetected(id)` | `attrs.failure_policy != Required` | `AssertReset(id)` | `Handled` (component gated; machine stays in current state) |
 | anything else | — | — | `Outcome::Super` (discarded) |
 
 ---
@@ -361,10 +372,10 @@ choice worth reconsidering.
 
 ## Invariant Verification
 
-The invariants for the `SupervisingPlatform` regime describe the whole regime, not one
-state at a time. Because the hierarchy stores each rule at that same whole-regime
-level, checking that the code matches the spec stays simple instead of turning
-into a state-by-state comparison.
+The invariants for the `SupervisingPlatform` superstate describe the whole
+superstate, not one state at a time. Because the hierarchy stores each rule at
+that same superstate level, checking that the code matches the spec stays
+simple instead of turning into a state-by-state comparison.
 
 Take INV6: *"an attestation challenge is answered in any `SupervisingPlatform`
 state without changing state."* In this design the rule itself is one line of code —
