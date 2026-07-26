@@ -85,7 +85,7 @@ A component's firmware failed its eRoT-side check. Regardless of the component's
 recovery-failure policy, the machine records it in `failed` and enters
 `Recovering` to attempt restoration. The component is **not** skipped here — it is
 held in reset (never released, so it never runs unverified code) and given a
-recovery attempt first. The `Isolable`/`Cascading`/`PlatformHalt` decision is
+recovery attempt first. The `Isolable`/`Cascading`/`Required` decision is
 deferred until recovery has actually failed.
 
 ### held components → skipped (no transition)
@@ -243,9 +243,9 @@ machine emits `AssertReset` for the component and each component whose
 `depends_on` names it, adds them all to `held`, clears `failed`, and re-walks to
 continue booting the remainder.
 
-### `Restored` [cap reached, `failed` is `PlatformHalt`] → `Recovering` (self, then `Locked`)
+### `Restored` [cap reached, `failed` is `Required`] → `Recovering` (self, then `Locked`)
 
-Restore attempts are exhausted and the component's policy is `PlatformHalt`,
+Restore attempts are exhausted and the component's policy is `Required`,
 meaning the platform cannot safely continue without it. Rather than jump straight
 to lockdown, the machine emits `Effect::Emit(RecoveryFailed)` — a follow-up event
 — and returns `Handled`. The orchestrator re-dispatches `RecoveryFailed`

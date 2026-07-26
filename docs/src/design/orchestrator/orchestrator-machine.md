@@ -34,7 +34,7 @@ stateDiagram-v2
 
     Recovering --> PreSupervision : Restored [retry < max_retry]<br/>(re-verify)
     Recovering --> PreSupervision : Restored [retry ≥ max_retry, Isolable/Cascading]<br/>/ AssertReset (skip — held)
-    Recovering --> Locked    : Restored [retry ≥ max_retry, PlatformHalt]<br/>(self-emits RecoveryFailed) / LatchLockdown
+    Recovering --> Locked    : Restored [retry ≥ max_retry, Required]<br/>(self-emits RecoveryFailed) / LatchLockdown
     Locked     --> Locked    : (terminal — all events ignored)
 ```
 
@@ -54,7 +54,7 @@ mutable state lives here.
 | `held` | `Vec<ComponentId, N>` | Components skipped because their recovery was **exhausted**: an `Isolable` component, or a `Cascading` component plus its `depends_on` dependents. Not verified during the walk — held in reset, cursor advances past them. Populated in `Recovering` when `retry_count` reaches `max_retry`; persists across re-walks; cleared on `Ready` entry. |
 | `failed` | `Option<ComponentId>` | The component whose recovery episode is in progress; `None` while healthy. Set on any `VerificationFailed`, `Timeout`, or `CorruptionDetected` of a managed component. |
 | `retry_count` | `u8` | Number of consecutive failed restore attempts in the current recovery episode. Cleared to 0 in `Ready`'s entry action — consecutive only (INV7). |
-| `max_retry` | `u8` | Shell-chosen ceiling for `retry_count`. When `retry_count >= max_retry` recovery is **exhausted** and the failed component's recovery-failure policy (`Isolable`/`Cascading`/`PlatformHalt`) is applied. |
+| `max_retry` | `u8` | Shell-chosen ceiling for `retry_count`. When `retry_count >= max_retry` recovery is **exhausted** and the failed component's recovery-failure policy (`Isolable`/`Cascading`/`Required`) is applied. |
 | `awaiting` | `Option<ComponentId>` | The `Active` component whose iRoT readiness is currently outstanding. `Some` only while in `AwaitingReady`; `None` everywhere else (INV9). |
 
 The effect buffer is deliberately **absent** from `Rot`. Effects flow through the
@@ -111,7 +111,7 @@ it persists across re-walks so exhausted components are not re-verified.
 
 When advancing the cursor, any component in `held` is skipped without
 verification — it stays in reset and no `ReadFirmware`/`VerifyFirmware` is emitted
-for it. The recovery-failure policy (`Isolable`/`Cascading`/`PlatformHalt`) is
+for it. The recovery-failure policy (`Isolable`/`Cascading`/`Required`) is
 **not** consulted here; it is applied later, in `Recovering`, only if the restore
 attempts are exhausted.
 
@@ -192,7 +192,7 @@ the restore, but the entire region is affected (not the whole chain — INV5).
 | `Restored(_)` | `retry_count + 1 < max_retry` | — | `PreSupervision` (re-verify — the restored image may pass) |
 | `Restored(_)` | cap reached, `failed` `Isolable` | `AssertReset(failed)` | `PreSupervision` (recovery exhausted: add `failed` to `held`, clear `failed`; the re-walk skips it) |
 | `Restored(_)` | cap reached, `failed` `Cascading` | `AssertReset(failed)` · `AssertReset(dependent…)` | `PreSupervision` (recovery exhausted: add `failed` + `depends_on` dependents to `held`, clear `failed`) |
-| `Restored(_)` | cap reached, `failed` `PlatformHalt` | `Effect::Emit(RecoveryFailed)` | `Handled` (orchestrator queues `RecoveryFailed` next — INV7) |
+| `Restored(_)` | cap reached, `failed` `Required` | `Effect::Emit(RecoveryFailed)` | `Handled` (orchestrator queues `RecoveryFailed` next — INV7) |
 | `RecoveryFailed` | — | — | `Locked` |
 | anything else | — | — | `Outcome::Super` → `SupervisingPlatform` |
 
@@ -209,19 +209,20 @@ component's **recovery-failure policy** decide what happens next:
   booting the rest of the platform.
 - `Cascading` — skip this component *and* its `depends_on` dependents; continue
   booting the remainder.
-- `PlatformHalt` — stop entirely: self-emit `RecoveryFailed`, which drives the
-  machine to `Locked`.
+- `Required` — stop entirely: self-emit `RecoveryFailed`, which drives the
+  machine to `Locked`. (CSA's narrative docs call this outcome "platform
+  halt" — same behavior, `Required` is the type-level name.)
 
 This mirrors the CSA Boot Sequence **Recovery Policy**: recovery (region restore)
 is attempted for *every* failed device first, and the `Isolable`/`Cascading`/
-`Platform-halt` classification applies only *after* a recovery attempt itself
+`Required` classification applies only *after* a recovery attempt itself
 fails.
 
 `Effect::Emit(RecoveryFailed)` is the *feedback-as-data* mechanism. It is easiest
 to understand by asking why the machine doesn't just jump straight to `Locked`
-when a `PlatformHalt` component's retry cap is hit.
+when a `Required` component's retry cap is hit.
 
-When a `PlatformHalt` component's last restore attempt fails, the machine has a
+When a `Required` component's last restore attempt fails, the machine has a
 decision to make: give up and lock down. It could act on that decision silently,
 transitioning directly from `Recovering` to `Locked` inside the handler. Instead
 it does something that
