@@ -23,7 +23,7 @@ encoding of that flow for a discrete eRoT running OpenPRoT.
 
 ## The shape of the journey
 
-At the highest level the machine has two operating regimes, a provisioning gate,
+At the highest level the machine has two operating modes, a provisioning gate,
 and a terminal exit:
 
 ```mermaid
@@ -58,14 +58,35 @@ events are not acted on. The moment `PreSupervision` exits, the supervision
 contract switches on and stays on: attestation is always answered and corruption
 is always acted on, regardless of whether the chain walk is still in progress.
 
-The threshold is one firmware verification result — passed or failed — not all
-components having passed verification. CSA does not define a safe window before
-supervision begins. A remote verifier may issue an attestation challenge as soon
-as the first component's measurements exist. A corruption can be detected the
-moment a component is running. The supervision contract — attestation always
-answered, corruption always acted on — must therefore hold continuously from the
-first result onward, including during recovery before anything has been released.
-Deferring supervision until `Ready` would leave a gap that CSA does not permit.
+The threshold *for an `Active` component* is one firmware verification result —
+passed or failed — not all components having passed verification: the next
+`VerificationPassed` moves the machine into `AwaitingReady`, which is linked to
+`SupervisingPlatform`, so supervision switches on at that point.
+
+For an all-`Passive` chain, no such threshold exists before `Ready`: the
+machine self-loops inside `PreSupervision`, which is *not* linked to
+`SupervisingPlatform`, for the entire walk. A corruption on an
+already-released `Passive` component reported during that self-loop is
+currently discarded (see
+`corruption_during_presupervision_selfloop_is_dropped` in `lib.rs`).
+
+**Decision: `PreSupervision` stays out of `SupervisingPlatform` for now.** It
+is tempting to argue that CSA implies supervision must hold continuously from
+each component's own release — a remote verifier could plausibly challenge as
+soon as the first component's measurements exist, and corruption could
+plausibly be detected the moment a component is running — but CSA does not
+actually say this anywhere. CSA's Resiliency chapter defines only two
+corruption-detection points (at-boot and at-rest/NVM-polling); neither is a
+monitor of an already-released component's *live, executing* state. NVM
+polling in particular re-checks the stored flash image, not what a component
+is currently executing, so it cannot stand in for that missing mechanism.
+Since CSA never defines a runtime-execution integrity monitor, or assigns
+responsibility for one, there is no confirmed CSA requirement forcing
+continuous coverage during the `PreSupervision` self-loop. Until CSA states
+otherwise, `PreSupervision` remains architecturally isolated from
+`SupervisingPlatform` and this gap is accepted as current, documented
+behavior rather than something to patch around. Revisit only if CSA is
+amended to define such a mechanism and assign it to the eRoT/PRoT.
 
 During recovery the machine temporarily exits supervision
 (`SupervisingPlatform::Recovering` → `PreSupervision`), gating all components
@@ -74,10 +95,10 @@ back out of `PreSupervision`.
 
 - **`PowerOnReset`** is the provisioning gate: the eRoT checks its own integrity
   before it vouches for anything else.
-- **`PreSupervision`** is regime one — supervision contract off: the eRoT walks
+- **`PreSupervision`** is mode one — supervision contract off: the eRoT walks
   the trust chain, verifying and releasing components without yet answering
   attestation challenges or acting on corruption.
-- **`SupervisingPlatform`** is regime two — supervision contract on: attestation,
+- **`SupervisingPlatform`** is mode two — supervision contract on: attestation,
   firmware updates, iRoT gating (`AwaitingReady`), and active recovery
   (`SupervisingPlatform::Recovering`) all run under one shared superstate.
   `PreSupervision` drives into it; `SupervisingPlatform::Recovering` drives
