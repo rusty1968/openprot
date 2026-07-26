@@ -46,7 +46,7 @@ stateDiagram-v2
 
     Recovering --> PreSupervision : Restored [retry < max_retry]
     Recovering --> PreSupervision : Restored [retry >= max_retry, Isolable or Cascading]
-    Recovering --> Locked            : Restored [retry >= max_retry, PlatformHalt]
+    Recovering --> Locked            : Restored [retry >= max_retry, Required]
 
     Locked --> [*]
 ```

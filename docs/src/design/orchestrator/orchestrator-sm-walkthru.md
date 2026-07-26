@@ -45,7 +45,7 @@ stateDiagram-v2
     PreSupervision --> Ready : Passive chain verified
     PreSupervision --> Recovering : verification failure
     Recovering --> PreSupervision : restored (re-verify)
-    Recovering --> Locked : recovery exhausted (PlatformHalt)
+    Recovering --> Locked : recovery exhausted (Required)
     Locked --> [*]
 ```
 
@@ -184,7 +184,7 @@ component is *not* skipped on the spot; it is held in reset (never released, so 
 never runs unverified code) and handed to the recovery phase. The decision about
 whether to eventually *skip* it or *halt* is deferred until recovery has actually
 been tried and failed — see [Phase 5](#phase-5--two-stage-recovery). This is the
-crux of CSA compliance: the classification (`Isolable`/`Cascading`/`PlatformHalt`)
+crux of CSA compliance: the classification (`Isolable`/`Cascading`/`Required`)
 is a *recovery-failure* policy, not a first-failure policy.
 
 ---
@@ -328,17 +328,17 @@ decide the outcome — this is the CSA stage-2 classification:
 |---|---|---|
 | `Isolable` | Skip just this component: hold it in reset (`held`), continue booting the rest. | *Isolable — skip the failed device and continue.* |
 | `Cascading` | Skip this component **and** its `depends_on` dependents, then continue. | *Cascading — skip the failed device and any device configured as dependent on it.* |
-| `PlatformHalt` | Stop entirely: self-emit `RecoveryFailed`, which drives the machine to `Locked`. | *Platform halt — stop the boot sequence entirely and enter manual/out-of-band recovery.* |
+| `Required` | Stop entirely: self-emit `RecoveryFailed`, which drives the machine to `Locked`. | *Platform halt — stop the boot sequence entirely and enter manual/out-of-band recovery.* |
 
 The essential point — and the reason this matches CSA — is the ordering:
 **recovery is attempted for every failed component first**, and `Isolable` /
-`Cascading` / `PlatformHalt` are consulted **only after** a recovery attempt
+`Cascading` / `Required` are consulted **only after** a recovery attempt
 itself fails. A component is never skipped without first being given a chance to
 recover.
 
 ### Lockdown as visible data
 
-When a `PlatformHalt` component exhausts recovery, the machine does not silently
+When a `Required` component exhausts recovery, the machine does not silently
 jump to `Locked`. It emits `RecoveryFailed` as an *effect* — a follow-up event —
 which the orchestrator re-dispatches immediately, and *that* event drives the
 transition to `Locked`. The give-up decision therefore appears in the effect
@@ -363,7 +363,7 @@ could be established, so refuse to run one":
 
 1. Power-on with an unprovisioned eRoT.
 2. Power-on with a failed eRoT self-check.
-3. A `PlatformHalt` component whose recovery was exhausted.
+3. A `Required` component whose recovery was exhausted.
 
 ---
 
@@ -380,7 +380,7 @@ could be established, so refuse to run one":
 | Recovery scope = recovery region (restore together) | `RegionId`; `RestoreGoldenImage` restores the whole region |
 | Recover first for every failed device | Any `VerificationFailed` → `Recovering` |
 | Classify only after recovery fails (Isolable/Cascading/halt) | `Recovering` applies the policy when `retry_count` reaches `max_retry` |
-| Platform halt on unrecoverable failure | `PlatformHalt` → `RecoveryFailed` → `Locked` |
+| Platform halt on unrecoverable failure | `Required` → `RecoveryFailed` → `Locked` |
 | Measurements form attestation evidence | `AttestationChallenge` → `SignAttestation` in `SupervisingPlatform` |
 
 ---
