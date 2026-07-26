@@ -266,13 +266,25 @@ pub enum State {
     Locked,
 }
 
-/// Superstate entered on the eRoT's first component release and held until
-/// [`State::Locked`]. Provides two platform-wide guarantees that must hold
-/// across all four sub-states ([`State::AwaitingReady`], [`State::Ready`],
-/// [`State::Updating`], [`State::Recovering`]):
+/// Superstate entered once the eRoT exits [`State::PreSupervision`] — i.e. on
+/// release of the first `Active` component, or once the whole chain has
+/// finished if it is all-`Passive`. Provides two platform-wide guarantees
+/// that must hold across all four sub-states ([`State::AwaitingReady`],
+/// [`State::Ready`], [`State::Updating`], [`State::Recovering`]):
 ///
 /// - Attestation challenges are always answered.
 /// - Corruption of a required component always triggers recovery.
+///
+/// Note: [`State::PreSupervision`] itself is *not* linked to this superstate
+/// (its `superstate()` returns `None`), so neither guarantee holds while a
+/// component is still being walked there. This is a deliberate, current
+/// decision, not an oversight to be silently patched: CSA defines no
+/// mechanism for detecting corruption of an already-released component's
+/// *live, executing* state (NVM polling only re-checks stored flash images),
+/// so there is no confirmed CSA requirement forcing continuous coverage
+/// during this self-loop. Keep `PreSupervision` excluded unless/until CSA is
+/// amended to define such a mechanism. See
+/// `corruption_during_presupervision_selfloop_is_dropped` below.
 #[derive(Debug)]
 pub enum Superstate<'sub> {
     SupervisingPlatform(PhantomData<&'sub ()>),
@@ -850,6 +862,37 @@ mod tests {
             &[Effect::ReadFirmware(C0), Effect::VerifyFirmware(C0)]
         );
         assert_eq!(state, State::PreSupervision);
+    }
+
+    /// ACCEPTED GAP, KEPT DELIBERATELY: once a component has been released,
+    /// `PreSupervision`'s `superstate()` returns `None`, so `CorruptionDetected`
+    /// on it falls to `Outcome::Super` with nowhere to go and is silently
+    /// discarded while the machine is still self-looping through the rest of
+    /// a multi-component chain (all-`Passive` chains only — an `Active`
+    /// component in the chain incidentally closes this gap via `AwaitingReady`,
+    /// which *is* linked to `SupervisingPlatform`).
+    ///
+    /// This test documents current, intended behavior. CSA defines no
+    /// mechanism for detecting corruption of an already-released component's
+    /// *live, executing* state — only at-boot and at-rest/NVM-polling
+    /// detection, and NVM polling only re-checks stored flash images, not
+    /// what a component is currently executing. With no confirmed CSA
+    /// requirement for continuous coverage from a component's own release,
+    /// `PreSupervision` stays excluded from `SupervisingPlatform`. Do not
+    /// "fix" this by linking `PreSupervision` into `SupervisingPlatform`
+    /// unless CSA is amended to define such a mechanism.
+    #[test]
+    fn corruption_during_presupervision_selfloop_is_dropped() {
+        let (effects, state) = drive(
+            passive_required(&[C0, C1, C2]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0), // released; walk continues (still PreSupervision)
+                Event::CorruptionDetected(C0), // C0 already released; currently a no-op
+            ],
+        );
+        assert_eq!(state, State::PreSupervision);
+        assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
     }
 
     /// INV7 (feedback-as-data): after MAX_RETRY restores the core self-emits
