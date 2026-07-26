@@ -30,10 +30,8 @@ use statig::blocking::{
 use statig::Outcome;
 
 // Internal capacities — these follow from how the machine works, not from the
-// deployment. The board owns CAPACITY (chain length) and max_retry.
-
-/// Max effects one event can emit. The busiest handler emits 3; 8 is plenty.
-const EFFECT_CAP: usize = 8;
+// deployment. The board owns `N` (chain length), `E` (effect-buffer size) and
+// max_retry.
 
 /// Max pending events while settling one outside event (original + Emit follow-ups).
 const PENDING_CAP: usize = 8;
@@ -276,39 +274,57 @@ pub enum State {
 /// - Corruption of a required component always triggers recovery.
 ///
 /// Note: [`State::PreSupervision`] itself is *not* linked to this superstate
-/// (its `superstate()` returns `None`), so neither guarantee holds while a
-/// component is still being walked there. This is a deliberate, current
-/// decision, not an oversight to be silently patched: CSA defines no
-/// mechanism for detecting corruption of an already-released component's
-/// *live, executing* state (NVM polling only re-checks stored flash images),
-/// so there is no confirmed CSA requirement forcing continuous coverage
-/// during this self-loop. Keep `PreSupervision` excluded unless/until CSA is
-/// amended to define such a mechanism. See
-/// `corruption_during_presupervision_selfloop_is_dropped` below.
+/// (its `superstate()` returns `None`), so the attestation guarantee does not
+/// hold while a component is still being walked there — CSA defines no
+/// requirement to answer challenges before the chain walk completes, so
+/// `AttestationChallenge` is left unhandled in `PreSupervision` (discarded via
+/// `Outcome::Super`).
+///
+/// The corruption guarantee, however, *does* hold in `PreSupervision`:
+/// [`State::PreSupervision`] handles [`Event::CorruptionDetected`] directly
+/// (via [`Rot::handle_corruption`]) rather than through this superstate,
+/// since linking the whole superstate in would also pull in the attestation
+/// behavior above. CSA defines no mechanism guaranteeing a corruption report
+/// arrives for an already-released component's *live, executing* state (its
+/// only at-rest mechanism — background NVM integrity polling — is explicitly
+/// scoped to "at rest"/"between boots", not an in-progress boot's chain
+/// walk), but that only means such a report isn't guaranteed to exist — it's
+/// not a reason to discard one if it does arrive. See
+/// `corruption_during_presupervision_selfloop_triggers_recovery` below.
 #[derive(Debug)]
 pub enum Superstate<'sub> {
     SupervisingPlatform(PhantomData<&'sub ()>),
 }
 
-/// The effect buffer handed to every handler (statig's `Context`).
+/// The effect buffer handed to every handler (statig's `Context`), sized to `E`.
 ///
 /// The only thing a handler can do to the outside world is call `emit`. The
 /// orchestrator gives each event a fresh `Sink` and drains it afterward.
-pub struct Sink {
-    effects: heapless::Vec<Effect, EFFECT_CAP>,
+///
+/// `E` is bounded from below by the chain length: the worst single event is a
+/// full cascade (up to `N` `AssertReset`s) plus the destination
+/// `PreSupervision` entry's `ReadFirmware`/`VerifyFirmware` (2), all landing in
+/// one `Sink`. `Rot::new` refuses to compile unless `E >= N + 2`, so a machine
+/// that builds can never overflow this buffer.
+pub struct Sink<const E: usize> {
+    effects: heapless::Vec<Effect, E>,
 }
 
-impl Sink {
+impl<const E: usize> Sink<E> {
     fn new() -> Self {
         Self {
             effects: heapless::Vec::new(),
         }
     }
 
-    /// Append one effect. Overflow is silently dropped rather than panicking
-    /// (`no_std` safety); overflow means a logic bug.
+    /// Append one effect. `E` is sized so overflow is impossible for a machine
+    /// that compiles (the `E >= N + 2` floor in `Rot::new`); the panic is a
+    /// loud, fail-closed backstop for a future handler that emits beyond the
+    /// proven worst case, never a silent drop of a security-critical effect.
     pub fn emit(&mut self, effect: Effect) {
-        let _ = self.effects.push(effect);
+        if self.effects.push(effect).is_err() {
+            panic!("effect buffer overflow: E must be >= chain length N + 2");
+        }
     }
 
     pub fn effects(&self) -> &[Effect] {
@@ -317,8 +333,9 @@ impl Sink {
 }
 
 /// Shared storage: data that persists across events. `N` is the chain capacity
-/// — a board choice; the core sets no default.
-pub struct Rot<const N: usize> {
+/// and `E` the effect-buffer size — both board choices; the core sets no
+/// default. `E` must be at least `N + 2` (enforced in [`Rot::new`]).
+pub struct Rot<const N: usize, const E: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
     cursor: u8,
     /// Components skipped because their recovery was exhausted under
@@ -331,10 +348,21 @@ pub struct Rot<const N: usize> {
     /// The `Active` component whose iRoT readiness is outstanding. `Some` only
     /// while in `AwaitingReady` (INV9).
     awaiting: Option<ComponentId>,
+    /// Ties the effect-buffer size `E` to this type (zero-sized).
+    _effect_cap: PhantomData<[u8; E]>,
 }
 
-impl<const N: usize> Rot<N> {
+impl<const N: usize, const E: usize> Rot<N, E> {
+    /// Compile-time floor: the effect buffer must hold a full cascade (`N`
+    /// `AssertReset`s) plus the destination `PreSupervision` entry's two
+    /// effects. Forced by `new` below, so an under-sized `E` fails to build.
+    const EFFECT_CAP_OK: () = assert!(
+        E >= N + 2,
+        "effect buffer E must be >= chain length N + 2"
+    );
+
     pub fn new(chain: heapless::Vec<(ComponentId, ComponentAttrs), N>, max_retry: u8) -> Self {
+        let () = Self::EFFECT_CAP_OK;
         Self {
             chain,
             cursor: 0,
@@ -343,6 +371,7 @@ impl<const N: usize> Rot<N> {
             retry_count: 0,
             max_retry,
             awaiting: None,
+            _effect_cap: PhantomData,
         }
     }
 
@@ -361,7 +390,7 @@ impl<const N: usize> Rot<N> {
     /// found. If the rest of the chain is exhausted or entirely held, sets
     /// `cursor` to a past-the-end sentinel (`chain.len()`) and returns
     /// `false` — the caller should treat that as "chain done".
-    fn advance_to_next_unheld(&mut self, ctx: &mut Sink, start_idx: usize) -> bool {
+    fn advance_to_next_unheld(&mut self, ctx: &mut Sink<E>, start_idx: usize) -> bool {
         let mut idx = start_idx;
         while let Some(&(id, _)) = self.chain.get(idx) {
             if !self.is_held(id) {
@@ -378,10 +407,39 @@ impl<const N: usize> Rot<N> {
         false
     }
 
+    /// Shared `CorruptionDetected` handling, called from both `PreSupervision`
+    /// (directly) and `SupervisingPlatform` (via its superstate handler).
+    /// Respects the per-component policy encoded at chain-build time:
+    /// `FailurePolicy::Required` → recover (halt chain, restore, re-walk);
+    /// `Isolable`/`Cascading` → gate the component: assert its reset and add
+    /// it to `held`, so it stays in reset and is skipped on every subsequent
+    /// re-walk rather than being silently re-released. No recovery episode is
+    /// started. This mirrors the exhausted-recovery hold path (the only other
+    /// place that gates a running component).
+    fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome<State> {
+        let required = self
+            .attrs_of(id)
+            .map(|attrs| matches!(attrs.failure_policy, FailurePolicy::Required))
+            .unwrap_or(true); // unknown id: treat as required (safe default)
+        if required {
+            self.failed = Some(id);
+            Outcome::Transition(State::Recovering)
+        } else if !self.is_held(id) {
+            // Gate and hold: assert reset and remember it, so a later re-walk
+            // (e.g. after a required component recovers) skips this component
+            // instead of re-releasing one we already found corrupt.
+            ctx.emit(Effect::AssertReset(id));
+            let _ = self.held.push(id);
+            Outcome::Handled
+        } else {
+            Outcome::Handled
+        }
+    }
+
     /// Hold `root` and cascade-hold every component whose `depends_on`
     /// (transitively) names it. Emits `AssertReset` for each newly held
     /// component, including `root` itself.
-    fn cascade_hold(&mut self, ctx: &mut Sink, root: ComponentId) {
+    fn cascade_hold(&mut self, ctx: &mut Sink<E>, root: ComponentId) {
         if !self.is_held(root) {
             ctx.emit(Effect::AssertReset(root));
             let _ = self.held.push(root);
@@ -403,9 +461,9 @@ impl<const N: usize> Rot<N> {
     }
 }
 
-impl<const N: usize> IntoStateMachine for Rot<N> {
+impl<const N: usize, const E: usize> IntoStateMachine for Rot<N, E> {
     type Event<'evt> = Event;
-    type Context<'ctx> = Sink;
+    type Context<'ctx> = Sink<E>;
     type State = State;
     type Superstate<'sub> = Superstate<'sub>;
 
@@ -414,8 +472,8 @@ impl<const N: usize> IntoStateMachine for Rot<N> {
     }
 }
 
-impl<const N: usize> StatigState<Rot<N>> for State {
-    fn call_handler(&mut self, rot: &mut Rot<N>, event: &Event, ctx: &mut Sink) -> Outcome<State> {
+impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
+    fn call_handler(&mut self, rot: &mut Rot<N, E>, event: &Event, ctx: &mut Sink<E>) -> Outcome<State> {
         match self {
             State::PowerOnReset => match event {
                 Event::PowerGood(PowerOnResult::Provisioned) => {
@@ -455,6 +513,15 @@ impl<const N: usize> StatigState<Rot<N>> for State {
                     rot.failed = Some(*id);
                     Outcome::Transition(State::Recovering)
                 }
+                // Minimal fix: react to a corruption report if one arrives,
+                // even though `PreSupervision` isn't linked to
+                // `SupervisingPlatform`. Not acting on data we already have
+                // would be strictly worse than acting on it, regardless of
+                // whether CSA defines a mechanism that guarantees this event
+                // exists in the first place. `AttestationChallenge` is left
+                // unhandled here (falls through to `Outcome::Super` and is
+                // discarded) — that's a separate question.
+                Event::CorruptionDetected(id) => rot.handle_corruption(*id, ctx),
                 _ => Outcome::Super,
             },
 
@@ -549,7 +616,7 @@ impl<const N: usize> StatigState<Rot<N>> for State {
         }
     }
 
-    fn call_entry_action(&mut self, rot: &mut Rot<N>, ctx: &mut Sink) {
+    fn call_entry_action(&mut self, rot: &mut Rot<N, E>, ctx: &mut Sink<E>) {
         match self {
             State::PreSupervision => {
                 rot.awaiting = None;
@@ -586,34 +653,15 @@ impl<const N: usize> StatigState<Rot<N>> for State {
     }
 }
 
-impl<const N: usize> StatigSuperstate<Rot<N>> for Superstate<'_> {
-    fn call_handler(&mut self, rot: &mut Rot<N>, event: &Event, ctx: &mut Sink) -> Outcome<State> {
+impl<const N: usize, const E: usize> StatigSuperstate<Rot<N, E>> for Superstate<'_> {
+    fn call_handler(&mut self, rot: &mut Rot<N, E>, event: &Event, ctx: &mut Sink<E>) -> Outcome<State> {
         match self {
             Superstate::SupervisingPlatform(_) => match event {
                 Event::AttestationChallenge => {
                     ctx.emit(Effect::SignAttestation);
                     Outcome::Handled
                 }
-                Event::CorruptionDetected(id) => {
-                    // Respect the per-component policy encoded at chain-build time.
-                    // `FailurePolicy::Required` → recover (halt chain, restore, re-walk)
-                    // `Isolable` / `Cascading` → gate the component; it stays running
-                    //   but is not considered trusted by the core, and no recovery
-                    //   episode is started (it is already known to be skippable).
-                    let required = rot
-                        .attrs_of(*id)
-                        .map(|attrs| matches!(attrs.failure_policy, FailurePolicy::Required))
-                        .unwrap_or(true); // unknown id: treat as required (safe default)
-                    if required {
-                        rot.failed = Some(*id);
-                        Outcome::Transition(State::Recovering)
-                    } else {
-                        // Isolable/Cascading: gate the component (put it back in
-                        // reset) but do not halt the chain or trigger recovery.
-                        ctx.emit(Effect::AssertReset(*id));
-                        Outcome::Handled
-                    }
-                }
+                Event::CorruptionDetected(id) => rot.handle_corruption(*id, ctx),
                 _ => Outcome::Super,
             },
         }
@@ -628,11 +676,11 @@ pub trait Platform {
 
 /// A handle for a caller's own event loop. Wraps the statig machine so callers
 /// only depend on this crate, never on statig types directly.
-pub struct Orchestrator<const N: usize> {
-    machine: StateMachine<Rot<N>>,
+pub struct Orchestrator<const N: usize, const E: usize> {
+    machine: StateMachine<Rot<N, E>>,
 }
 
-impl<const N: usize> Orchestrator<N> {
+impl<const N: usize, const E: usize> Orchestrator<N, E> {
     pub fn new(chain: heapless::Vec<(ComponentId, ComponentAttrs), N>, max_retry: u8) -> Self {
         Self {
             machine: Rot::new(chain, max_retry).state_machine(),
@@ -654,7 +702,7 @@ impl<const N: usize> Orchestrator<N> {
             let ev = pending[i];
             i += 1;
 
-            let mut buf = Sink::new();
+            let mut buf = Sink::<E>::new();
             self.machine.handle_with_context(&ev, &mut buf);
 
             for &effect in buf.effects() {
@@ -688,6 +736,7 @@ mod tests {
     const BOOT: Event = Event::PowerGood(PowerOnResult::Provisioned);
 
     const CAPACITY: usize = 8;
+    const ECAP: usize = CAPACITY + 2;
     const MAX_RETRY: u8 = 3;
 
     fn chain(
@@ -732,7 +781,7 @@ mod tests {
         chain: heapless::Vec<(ComponentId, ComponentAttrs), CAPACITY>,
         script: &[Event],
     ) -> (Vec<Effect>, State) {
-        let mut orch = Orchestrator::new(chain, MAX_RETRY);
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(chain, MAX_RETRY);
         let mut platform = Recorder::new();
         for &event in script {
             orch.dispatch(&mut platform, event);
@@ -864,35 +913,27 @@ mod tests {
         assert_eq!(state, State::PreSupervision);
     }
 
-    /// ACCEPTED GAP, KEPT DELIBERATELY: once a component has been released,
-    /// `PreSupervision`'s `superstate()` returns `None`, so `CorruptionDetected`
-    /// on it falls to `Outcome::Super` with nowhere to go and is silently
-    /// discarded while the machine is still self-looping through the rest of
-    /// a multi-component chain (all-`Passive` chains only — an `Active`
-    /// component in the chain incidentally closes this gap via `AwaitingReady`,
-    /// which *is* linked to `SupervisingPlatform`).
-    ///
-    /// This test documents current, intended behavior. CSA defines no
-    /// mechanism for detecting corruption of an already-released component's
-    /// *live, executing* state — only at-boot and at-rest/NVM-polling
-    /// detection, and NVM polling only re-checks stored flash images, not
-    /// what a component is currently executing. With no confirmed CSA
-    /// requirement for continuous coverage from a component's own release,
-    /// `PreSupervision` stays excluded from `SupervisingPlatform`. Do not
-    /// "fix" this by linking `PreSupervision` into `SupervisingPlatform`
-    /// unless CSA is amended to define such a mechanism.
+    /// `PreSupervision` reacts to `CorruptionDetected` directly (via
+    /// [`Rot::handle_corruption`]), even though it isn't linked to
+    /// `SupervisingPlatform` (so `AttestationChallenge` is still discarded
+    /// there — a separate question). CSA defines no mechanism guaranteeing a
+    /// corruption report exists for an already-released component's *live,
+    /// executing* state (at-rest/NVM-polling is scoped to "at
+    /// rest"/"between boots", not an in-progress boot's chain walk) — but
+    /// that only means such a report isn't guaranteed to arrive, not that one
+    /// should be ignored if it does.
     #[test]
-    fn corruption_during_presupervision_selfloop_is_dropped() {
+    fn corruption_during_presupervision_selfloop_triggers_recovery() {
         let (effects, state) = drive(
             passive_required(&[C0, C1, C2]),
             &[
                 BOOT,
                 Event::VerificationPassed(C0), // released; walk continues (still PreSupervision)
-                Event::CorruptionDetected(C0), // C0 already released; currently a no-op
+                Event::CorruptionDetected(C0), // C0 already released, but caught anyway
             ],
         );
-        assert_eq!(state, State::PreSupervision);
-        assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
+        assert_eq!(state, State::Recovering);
+        assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
     }
 
     /// INV7 (feedback-as-data): after MAX_RETRY restores the core self-emits
@@ -922,7 +963,7 @@ mod tests {
         let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
         c.push((C0, ComponentAttrs::passive_required()))
             .expect("fits");
-        let mut orch = Orchestrator::new(c, 2);
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 2);
         let mut effects = Vec::new();
 
         for ev in [
@@ -955,7 +996,7 @@ mod tests {
         let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
         c.push((C0, ComponentAttrs::passive_required()))
             .expect("fits");
-        let mut orch = Orchestrator::new(c, 1);
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 1);
         let mut effects = Vec::new();
         for ev in [
             BOOT,
@@ -977,7 +1018,7 @@ mod tests {
             c.push((id, ComponentAttrs::passive_required()))
                 .expect("3 fits");
         }
-        let mut orch = Orchestrator::new(c, MAX_RETRY);
+        let mut orch = Orchestrator::<3, 5>::new(c, MAX_RETRY);
         let mut effects = Vec::new();
         for ev in [
             BOOT,
@@ -1132,6 +1173,40 @@ mod tests {
         assert!(!effects.contains(&Effect::LatchLockdown));
     }
 
+    /// Runtime corruption of an `Isolable` component holds it in reset: it is
+    /// added to `held`, so a later re-walk triggered by a *required*
+    /// component's recovery skips it instead of re-releasing a component we
+    /// already found corrupt.
+    #[test]
+    fn isolable_runtime_corruption_holds_across_rewalk() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::passive_required()),
+                (C1, ComponentAttrs::passive_isolable()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationPassed(C1),
+                Event::CorruptionDetected(C1), // isolable → gate + hold
+                Event::CorruptionDetected(C0), // required → Recovering
+                Event::Restored(C0),           // re-walk from top
+                Event::VerificationPassed(C0), // C1 stays held → chain done
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        // C1 is released exactly once (the initial walk); the post-corruption
+        // re-walk must not release it again.
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|e| **e == Effect::ReleaseReset(C1))
+                .count(),
+            1,
+        );
+        assert!(effects.contains(&Effect::AssertReset(C1)));
+    }
+
     /// Runtime corruption of a `Required` component still triggers
     /// recovery as before.
     #[test]
@@ -1269,7 +1344,7 @@ mod tests {
             heapless::Vec::new();
         c.push((C0, ComponentAttrs::passive_required())).unwrap();
         // max_retry = 1 so the first failed restore latches immediately.
-        let mut orch = Orchestrator::new(c, 1);
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 1);
         let mut effects: Vec<Effect> = Vec::new();
 
         for ev in [BOOT, Event::VerificationFailed(C0), Event::Restored(C0)] {
@@ -1325,7 +1400,7 @@ mod tests {
     /// before ComponentReady has arrived. Verifies both presence and order.
     #[test]
     fn speculative_read_effects_are_emitted_together() {
-        let mut orch = Orchestrator::<CAPACITY>::new(
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
             chain(&[
                 (C0, ComponentAttrs::active_required()),
                 (C1, ComponentAttrs::passive_required()),
