@@ -24,7 +24,6 @@ stateDiagram-v2
     AwaitingReady --> Recovering    : Timeout(id) [id == awaiting]<br/>/ RestoreGoldenImage
 
     state SupervisingPlatform {
-        [*]           --> Ready
         Ready         --> Updating      : UpdateRequest<br/>/ AuthenticateUpdate · StageUpdate
         Updating      --> Ready         : UpdateVerified / ActivateUpdate
         Updating      --> Ready         : UpdateRejected / DiscardStaged
