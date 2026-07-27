@@ -26,6 +26,7 @@ impl ComponentId {
 /// Corresponds directly to the two-tier model in the CSA architecture document:
 /// `Active` = eRoT gate + iRoT gate; `Passive` = eRoT gate only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum ComponentKind {
     /// Has an integrated iRoT (e.g. Caliptra). Both eRoT-side (signature + SVN)
     /// and iRoT-side (local self-verification) checks apply. The machine waits in
@@ -46,6 +47,7 @@ pub enum ComponentKind {
 /// (The narrative design docs sometimes call the `Required` outcome "platform
 /// halt" — same behavior, this is the type-level name.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum FailurePolicy {
     /// Stop the boot sequence entirely: self-emits [`Event::RecoveryFailed`],
     /// which drives the machine to [`State::Locked`].
@@ -163,6 +165,7 @@ impl ComponentAttrs {
 
 /// The result of the board's power-on checks, delivered inside [`Event::PowerGood`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum PowerOnResult {
     /// Self-verified and provisioned.
     Provisioned,
@@ -174,21 +177,35 @@ pub enum PowerOnResult {
 
 /// Everything the outside world can tell the state machine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum Event {
     /// Power-on, carrying the shell's self-verification and provisioning result.
     PowerGood(PowerOnResult),
+    /// The eRoT's signature + SVN check on this component passed.
     VerificationPassed(ComponentId),
+    /// The eRoT's signature + SVN check on this component failed.
     VerificationFailed(ComponentId),
-    /// An `Active` component's iRoT has finished local verification and is ready
-    /// (e.g. MCTP channel established).
+    /// An `Active` component's iRoT has finished local verification and is ready.
     ComponentReady(ComponentId),
+    /// A challenger has requested a signed attestation.
     AttestationChallenge,
+    /// A firmware update has been requested.
     UpdateRequest,
+    /// The staged update authenticated successfully.
     UpdateVerified,
+    /// The staged update failed authentication.
     UpdateRejected,
+    /// This component was found corrupt at runtime.
     CorruptionDetected(ComponentId),
+    /// This component's golden image has been restored.
     Restored(ComponentId),
+    /// A required component's recovery was exhausted.
     RecoveryFailed,
+    /// The shell could not carry out an emitted [`Effect`]; fail-closed, it
+    /// latches to [`State::Locked`] from any state. Injected by the driver when
+    /// a [`Platform::execute`](crate::Platform::execute) call fails; never
+    /// produced by a handler.
+    EffectFailed,
 }
 
 /// Everything the state machine can ask the outside world to do.
@@ -197,6 +214,7 @@ pub enum Event {
 /// queues the carried event for immediate handling, making follow-up events
 /// visible in the effect trace instead of hidden state changes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum Effect {
     ReadFirmware(ComponentId),
     VerifyFirmware(ComponentId),
@@ -221,6 +239,7 @@ pub enum Effect {
 /// The states the machine can be in. None carry data; all mutable state lives
 /// in [`Rot`](crate::Rot) shared storage.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum State {
     PowerOnReset,
     PreSupervision,
@@ -260,6 +279,7 @@ pub struct Chain<const N: usize> {
 
 /// Why a `heapless::Vec` of components is not a valid [`Chain`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum ChainError {
     /// The chain has no components.
     Empty,
