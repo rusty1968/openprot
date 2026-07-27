@@ -23,12 +23,6 @@
 
 use core::marker::PhantomData;
 
-use statig::Outcome;
-use statig::blocking::{
-    IntoStateMachine, IntoStateMachineExt as _, State as StatigState, StateMachine,
-    Superstate as StatigSuperstate,
-};
-
 mod model;
 pub use model::*;
 
@@ -53,39 +47,17 @@ const _: () = assert!(
     "PENDING_CAP must hold one outside event + one Emit follow-up + one EffectFailed",
 );
 
-/// Superstate entered once the eRoT exits [`State::PreSupervision`] — i.e. on
-/// release of the first `Active` component, or once the whole chain has
-/// finished if it is all-`Passive`. Provides two platform-wide guarantees
-/// that must hold across all four sub-states ([`State::AwaitingReady`],
-/// [`State::Ready`], [`State::Updating`], [`State::Recovering`]):
-///
-/// - Attestation challenges are always answered.
-/// - Corruption of a required component always triggers recovery.
-///
-/// Note: [`State::PreSupervision`] itself is *not* linked to this superstate
-/// (its `superstate()` returns `None`), so the attestation guarantee does not
-/// hold while a component is still being walked there — CSA defines no
-/// requirement to answer challenges before the chain walk completes, so
-/// `AttestationChallenge` is left unhandled in `PreSupervision` (discarded via
-/// `Outcome::Super`).
-///
-/// The corruption guarantee, however, *does* hold in `PreSupervision`:
-/// [`State::PreSupervision`] handles [`Event::CorruptionDetected`] directly
-/// (via [`Rot::handle_corruption`]) rather than through this superstate,
-/// since linking the whole superstate in would also pull in the attestation
-/// behavior above. CSA defines no mechanism guaranteeing a corruption report
-/// arrives for an already-released component's *live, executing* state (its
-/// only at-rest mechanism — background NVM integrity polling — is explicitly
-/// scoped to "at rest"/"between boots", not an in-progress boot's chain
-/// walk), but that only means such a report isn't guaranteed to exist — it's
-/// not a reason to discard one if it does arrive. See
-/// `corruption_during_presupervision_selfloop_triggers_recovery` below.
-#[derive(Debug)]
-pub enum Superstate<'sub> {
-    SupervisingPlatform(PhantomData<&'sub ()>),
+/// Result of dispatching one event to a state (or its superstate).
+enum Outcome {
+    /// Event consumed; state unchanged; no entry action runs.
+    Handled,
+    /// Change to this state and run its entry action.
+    Transition(State),
+    /// Not handled here; defer to the superstate (or discard if none).
+    Super,
 }
 
-/// The effect buffer handed to every handler (statig's `Context`), sized to `E`.
+/// The effect buffer handed to every handler, sized to `E`.
 ///
 /// The only thing a handler can do to the outside world is call `emit`. The
 /// orchestrator gives each event a fresh `Sink` and drains it afterward.
@@ -296,7 +268,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// put, so a later re-walk skips it instead of silently re-releasing one we
     /// already found corrupt; `Required`/unknown → recover first (the
     /// halt-on-exhaustion decision happens later in `Recovering`).
-    fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome<State> {
+    fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome {
         match self.gate_by_policy(ctx, id) {
             Gating::Gated => Outcome::Handled,
             Gating::NotGated => {
@@ -331,25 +303,18 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     }
 }
 
-impl<const N: usize, const E: usize> IntoStateMachine for Rot<N, E> {
-    type Event<'evt> = Event;
-    type Context<'ctx> = Sink<E>;
-    type State = State;
-    type Superstate<'sub> = Superstate<'sub>;
-
-    fn initial() -> State {
-        State::PowerOnReset
-    }
-}
-
-impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
-    fn call_handler(
-        &mut self,
-        rot: &mut Rot<N, E>,
-        event: &Event,
-        ctx: &mut Sink<E>,
-    ) -> Outcome<State> {
-        match self {
+/// The reducer proper: the per-state handlers, the superstate handler, and the
+/// entry actions. These are pure functions of `(stored data, state, event)` —
+/// they mutate [`Rot`]'s storage and push [`Effect`]s into the [`Sink`], and
+/// return an [`Outcome`] describing what should happen to the current state.
+/// Applying that outcome is the engine's job ([`Orchestrator::step`]).
+impl<const N: usize, const E: usize> Rot<N, E> {
+    /// Dispatch `event` to the handler for `state` (the leaf state). An
+    /// [`Outcome::Super`] here means "not handled at this level" — the engine
+    /// forwards to [`handle_supervising`](Self::handle_supervising) if `state`
+    /// is supervised, and otherwise discards the event.
+    fn handle(&mut self, state: State, event: &Event, ctx: &mut Sink<E>) -> Outcome {
+        match state {
             State::PowerOnReset => match event {
                 Event::PowerGood(PowerOnResult::Provisioned) => {
                     Outcome::Transition(State::PreSupervision)
@@ -369,14 +334,14 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 Event::VerificationPassed(id) => {
                     // The component passed its check — it has recovered, so its
                     // consecutive-failure streak ends (INV7: consecutive only).
-                    rot.clear_retry(*id);
+                    self.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
-                    let current_kind = rot.chain.get(rot.cursor as usize).map(|(_, a)| a.kind);
-                    let next_idx = (rot.cursor as usize).saturating_add(1);
-                    if rot.advance_to_next_ungated(ctx, next_idx) {
+                    let current_kind = self.chain.get(self.cursor as usize).map(|(_, a)| a.kind);
+                    let next_idx = (self.cursor as usize).saturating_add(1);
+                    if self.advance_to_next_ungated(ctx, next_idx) {
                         match current_kind {
                             Some(ComponentKind::Active) => {
-                                rot.awaiting = Some(*id);
+                                self.awaiting = Some(*id);
                                 Outcome::Transition(State::AwaitingReady)
                             }
                             _ => Outcome::Handled,
@@ -389,7 +354,7 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                     // Recovery is attempted first for every failure, regardless
                     // of the component's recovery-failure policy (CSA: recover
                     // first, classify only once retries are exhausted).
-                    rot.failed = Some(*id);
+                    self.failed = Some(*id);
                     Outcome::Transition(State::Recovering)
                 }
                 // Minimal fix: react to a corruption report if one arrives,
@@ -400,21 +365,21 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 // exists in the first place. `AttestationChallenge` is left
                 // unhandled here (falls through to `Outcome::Super` and is
                 // discarded) — that's a separate question.
-                Event::CorruptionDetected(id) => rot.handle_corruption(*id, ctx),
+                Event::CorruptionDetected(id) => self.handle_corruption(*id, ctx),
                 Event::EffectFailed => Outcome::Transition(State::Locked),
                 _ => Outcome::Super,
             },
 
             State::AwaitingReady => match event {
                 Event::ComponentReady(id) => {
-                    if rot.awaiting != Some(*id) {
+                    if self.awaiting != Some(*id) {
                         return Outcome::Handled; // spurious / stale (INV9)
                     }
-                    rot.awaiting = None;
+                    self.awaiting = None;
                     // If cursor is past the end, the eRoT side of the walk has
                     // already finished (chain done, or the remainder is held) —
                     // nothing left to verify, we're done.
-                    if (rot.cursor as usize) >= rot.chain.len() {
+                    if (self.cursor as usize) >= self.chain.len() {
                         Outcome::Transition(State::Ready)
                     } else {
                         Outcome::Handled
@@ -423,10 +388,10 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 Event::VerificationPassed(id) => {
                     // The component passed its check — it has recovered, so its
                     // consecutive-failure streak ends (INV7: consecutive only).
-                    rot.clear_retry(*id);
+                    self.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
-                    let next_idx = (rot.cursor as usize).saturating_add(1);
-                    if rot.advance_to_next_ungated(ctx, next_idx) {
+                    let next_idx = (self.cursor as usize).saturating_add(1);
+                    if self.advance_to_next_ungated(ctx, next_idx) {
                         Outcome::Handled
                     } else {
                         Outcome::Transition(State::Ready)
@@ -435,8 +400,8 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 Event::VerificationFailed(id) => {
                     // Recovery is attempted first for every failure, regardless
                     // of the component's recovery-failure policy.
-                    rot.failed = Some(*id);
-                    rot.awaiting = None;
+                    self.failed = Some(*id);
+                    self.awaiting = None;
                     Outcome::Transition(State::Recovering)
                 }
                 _ => Outcome::Super,
@@ -465,21 +430,21 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                     // recovery, not a global budget (CSA: exhaustion is
                     // per-device). `failed` is always `Some` while in
                     // `Recovering`; treat a missing id as exhausted defensively.
-                    let attempts = rot
+                    let attempts = self
                         .failed
-                        .map(|id| rot.bump_retry(id))
-                        .unwrap_or(rot.max_retry);
-                    if attempts < rot.max_retry {
+                        .map(|id| self.bump_retry(id))
+                        .unwrap_or(self.max_retry);
+                    if attempts < self.max_retry {
                         Outcome::Transition(State::PreSupervision)
                     } else {
                         // Retries exhausted: gate via the same `gate_by_policy`
                         // the runtime-corruption path uses, so the two can never
                         // disagree. Gated → continue the walk; NotGated
                         // (Required/unknown) → lock down.
-                        match rot.failed.map(|id| (id, rot.gate_by_policy(ctx, id))) {
+                        match self.failed.map(|id| (id, self.gate_by_policy(ctx, id))) {
                             Some((id, Gating::Gated)) => {
-                                rot.clear_retry(id);
-                                rot.failed = None;
+                                self.clear_retry(id);
+                                self.failed = None;
                                 Outcome::Transition(State::PreSupervision)
                             }
                             // `Required`, or an unknown/missing id: lock down.
@@ -498,18 +463,62 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
         }
     }
 
-    fn call_entry_action(&mut self, rot: &mut Rot<N, E>, ctx: &mut Sink<E>) {
-        match self {
+    /// The supervising handler, reached only when [`handle`](Self::handle)
+    /// returns [`Outcome::Super`] from one of the four supervised states
+    /// ([`State::AwaitingReady`], [`State::Ready`], [`State::Updating`],
+    /// [`State::Recovering`] — see [`Orchestrator::is_supervised`]). It provides
+    /// two platform-wide guarantees that must hold across all four:
+    ///
+    /// - Attestation challenges are always answered.
+    /// - Corruption of a required component always triggers recovery.
+    ///
+    /// Note: [`State::PreSupervision`] is deliberately *not* supervised, so the
+    /// attestation guarantee does not hold while a component is still being
+    /// walked there — CSA defines no requirement to answer challenges before the
+    /// chain walk completes, so `AttestationChallenge` is left unhandled in
+    /// `PreSupervision` (falls through to [`Outcome::Super`] and, with no
+    /// supervisor, is discarded).
+    ///
+    /// The corruption guarantee, however, *does* hold in `PreSupervision`: that
+    /// state handles [`Event::CorruptionDetected`] directly (via
+    /// [`handle_corruption`](Self::handle_corruption)) rather than through this
+    /// handler, since routing it here would also pull in the attestation
+    /// behavior above. CSA defines no mechanism guaranteeing a corruption report
+    /// arrives for an already-released component's *live, executing* state (its
+    /// only at-rest mechanism — background NVM integrity polling — is explicitly
+    /// scoped to "at rest"/"between boots", not an in-progress boot's chain
+    /// walk), but that only means such a report isn't guaranteed to exist — it's
+    /// not a reason to discard one if it does arrive. See
+    /// `corruption_during_presupervision_selfloop_triggers_recovery` in
+    /// `tests.rs`.
+    fn handle_supervising(&mut self, event: &Event, ctx: &mut Sink<E>) -> Outcome {
+        match event {
+            Event::AttestationChallenge => {
+                ctx.emit(Effect::SignAttestation);
+                Outcome::Handled
+            }
+            Event::CorruptionDetected(id) => self.handle_corruption(*id, ctx),
+            Event::EffectFailed => Outcome::Transition(State::Locked),
+            _ => Outcome::Super,
+        }
+    }
+
+    /// Run `state`'s entry action. Called by the engine only when a handler
+    /// returned [`Outcome::Transition`] — never on [`Outcome::Handled`]. That
+    /// distinction is load-bearing: `PreSupervision`'s cursor walk returns
+    /// `Handled` precisely so this does not re-run and reset the cursor.
+    fn entry_action(&mut self, state: State, ctx: &mut Sink<E>) {
+        match state {
             State::PreSupervision => {
-                rot.awaiting = None;
-                let _ = rot.advance_to_next_ungated(ctx, 0);
+                self.awaiting = None;
+                let _ = self.advance_to_next_ungated(ctx, 0);
             }
             State::Updating => {
                 ctx.emit(Effect::AuthenticateUpdate);
                 ctx.emit(Effect::StageUpdate);
             }
             State::Recovering => {
-                if let Some(failed) = rot.failed {
+                if let Some(failed) = self.failed {
                     ctx.emit(Effect::RestoreGoldenImage(failed));
                 }
             }
@@ -526,40 +535,10 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 // Retry counts, by contrast, ARE cleared: a clean boot means no
                 // recovery episode is in flight, so every per-component streak
                 // resets to zero.
-                rot.retries.clear();
-                rot.failed = None;
+                self.retries.clear();
+                self.failed = None;
             }
             _ => {}
-        }
-    }
-
-    fn superstate(&mut self) -> Option<Superstate<'_>> {
-        match self {
-            State::Ready | State::Updating | State::Recovering | State::AwaitingReady => {
-                Some(Superstate::SupervisingPlatform(PhantomData))
-            }
-            _ => None,
-        }
-    }
-}
-
-impl<const N: usize, const E: usize> StatigSuperstate<Rot<N, E>> for Superstate<'_> {
-    fn call_handler(
-        &mut self,
-        rot: &mut Rot<N, E>,
-        event: &Event,
-        ctx: &mut Sink<E>,
-    ) -> Outcome<State> {
-        match self {
-            Superstate::SupervisingPlatform(_) => match event {
-                Event::AttestationChallenge => {
-                    ctx.emit(Effect::SignAttestation);
-                    Outcome::Handled
-                }
-                Event::CorruptionDetected(id) => rot.handle_corruption(*id, ctx),
-                Event::EffectFailed => Outcome::Transition(State::Locked),
-                _ => Outcome::Super,
-            },
         }
     }
 }
@@ -590,21 +569,70 @@ pub trait Platform {
     fn execute(&mut self, effect: Effect) -> Result<(), EffectError>;
 }
 
-/// A handle for a caller's own event loop. Wraps the statig machine so callers
-/// only depend on this crate, never on statig types directly.
+/// A handle for a caller's own event loop. Owns the machine's storage
+/// ([`Rot`]) and its current [`State`], and drives them through [`step`].
+///
+/// [`step`]: Self::step
 pub struct Orchestrator<const N: usize, const E: usize> {
-    machine: StateMachine<Rot<N, E>>,
+    rot: Rot<N, E>,
+    state: State,
 }
 
 impl<const N: usize, const E: usize> Orchestrator<N, E> {
     pub fn new(chain: Chain<N>, max_retry: u8) -> Self {
         Self {
-            machine: Rot::new(chain, max_retry).state_machine(),
+            rot: Rot::new(chain, max_retry),
+            // The initial state. `PowerOnReset` has no entry action, so there is
+            // nothing to run here before the first event.
+            state: State::PowerOnReset,
         }
     }
 
     pub fn state(&self) -> State {
-        *self.machine.state()
+        self.state
+    }
+
+    /// Whether `state` is nested under the supervising handler
+    /// ([`Rot::handle_supervising`]) — i.e. whether an [`Outcome::Super`] from
+    /// its leaf handler has anywhere to go. The four supervised states are the
+    /// ones the eRoT can be in after it has exited [`State::PreSupervision`],
+    /// and before it locks down.
+    const fn is_supervised(state: State) -> bool {
+        matches!(
+            state,
+            State::AwaitingReady | State::Ready | State::Updating | State::Recovering
+        )
+    }
+
+    /// Reduce one event: dispatch, fall through to the supervisor if needed, and
+    /// apply the resulting outcome.
+    ///
+    /// The machine defines no exit actions and no supervisor entry/exit actions,
+    /// so a transition's only side effect is the target state's entry action —
+    /// and it lands in the *same* `ctx` as the handler that caused it, which the
+    /// `E >= N + 2` bound relies on (a full gate cascade plus the destination
+    /// `PreSupervision` entry's two effects share one `Sink`).
+    fn step(&mut self, event: &Event, ctx: &mut Sink<E>) {
+        // 1. Dispatch to the current (leaf) state.
+        let mut outcome = self.rot.handle(self.state, event, ctx);
+
+        // 2. On `Super`, defer to the supervising handler if this state has one;
+        //    otherwise the event is discarded. Discarding is what keeps `Locked`
+        //    terminal: it is unsupervised, so its blanket `Super` drops every
+        //    event — including the `EffectFailed` from a failed `LatchLockdown`,
+        //    which would otherwise loop.
+        if let Outcome::Super = outcome
+            && Self::is_supervised(self.state)
+        {
+            outcome = self.rot.handle_supervising(event, ctx);
+        }
+
+        // 3. Apply a transition. `Handled` and an unhandled `Super` both leave
+        //    the state alone and run no entry action.
+        if let Outcome::Transition(target) = outcome {
+            self.state = target;
+            self.rot.entry_action(target, ctx);
+        }
     }
 
     /// Handle one event all the way through — including any [`Effect::Emit`]
@@ -630,7 +658,7 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
             i += 1;
 
             let mut buf = Sink::<E>::new();
-            self.machine.handle_with_context(&ev, &mut buf);
+            self.step(&ev, &mut buf);
 
             for &effect in buf.effects() {
                 match effect {
