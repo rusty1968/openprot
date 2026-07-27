@@ -1,0 +1,329 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+//! Domain vocabulary for the orchestrator state machine: the component model,
+//! events, effects, states, and the validated [`Chain`] of trust. These types
+//! carry no reducer behavior; the state machine itself lives in the crate root.
+
+/// An opaque identifier for one platform component. The core never inspects it;
+/// the board layer decides which real hardware each id refers to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ComponentId(u8);
+
+impl ComponentId {
+    pub const fn new(id: u8) -> Self {
+        Self(id)
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// How a component in the trust chain is classified. The board supplies one
+/// [`ComponentKind`] per [`ComponentId`] when building the chain.
+///
+/// Corresponds directly to the two-tier model in the CSA architecture document:
+/// `Active` = eRoT gate + iRoT gate; `Passive` = eRoT gate only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ComponentKind {
+    /// Has an integrated iRoT (e.g. Caliptra). Both eRoT-side (signature + SVN)
+    /// and iRoT-side (local self-verification) checks apply. The machine waits in
+    /// [`State::AwaitingReady`] for [`Event::ComponentReady`] before advancing.
+    Active,
+    /// No integrated iRoT. The eRoT's signature + SVN check is the only gate.
+    /// The chain walk advances immediately after `ReleaseReset`.
+    Passive,
+}
+
+/// Recovery-failure classification: what the machine does once a required
+/// component's restore attempts are **exhausted** (its per-component retry
+/// count reaches `max_retry`). Every verification or corruption failure enters
+/// [`State::Recovering`] and is retried first, regardless of this
+/// classification — CSA's "recover first" principle. This value is consulted
+/// only after retries are exhausted.
+///
+/// (The narrative design docs sometimes call the `Required` outcome "platform
+/// halt" — same behavior, this is the type-level name.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FailurePolicy {
+    /// Stop the boot sequence entirely: self-emits [`Event::RecoveryFailed`],
+    /// which drives the machine to [`State::Locked`].
+    Required,
+    /// Hold this component in reset (added to `Rot.gated`) and continue
+    /// booting the rest of the platform.
+    Isolable,
+    /// Hold this component **and** any component whose `depends_on` names it
+    /// (transitively), then continue booting the rest of the platform.
+    Cascading,
+}
+
+/// Opaque recovery-region key supplied by the board at chain-build time.
+/// Components sharing a `RegionId` are restored together: when any region
+/// member enters [`State::Recovering`], the shell resolves and restores the
+/// whole region. The core treats this as an equality key only and never
+/// inspects membership itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RegionId(u8);
+
+impl RegionId {
+    pub const fn new(id: u8) -> Self {
+        Self(id)
+    }
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// Per-component attributes supplied by the board at chain-build time.
+///
+/// Three orthogonal axes:
+/// - [`kind`](ComponentAttrs::kind): controls the iRoT gate (Active vs Passive).
+/// - [`failure_policy`](ComponentAttrs::failure_policy): controls what happens
+///   once this component's recovery is exhausted.
+/// - [`recovery_region`](ComponentAttrs::recovery_region) /
+///   [`depends_on`](ComponentAttrs::depends_on): control restore grouping and
+///   cascade-skip on exhaustion.
+///
+/// A component that fails verification is never released from reset —
+/// running untrusted firmware would break the trust invariant regardless of
+/// `failure_policy`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ComponentAttrs {
+    pub kind: ComponentKind,
+    pub failure_policy: FailurePolicy,
+    pub recovery_region: RegionId,
+    pub depends_on: Option<ComponentId>,
+}
+
+impl ComponentAttrs {
+    pub const fn active_required() -> Self {
+        Self {
+            kind: ComponentKind::Active,
+            failure_policy: FailurePolicy::Required,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+    pub const fn passive_required() -> Self {
+        Self {
+            kind: ComponentKind::Passive,
+            failure_policy: FailurePolicy::Required,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+    pub const fn active_isolable() -> Self {
+        Self {
+            kind: ComponentKind::Active,
+            failure_policy: FailurePolicy::Isolable,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+    pub const fn passive_isolable() -> Self {
+        Self {
+            kind: ComponentKind::Passive,
+            failure_policy: FailurePolicy::Isolable,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+    pub const fn active_cascading() -> Self {
+        Self {
+            kind: ComponentKind::Active,
+            failure_policy: FailurePolicy::Cascading,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+    pub const fn passive_cascading() -> Self {
+        Self {
+            kind: ComponentKind::Passive,
+            failure_policy: FailurePolicy::Cascading,
+            recovery_region: RegionId::new(0),
+            depends_on: None,
+        }
+    }
+
+    /// Builder: assign a non-default recovery region (default is region `0`).
+    pub const fn with_region(mut self, region: RegionId) -> Self {
+        self.recovery_region = region;
+        self
+    }
+
+    /// Builder: mark this component as cascade-held whenever `dependency` is
+    /// held. Only meaningful in combination with `FailurePolicy::Cascading`
+    /// on the *dependency*, not on this component.
+    pub const fn with_depends_on(mut self, dependency: ComponentId) -> Self {
+        self.depends_on = Some(dependency);
+        self
+    }
+}
+
+/// The result of the board's power-on checks, delivered inside [`Event::PowerGood`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PowerOnResult {
+    /// Self-verified and provisioned.
+    Provisioned,
+    /// Self-verified but not provisioned — cannot act as a RoT.
+    Unprovisioned,
+    /// Self-verification failed — latches immediately to [`State::Locked`].
+    SelfVerificationFailed,
+}
+
+/// Everything the outside world can tell the state machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Event {
+    /// Power-on, carrying the shell's self-verification and provisioning result.
+    PowerGood(PowerOnResult),
+    VerificationPassed(ComponentId),
+    VerificationFailed(ComponentId),
+    /// An `Active` component's iRoT has finished local verification and is ready
+    /// (e.g. MCTP channel established).
+    ComponentReady(ComponentId),
+    AttestationChallenge,
+    UpdateRequest,
+    UpdateVerified,
+    UpdateRejected,
+    CorruptionDetected(ComponentId),
+    Restored(ComponentId),
+    RecoveryFailed,
+}
+
+/// Everything the state machine can ask the outside world to do.
+///
+/// [`Effect::Emit`] is the sole internal effect: the orchestrator catches it and
+/// queues the carried event for immediate handling, making follow-up events
+/// visible in the effect trace instead of hidden state changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Effect {
+    ReadFirmware(ComponentId),
+    VerifyFirmware(ComponentId),
+    ReleaseReset(ComponentId),
+    /// Assert reset on a component that is already running — the inverse of
+    /// [`ReleaseReset`]. Emitted when an `Isolable`/`Cascading` component is
+    /// found corrupt at runtime, or is held after recovery is exhausted: the
+    /// component is gated without triggering (or continuing) a recovery cycle.
+    AssertReset(ComponentId),
+    SignAttestation,
+    AuthenticateUpdate,
+    StageUpdate,
+    ActivateUpdate,
+    DiscardStaged,
+    RestoreGoldenImage(ComponentId),
+    LatchLockdown,
+    /// Internal only — tells the orchestrator to handle this event next.
+    /// Never forwarded to a [`Platform`](crate::Platform).
+    Emit(Event),
+}
+
+/// The states the machine can be in. None carry data; all mutable state lives
+/// in [`Rot`](crate::Rot) shared storage.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    PowerOnReset,
+    PreSupervision,
+    /// eRoT has released an `Active` component; waiting for its iRoT to finish
+    /// local verification and signal [`Event::ComponentReady`].
+    AwaitingReady,
+    Ready,
+    Updating,
+    Recovering,
+    Locked,
+}
+
+/// A validated **chain of trust**: the ordered list of components the eRoT
+/// walks, verifies, and supervises, in walk order.
+///
+/// Build one with [`TryFrom`]/[`TryInto`] from a `heapless::Vec` of
+/// `(ComponentId, ComponentAttrs)` pairs. The conversion is the single place
+/// the reducer's structural invariants are enforced, so a malformed chain
+/// fails closed at the boundary instead of misbehaving later:
+///
+/// - the chain is non-empty,
+/// - every [`ComponentId`] is unique,
+/// - every `depends_on` names a component that exists and appears *strictly
+///   earlier* in the chain (no dangling, forward, or self dependencies — a
+///   dependency is always walked before its dependents),
+/// - the length fits `u8`, the `cursor` index type.
+///
+/// ```ignore
+/// let mut v = heapless::Vec::<_, 4>::new();
+/// v.push((ComponentId::new(0), ComponentAttrs::passive_required())).unwrap();
+/// let chain: Chain<4> = v.try_into()?;
+/// ```
+#[derive(Clone, Debug)]
+pub struct Chain<const N: usize> {
+    entries: heapless::Vec<(ComponentId, ComponentAttrs), N>,
+}
+
+/// Why a `heapless::Vec` of components is not a valid [`Chain`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChainError {
+    /// The chain has no components.
+    Empty,
+    /// The chain is longer than `u8::MAX`, so `cursor` could not index it.
+    TooLong,
+    /// The same [`ComponentId`] appears more than once.
+    DuplicateId(ComponentId),
+    /// A `depends_on` names an id that is not in the chain.
+    UnknownDependency {
+        component: ComponentId,
+        depends_on: ComponentId,
+    },
+    /// A `depends_on` names a component that does not appear strictly earlier
+    /// in the chain (a forward reference or a self-reference). A dependency
+    /// must be walked before its dependents.
+    ForwardDependency {
+        component: ComponentId,
+        depends_on: ComponentId,
+    },
+}
+
+impl<const N: usize> Chain<N> {
+    /// Consume the validated chain, yielding its components in walk order.
+    pub(crate) fn into_entries(self) -> heapless::Vec<(ComponentId, ComponentAttrs), N> {
+        self.entries
+    }
+}
+
+impl<const N: usize> TryFrom<heapless::Vec<(ComponentId, ComponentAttrs), N>> for Chain<N> {
+    type Error = ChainError;
+
+    fn try_from(
+        entries: heapless::Vec<(ComponentId, ComponentAttrs), N>,
+    ) -> Result<Self, ChainError> {
+        if entries.is_empty() {
+            return Err(ChainError::Empty);
+        }
+        if entries.len() > u8::MAX as usize {
+            return Err(ChainError::TooLong);
+        }
+        for (i, (id, _)) in entries.iter().enumerate() {
+            if entries[..i].iter().any(|(prev, _)| prev == id) {
+                return Err(ChainError::DuplicateId(*id));
+            }
+        }
+        for (i, (id, attrs)) in entries.iter().enumerate() {
+            if let Some(dep) = attrs.depends_on {
+                match entries.iter().position(|(cid, _)| *cid == dep) {
+                    None => {
+                        return Err(ChainError::UnknownDependency {
+                            component: *id,
+                            depends_on: dep,
+                        });
+                    }
+                    Some(j) if j >= i => {
+                        return Err(ChainError::ForwardDependency {
+                            component: *id,
+                            depends_on: dep,
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(Self { entries })
+    }
+}
