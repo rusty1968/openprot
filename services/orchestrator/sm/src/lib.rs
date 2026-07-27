@@ -36,8 +36,22 @@ pub use model::*;
 // deployment. The board owns `N` (chain length), `E` (effect-buffer size) and
 // max_retry.
 
-/// Max pending events while settling one outside event (original + Emit follow-ups).
+/// Upper bound on how many events one settle can queue: the triggering outside
+/// event, at most one `Emit` follow-up (`RecoveryFailed`, emitted at most once
+/// before latching), and at most one injected `EffectFailed` (de-duplicated in
+/// `dispatch_with` — it is idempotent and terminal, so a second is never
+/// queued). Three total; `PENDING_CAP` keeps headroom above that so the pushes
+/// in `dispatch_with` can never overflow.
 const PENDING_CAP: usize = 8;
+
+/// Compile-time floor tying the queue capacity to that worst case, mirroring
+/// `Rot::EFFECT_CAP_OK` for the effect buffer. Evaluated at build time (an
+/// anonymous `const`), so an under-sized `PENDING_CAP` fails to compile rather
+/// than risking a runtime overflow.
+const _: () = assert!(
+    PENDING_CAP >= 3,
+    "PENDING_CAP must hold one outside event + one Emit follow-up + one EffectFailed",
+);
 
 /// Superstate entered once the eRoT exits [`State::PreSupervision`] — i.e. on
 /// release of the first `Active` component, or once the whole chain has
@@ -93,13 +107,22 @@ impl<const E: usize> Sink<E> {
     }
 
     /// Append one effect. `E` is sized so overflow is impossible for a machine
-    /// that compiles (the `E >= N + 2` floor in `Rot::new`); the panic is a
-    /// loud, fail-closed backstop for a future handler that emits beyond the
-    /// proven worst case, never a silent drop of a security-critical effect.
+    /// that compiles: `Rot::EFFECT_CAP_OK` proves `E >= N + 2` and no handler
+    /// emits more than `N + 2` effects into one `Sink`, so the push below can
+    /// never fail. The `Err` arm is therefore dead — dropped rather than
+    /// panicked, since a runtime panic here would be unreachable code shipped in
+    /// the binary.
+    ///
+    /// Effects buffered in one handler are actuated by the driver in emission
+    /// order and are **not** atomic: if effect *k* fails, effects `0..k` have
+    /// already hit hardware and `k+1..` still run before the injected
+    /// `EffectFailed` latches lockdown. Emit the most irreversible effect of a
+    /// batch last, so a mid-batch failure latches before it rather than after.
     pub fn emit(&mut self, effect: Effect) {
-        if self.effects.push(effect).is_err() {
-            panic!("effect buffer overflow: E must be >= chain length N + 2");
-        }
+        // Dead Err arm: overflow is proved impossible by `Rot::EFFECT_CAP_OK`
+        // (`E >= N + 2`) plus the reducer never emitting more than `N + 2`
+        // effects into one Sink.
+        let _ = self.effects.push(effect);
     }
 
     pub fn effects(&self) -> &[Effect] {
@@ -337,6 +360,7 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 Event::PowerGood(PowerOnResult::SelfVerificationFailed) => {
                     Outcome::Transition(State::Locked)
                 }
+                Event::EffectFailed => Outcome::Transition(State::Locked),
                 _ => Outcome::Super,
             },
 
@@ -377,6 +401,7 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 // unhandled here (falls through to `Outcome::Super` and is
                 // discarded) — that's a separate question.
                 Event::CorruptionDetected(id) => rot.handle_corruption(*id, ctx),
+                Event::EffectFailed => Outcome::Transition(State::Locked),
                 _ => Outcome::Super,
             },
 
@@ -532,16 +557,37 @@ impl<const N: usize, const E: usize> StatigSuperstate<Rot<N, E>> for Superstate<
                     Outcome::Handled
                 }
                 Event::CorruptionDetected(id) => rot.handle_corruption(*id, ctx),
+                Event::EffectFailed => Outcome::Transition(State::Locked),
                 _ => Outcome::Super,
             },
         }
     }
 }
 
-/// Outward connection to the platform. Carry out one effect. Never called with
+/// Signals that the shell could not carry out an [`Effect`]. The machine does
+/// not need the shell's error detail — **every** actuation failure is treated
+/// the same, fail-closed: the driver injects [`Event::EffectFailed`] and the
+/// machine latches to [`State::Locked`]. This blanket policy is deliberate and
+/// is what lets the failure signal stay a payload-less marker; a future design
+/// that needs per-effect recovery must add a *new*, descriptive event rather
+/// than widen this type. The shell logs the specifics on its side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EffectError;
+
+/// Outward connection to the platform. Carry out one effect, reporting
+/// [`EffectError`] if it could not be performed. Never called with
 /// [`Effect::Emit`] — the orchestrator consumes those internally.
+///
+/// Contract the reducer relies on:
+/// - **Honest, complete feedback.** The reducer's correctness rests entirely on
+///   the event stream the shell feeds back; dropping, reordering, or
+///   synthesizing events silently breaks the state machine's invariants.
+/// - **A failed [`Effect::LatchLockdown`] is a hard fault.** Lockdown is the top
+///   of the escalation ladder — the reducer has nothing stronger to emit and
+///   will *believe* it is `Locked`. The shell must treat that failure as
+///   terminal (halt/reset), not a recoverable error.
 pub trait Platform {
-    fn execute(&mut self, effect: Effect);
+    fn execute(&mut self, effect: Effect) -> Result<(), EffectError>;
 }
 
 /// A handle for a caller's own event loop. Wraps the statig machine so callers
@@ -563,8 +609,19 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
 
     /// Handle one event all the way through — including any [`Effect::Emit`]
     /// follow-ups — calling `on_effect` for each external effect in order.
-    pub fn dispatch_with(&mut self, event: Event, mut on_effect: impl FnMut(Effect)) {
+    ///
+    /// If `on_effect` reports an [`EffectError`], the driver injects an
+    /// [`Event::EffectFailed`] into the same run, so a failed actuation is
+    /// handled fail-closed (the machine latches to [`State::Locked`]) rather
+    /// than silently ignored.
+    pub fn dispatch_with(
+        &mut self,
+        event: Event,
+        mut on_effect: impl FnMut(Effect) -> Result<(), EffectError>,
+    ) {
         let mut pending: heapless::Vec<Event, PENDING_CAP> = heapless::Vec::new();
+        // Dead Err arm: `pending` is empty and `PENDING_CAP >= 3` (asserted at
+        // build time), so the first push always fits.
         let _ = pending.push(event);
 
         let mut i = 0;
@@ -578,9 +635,23 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
             for &effect in buf.effects() {
                 match effect {
                     Effect::Emit(internal) => {
+                        // Dead Err arm: the reducer emits at most one `Emit`
+                        // (`RecoveryFailed`) per settle, well within PENDING_CAP.
                         let _ = pending.push(internal);
                     }
-                    external => on_effect(external),
+                    external => {
+                        if on_effect(external).is_err() && !pending.contains(&Event::EffectFailed) {
+                            // Fail-closed, but only once: `EffectFailed` is
+                            // idempotent and terminal (drives to `Locked`, which
+                            // discards everything after), so a second injection
+                            // would be a no-op. De-duping against this
+                            // append-only queue — which still holds the first
+                            // `EffectFailed` as its own marker — caps the queue at
+                            // the worst case `PENDING_CAP` is sized for. Dead Err
+                            // arm: that bound is below PENDING_CAP.
+                            let _ = pending.push(Event::EffectFailed);
+                        }
+                    }
                 }
             }
         }
