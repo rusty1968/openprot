@@ -81,7 +81,7 @@ pub enum FailurePolicy {
     /// Stop the boot sequence entirely: self-emits [`Event::RecoveryFailed`],
     /// which drives the machine to [`State::Locked`].
     Required,
-    /// Hold this component in reset (added to `Rot.held`) and continue
+    /// Hold this component in reset (added to `Rot.gated`) and continue
     /// booting the rest of the platform.
     Isolable,
     /// Hold this component **and** any component whose `depends_on` names it
@@ -332,16 +332,35 @@ impl<const E: usize> Sink<E> {
     }
 }
 
+/// Outcome of [`Rot::gate_by_policy`]: whether a component was gated out of
+/// service. Collapses the three [`FailurePolicy`] values into the two
+/// control-flow outcomes the caller actually branches on — so the
+/// runtime-corruption path and the recovery-exhaustion path decide on the same
+/// result.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Gating {
+    /// The component was gated (`Isolable` → itself; `Cascading` → itself and
+    /// its transitive dependents). Its reset is asserted and the walk skips it.
+    Gated,
+    /// Not a gating policy (`Required`, or an unknown/missing id). Nothing was
+    /// gated; the caller handles this in its own context — recover (at runtime)
+    /// or lock down (once recovery is exhausted).
+    NotGated,
+}
+
 /// Shared storage: data that persists across events. `N` is the chain capacity
 /// and `E` the effect-buffer size — both board choices; the core sets no
 /// default. `E` must be at least `N + 2` (enforced in [`Rot::new`]).
 pub struct Rot<const N: usize, const E: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
     cursor: u8,
-    /// Components skipped because their recovery was exhausted under
-    /// `FailurePolicy::Isolable` or `Cascading`. Held in reset; not
-    /// re-verified on subsequent re-walks. Cleared on `Ready` entry.
-    held: heapless::Vec<ComponentId, N>,
+    /// Components physically held in reset by a policy decision: runtime
+    /// corruption of a non-required component, or recovery exhausted under
+    /// `FailurePolicy::Isolable` or `Cascading`. Each id here has a live
+    /// `AssertReset` and is skipped on every chain walk. This is a **durable**
+    /// trust-boundary gate: it persists across a return to `Ready` and is only
+    /// cleared by a fresh `Rot` on `PowerOnReset`.
+    gated: heapless::Vec<ComponentId, N>,
     failed: Option<ComponentId>,
     retry_count: u8,
     max_retry: u8,
@@ -366,7 +385,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         Self {
             chain,
             cursor: 0,
-            held: heapless::Vec::new(),
+            gated: heapless::Vec::new(),
             failed: None,
             retry_count: 0,
             max_retry,
@@ -381,19 +400,19 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         self.chain.iter().find(|(cid, _)| *cid == id).map(|(_, a)| *a)
     }
 
-    fn is_held(&self, id: ComponentId) -> bool {
-        self.held.iter().any(|h| *h == id)
+    fn is_gated(&self, id: ComponentId) -> bool {
+        self.gated.iter().any(|h| *h == id)
     }
 
     /// Advance `cursor` from `start_idx` to the first component not in
-    /// `held`, emitting its `ReadFirmware`/`VerifyFirmware`. Returns `true` if
-    /// found. If the rest of the chain is exhausted or entirely held, sets
+    /// `gated`, emitting its `ReadFirmware`/`VerifyFirmware`. Returns `true` if
+    /// found. If the rest of the chain is exhausted or entirely gated, sets
     /// `cursor` to a past-the-end sentinel (`chain.len()`) and returns
     /// `false` — the caller should treat that as "chain done".
-    fn advance_to_next_unheld(&mut self, ctx: &mut Sink<E>, start_idx: usize) -> bool {
+    fn advance_to_next_ungated(&mut self, ctx: &mut Sink<E>, start_idx: usize) -> bool {
         let mut idx = start_idx;
         while let Some(&(id, _)) = self.chain.get(idx) {
-            if !self.is_held(id) {
+            if !self.is_gated(id) {
                 // `idx < chain.len() <= N`; chain capacity is board-chosen and
                 // assumed to fit `u8`, matching the existing `cursor: u8` contract.
                 self.cursor = idx as u8;
@@ -407,55 +426,78 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         false
     }
 
+    /// Gate a component out of service according to its [`FailurePolicy`], and
+    /// report the [`Gating`] outcome. This is the **single source of truth**
+    /// shared by both paths that take a component out of service — the
+    /// runtime-corruption path ([`handle_corruption`](Self::handle_corruption))
+    /// and the recovery-exhaustion path — so the two can never disagree about
+    /// what a policy means (in particular, `Cascading` cascades in both).
+    ///
+    /// - `Isolable` → gate this component alone → [`Gating::Gated`].
+    /// - `Cascading` → gate this component and every transitive dependent →
+    ///   [`Gating::Gated`].
+    /// - `Required`, or an unknown/missing id → gate nothing →
+    ///   [`Gating::NotGated`], leaving the caller to handle the non-gating
+    ///   outcome in its own context (recover, at runtime; lock down, once
+    ///   recovery is exhausted).
+    ///
+    /// Idempotent per component (guarded by `is_gated`).
+    fn gate_by_policy(&mut self, ctx: &mut Sink<E>, id: ComponentId) -> Gating {
+        match self.attrs_of(id).map(|attrs| attrs.failure_policy) {
+            Some(FailurePolicy::Cascading) => {
+                self.cascade_hold(ctx, id);
+                Gating::Gated
+            }
+            Some(FailurePolicy::Isolable) => {
+                if !self.is_gated(id) {
+                    ctx.emit(Effect::AssertReset(id));
+                    let _ = self.gated.push(id);
+                }
+                Gating::Gated
+            }
+            // `Required`, or an unknown/missing id: not a gating policy.
+            _ => Gating::NotGated,
+        }
+    }
+
     /// Shared `CorruptionDetected` handling, called from both `PreSupervision`
     /// (directly) and `SupervisingPlatform` (via its superstate handler).
-    /// Respects the per-component policy encoded at chain-build time:
-    /// `FailurePolicy::Required` → recover (halt chain, restore, re-walk);
-    /// `Isolable`/`Cascading` → gate the component: assert its reset and add
-    /// it to `held`, so it stays in reset and is skipped on every subsequent
-    /// re-walk rather than being silently re-released. No recovery episode is
-    /// started. This mirrors the exhausted-recovery hold path (the only other
-    /// place that gates a running component).
+    /// Delegates the policy interpretation to [`gate_by_policy`](Self::gate_by_policy)
+    /// so this path and the recovery-exhaustion path can never diverge:
+    /// `Isolable`/`Cascading` → gate the component (single or cascade) and stay
+    /// put, so a later re-walk skips it instead of silently re-releasing one we
+    /// already found corrupt; `Required`/unknown → recover first (the
+    /// halt-on-exhaustion decision happens later in `Recovering`).
     fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome<State> {
-        let required = self
-            .attrs_of(id)
-            .map(|attrs| matches!(attrs.failure_policy, FailurePolicy::Required))
-            .unwrap_or(true); // unknown id: treat as required (safe default)
-        if required {
-            self.failed = Some(id);
-            Outcome::Transition(State::Recovering)
-        } else if !self.is_held(id) {
-            // Gate and hold: assert reset and remember it, so a later re-walk
-            // (e.g. after a required component recovers) skips this component
-            // instead of re-releasing one we already found corrupt.
-            ctx.emit(Effect::AssertReset(id));
-            let _ = self.held.push(id);
-            Outcome::Handled
-        } else {
-            Outcome::Handled
+        match self.gate_by_policy(ctx, id) {
+            Gating::Gated => Outcome::Handled,
+            Gating::NotGated => {
+                self.failed = Some(id);
+                Outcome::Transition(State::Recovering)
+            }
         }
     }
 
     /// Hold `root` and cascade-hold every component whose `depends_on`
-    /// (transitively) names it. Emits `AssertReset` for each newly held
+    /// (transitively) names it. Emits `AssertReset` for each newly gated
     /// component, including `root` itself.
     fn cascade_hold(&mut self, ctx: &mut Sink<E>, root: ComponentId) {
-        if !self.is_held(root) {
+        if !self.is_gated(root) {
             ctx.emit(Effect::AssertReset(root));
-            let _ = self.held.push(root);
+            let _ = self.gated.push(root);
         }
         let mut i = 0;
-        while let Some(&holder) = self.held.get(i) {
+        while let Some(&holder) = self.gated.get(i) {
             i += 1;
-            let mut newly_held: heapless::Vec<ComponentId, N> = heapless::Vec::new();
+            let mut newly_gated: heapless::Vec<ComponentId, N> = heapless::Vec::new();
             for &(id, attrs) in self.chain.iter() {
-                if attrs.depends_on == Some(holder) && !self.is_held(id) {
-                    let _ = newly_held.push(id);
+                if attrs.depends_on == Some(holder) && !self.is_gated(id) {
+                    let _ = newly_gated.push(id);
                 }
             }
-            for id in newly_held {
+            for id in newly_gated {
                 ctx.emit(Effect::AssertReset(id));
-                let _ = self.held.push(id);
+                let _ = self.gated.push(id);
             }
         }
     }
@@ -494,7 +536,7 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                     ctx.emit(Effect::ReleaseReset(*id));
                     let current_kind = rot.chain.get(rot.cursor as usize).map(|(_, a)| a.kind);
                     let next_idx = (rot.cursor as usize).saturating_add(1);
-                    if rot.advance_to_next_unheld(ctx, next_idx) {
+                    if rot.advance_to_next_ungated(ctx, next_idx) {
                         match current_kind {
                             Some(ComponentKind::Active) => {
                                 rot.awaiting = Some(*id);
@@ -543,7 +585,7 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 Event::VerificationPassed(id) => {
                     ctx.emit(Effect::ReleaseReset(*id));
                     let next_idx = (rot.cursor as usize).saturating_add(1);
-                    if rot.advance_to_next_unheld(ctx, next_idx) {
+                    if rot.advance_to_next_ungated(ctx, next_idx) {
                         Outcome::Handled
                     } else {
                         Outcome::Transition(State::Ready)
@@ -582,25 +624,17 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                     if rot.retry_count < rot.max_retry {
                         Outcome::Transition(State::PreSupervision)
                     } else {
-                        // Retries exhausted: consult the recovery-failure policy.
-                        let classification = rot.failed.and_then(|id| {
-                            rot.attrs_of(id).map(|attrs| (id, attrs.failure_policy))
-                        });
-                        match classification {
-                            Some((id, FailurePolicy::Isolable)) => {
-                                ctx.emit(Effect::AssertReset(id));
-                                let _ = rot.held.push(id);
+                        // Retries exhausted: gate via the same `gate_by_policy`
+                        // the runtime-corruption path uses, so the two can never
+                        // disagree. Gated → continue the walk; NotGated
+                        // (Required/unknown) → lock down.
+                        match rot.failed.map(|id| rot.gate_by_policy(ctx, id)) {
+                            Some(Gating::Gated) => {
                                 rot.failed = None;
                                 rot.retry_count = 0;
                                 Outcome::Transition(State::PreSupervision)
                             }
-                            Some((id, FailurePolicy::Cascading)) => {
-                                rot.cascade_hold(ctx, id);
-                                rot.failed = None;
-                                rot.retry_count = 0;
-                                Outcome::Transition(State::PreSupervision)
-                            }
-                            // `Required` (or an unknown/missing id — safe default): halt.
+                            // `Required`, or an unknown/missing id: lock down.
                             _ => {
                                 ctx.emit(Effect::Emit(Event::RecoveryFailed));
                                 Outcome::Handled
@@ -620,7 +654,7 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
         match self {
             State::PreSupervision => {
                 rot.awaiting = None;
-                let _ = rot.advance_to_next_unheld(ctx, 0);
+                let _ = rot.advance_to_next_ungated(ctx, 0);
             }
             State::Updating => {
                 ctx.emit(Effect::AuthenticateUpdate);
@@ -635,8 +669,12 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 ctx.emit(Effect::LatchLockdown);
             }
             State::Ready => {
+                // NB: `gated` is intentionally NOT cleared here. It is a durable
+                // trust-boundary gate (each id has a live `AssertReset`);
+                // clearing it would let a later chain walk re-release a
+                // component that policy deliberately isolated. Only a fresh
+                // `Rot` on `PowerOnReset` clears it.
                 rot.retry_count = 0;
-                rot.held.clear();
                 rot.failed = None;
             }
             _ => {}
@@ -1207,6 +1245,51 @@ mod tests {
         assert!(effects.contains(&Effect::AssertReset(C1)));
     }
 
+    /// Finding #2 regression: a durable gate must survive a return to `Ready`.
+    /// The gate set is *not* cleared on `Ready` entry, so a component isolated
+    /// by policy stays gated across an intervening return to `Ready` and a
+    /// later chain walk never re-reads or re-releases it. Extends the
+    /// single-walk `..._holds_across_rewalk` case with a *second* return to
+    /// `Ready` — the exact point where the old `held.clear()` dropped the gate.
+    #[test]
+    fn gate_survives_return_to_ready() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::passive_required()),
+                (C1, ComponentAttrs::passive_isolable()),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationPassed(C1), // walk 1 done → Ready
+                Event::CorruptionDetected(C1), // isolable → gate + hold C1
+                Event::CorruptionDetected(C0), // required → Recovering
+                Event::Restored(C0),           // walk 2 from top
+                Event::VerificationPassed(C0), // C1 gated skip → Ready (gate must persist)
+                Event::CorruptionDetected(C0), // required → Recovering again
+                Event::Restored(C0),           // walk 3 from top
+                Event::VerificationPassed(C0), // C1 still gated → chain done → Ready
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        // C1 was read/verified and released exactly once, on walk 1. If the
+        // gate were dropped at `Ready`, walk 3 would re-read and re-release it.
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|e| **e == Effect::ReadFirmware(C1))
+                .count(),
+            1,
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|e| **e == Effect::ReleaseReset(C1))
+                .count(),
+            1,
+        );
+    }
+
     /// Runtime corruption of a `Required` component still triggers
     /// recovery as before.
     #[test]
@@ -1225,6 +1308,36 @@ mod tests {
         );
         assert_eq!(state, State::Recovering);
         assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+    }
+
+    /// Finding #4 regression: runtime corruption of a `Cascading` component
+    /// must gate the whole cascade, not just the reported component. The
+    /// runtime-corruption path and the recovery-exhaustion path now share one
+    /// `gate_by_policy` source of truth, so `Cascading` cascades in both. C2
+    /// `depends_on` C1; corrupting C1 must assert reset on C1 **and** C2.
+    #[test]
+    fn cascading_runtime_corruption_cascades() {
+        let (effects, state) = drive(
+            chain(&[
+                (C0, ComponentAttrs::passive_required()),
+                (C1, ComponentAttrs::passive_cascading()),
+                (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+            ]),
+            &[
+                BOOT,
+                Event::VerificationPassed(C0),
+                Event::VerificationPassed(C1),
+                Event::VerificationPassed(C2), // walk done → Ready
+                Event::CorruptionDetected(C1), // Cascading → gate C1 and its dependents
+            ],
+        );
+        assert_eq!(state, State::Ready);
+        // The whole cascade is gated: C1 (the root) and C2 (its dependent).
+        assert!(effects.contains(&Effect::AssertReset(C1)));
+        assert!(effects.contains(&Effect::AssertReset(C2)));
+        // No recovery is started for a non-required corruption.
+        assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+        assert!(!effects.contains(&Effect::LatchLockdown));
     }
 
     /// Boot-time VerificationFailed on a required component → Recovering.
