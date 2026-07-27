@@ -5,7 +5,10 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "orchestrator_sm",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/lib.rs",
+        "src/tests.rs",
+    ],
     crate_name = "openprot_orchestrator_sm",
     edition = "2024",
     visibility = ["//visibility:public"],
