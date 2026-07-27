@@ -68,8 +68,8 @@ pub enum ComponentKind {
 }
 
 /// Recovery-failure classification: what the machine does once a required
-/// component's restore attempts are **exhausted** (`retry_count` reaches
-/// `max_retry`). Every verification or corruption failure enters
+/// component's restore attempts are **exhausted** (its per-component retry
+/// count reaches `max_retry`). Every verification or corruption failure enters
 /// [`State::Recovering`] and is retried first, regardless of this
 /// classification — CSA's "recover first" principle. This value is consulted
 /// only after retries are exhausted.
@@ -362,7 +362,14 @@ pub struct Rot<const N: usize, const E: usize> {
     /// cleared by a fresh `Rot` on `PowerOnReset`.
     gated: heapless::Vec<ComponentId, N>,
     failed: Option<ComponentId>,
-    retry_count: u8,
+    /// Per-component consecutive failed-restore counts. An entry is present only
+    /// for a component with at least one recorded attempt; absent means zero.
+    /// Keyed by `ComponentId` so interleaved recoveries of different components
+    /// never share a retry budget — CSA frames recovery-attempt exhaustion per
+    /// device, not as a single global counter. A component's entry is cleared
+    /// when it passes verification (recovered) or is gated, and the whole map is
+    /// cleared on a clean return to `Ready`.
+    retries: heapless::Vec<(ComponentId, u8), N>,
     max_retry: u8,
     /// The `Active` component whose iRoT readiness is outstanding. `Some` only
     /// while in `AwaitingReady` (INV9).
@@ -387,7 +394,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             cursor: 0,
             gated: heapless::Vec::new(),
             failed: None,
-            retry_count: 0,
+            retries: heapless::Vec::new(),
             max_retry,
             awaiting: None,
             _effect_cap: PhantomData,
@@ -402,6 +409,29 @@ impl<const N: usize, const E: usize> Rot<N, E> {
 
     fn is_gated(&self, id: ComponentId) -> bool {
         self.gated.iter().any(|h| *h == id)
+    }
+
+    /// Increment `id`'s consecutive failed-restore count and return the new
+    /// value. Counts are kept per component so that interleaved recovery
+    /// episodes for different components never share a budget.
+    fn bump_retry(&mut self, id: ComponentId) -> u8 {
+        for entry in self.retries.iter_mut() {
+            if entry.0 == id {
+                entry.1 = entry.1.saturating_add(1);
+                return entry.1;
+            }
+        }
+        let _ = self.retries.push((id, 1));
+        1
+    }
+
+    /// Drop `id`'s retry count. Called when the component recovers (passes
+    /// verification) or is gated — either way its consecutive-failure streak
+    /// ends, so a future failure starts counting fresh (INV7: consecutive only).
+    fn clear_retry(&mut self, id: ComponentId) {
+        if let Some(pos) = self.retries.iter().position(|e| e.0 == id) {
+            let _ = self.retries.swap_remove(pos);
+        }
     }
 
     /// Advance `cursor` from `start_idx` to the first component not in
@@ -533,6 +563,9 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
             // Cursor walk via Outcome::Handled — a self-transition would reset cursor.
             State::PreSupervision => match event {
                 Event::VerificationPassed(id) => {
+                    // The component passed its check — it has recovered, so its
+                    // consecutive-failure streak ends (INV7: consecutive only).
+                    rot.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
                     let current_kind = rot.chain.get(rot.cursor as usize).map(|(_, a)| a.kind);
                     let next_idx = (rot.cursor as usize).saturating_add(1);
@@ -583,6 +616,9 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                     }
                 }
                 Event::VerificationPassed(id) => {
+                    // The component passed its check — it has recovered, so its
+                    // consecutive-failure streak ends (INV7: consecutive only).
+                    rot.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
                     let next_idx = (rot.cursor as usize).saturating_add(1);
                     if rot.advance_to_next_ungated(ctx, next_idx) {
@@ -620,18 +656,22 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
 
             State::Recovering => match event {
                 Event::Restored(_) => {
-                    rot.retry_count = rot.retry_count.saturating_add(1);
-                    if rot.retry_count < rot.max_retry {
+                    // Count this attempt against the specific component in
+                    // recovery, not a global budget (CSA: exhaustion is
+                    // per-device). `failed` is always `Some` while in
+                    // `Recovering`; treat a missing id as exhausted defensively.
+                    let attempts = rot.failed.map(|id| rot.bump_retry(id)).unwrap_or(rot.max_retry);
+                    if attempts < rot.max_retry {
                         Outcome::Transition(State::PreSupervision)
                     } else {
                         // Retries exhausted: gate via the same `gate_by_policy`
                         // the runtime-corruption path uses, so the two can never
                         // disagree. Gated → continue the walk; NotGated
                         // (Required/unknown) → lock down.
-                        match rot.failed.map(|id| rot.gate_by_policy(ctx, id)) {
-                            Some(Gating::Gated) => {
+                        match rot.failed.map(|id| (id, rot.gate_by_policy(ctx, id))) {
+                            Some((id, Gating::Gated)) => {
+                                rot.clear_retry(id);
                                 rot.failed = None;
-                                rot.retry_count = 0;
                                 Outcome::Transition(State::PreSupervision)
                             }
                             // `Required`, or an unknown/missing id: lock down.
@@ -674,7 +714,11 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                 // clearing it would let a later chain walk re-release a
                 // component that policy deliberately isolated. Only a fresh
                 // `Rot` on `PowerOnReset` clears it.
-                rot.retry_count = 0;
+                //
+                // Retry counts, by contrast, ARE cleared: a clean boot means no
+                // recovery episode is in flight, so every per-component streak
+                // resets to zero.
+                rot.retries.clear();
                 rot.failed = None;
             }
             _ => {}
@@ -1027,6 +1071,37 @@ mod tests {
         assert!(!effects[start..].contains(&Effect::LatchLockdown));
     }
 
+    /// Retry budgets are **per component**, not a single global counter. Two
+    /// required components each fail exactly once (well under `max_retry = 2`)
+    /// in an interleaved recovery sequence before the chain finally settles.
+    /// Under a shared global counter the second failure would push the count to
+    /// the cap and latch the platform to `Locked`; per-component counting lets
+    /// each device use its own budget, so the walk reaches `Ready`.
+    #[test]
+    fn retry_budget_is_per_component() {
+        let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+        c.push((C0, ComponentAttrs::passive_required())).expect("fits");
+        c.push((C1, ComponentAttrs::passive_required())).expect("fits");
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 2);
+        let mut effects = Vec::new();
+
+        for ev in [
+            BOOT,
+            Event::VerificationFailed(C0), // C0 fails once → Recovering
+            Event::Restored(C0),           // C0 count = 1 (< 2) → re-walk
+            Event::VerificationPassed(C0), // C0 recovered → its streak clears
+            Event::VerificationFailed(C1), // C1 fails once → Recovering
+            Event::Restored(C1),           // C1 count = 1 (< 2); global would be 2 → latch
+            Event::VerificationPassed(C0), // re-walk restarts at the top
+            Event::VerificationPassed(C1), // chain done → Ready
+        ] {
+            orch.dispatch_with(ev, |e| effects.push(e));
+        }
+
+        assert_eq!(orch.state(), State::Ready);
+        assert!(!effects.contains(&Effect::LatchLockdown));
+    }
+
     /// Board-supplied retry cap: max_retry = 1 latches on the first failed
     /// restore.
     #[test]
@@ -1245,12 +1320,12 @@ mod tests {
         assert!(effects.contains(&Effect::AssertReset(C1)));
     }
 
-    /// Finding #2 regression: a durable gate must survive a return to `Ready`.
-    /// The gate set is *not* cleared on `Ready` entry, so a component isolated
-    /// by policy stays gated across an intervening return to `Ready` and a
-    /// later chain walk never re-reads or re-releases it. Extends the
-    /// single-walk `..._holds_across_rewalk` case with a *second* return to
-    /// `Ready` — the exact point where the old `held.clear()` dropped the gate.
+    /// A durable gate must survive a return to `Ready`. The gate set is *not*
+    /// cleared on `Ready` entry, so a component isolated by policy stays gated
+    /// across an intervening return to `Ready` and a later chain walk never
+    /// re-reads or re-releases it. Extends the single-walk
+    /// `..._holds_across_rewalk` case with a *second* return to `Ready` — the
+    /// exact point where the old `held.clear()` dropped the gate.
     #[test]
     fn gate_survives_return_to_ready() {
         let (effects, state) = drive(
@@ -1310,11 +1385,11 @@ mod tests {
         assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
     }
 
-    /// Finding #4 regression: runtime corruption of a `Cascading` component
-    /// must gate the whole cascade, not just the reported component. The
-    /// runtime-corruption path and the recovery-exhaustion path now share one
-    /// `gate_by_policy` source of truth, so `Cascading` cascades in both. C2
-    /// `depends_on` C1; corrupting C1 must assert reset on C1 **and** C2.
+    /// Runtime corruption of a `Cascading` component must gate the whole
+    /// cascade, not just the reported component. The runtime-corruption path
+    /// and the recovery-exhaustion path share one `gate_by_policy` source of
+    /// truth, so `Cascading` cascades in both. C2 `depends_on` C1; corrupting
+    /// C1 must assert reset on C1 **and** C2.
     #[test]
     fn cascading_runtime_corruption_cascades() {
         let (effects, state) = drive(
