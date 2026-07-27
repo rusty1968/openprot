@@ -15,7 +15,6 @@ rust_library(
     visibility = ["//visibility:public"],
     deps = [
         "@rust_crates//:heapless",
-        "@rust_crates//:statig",
     ],
 )
 
