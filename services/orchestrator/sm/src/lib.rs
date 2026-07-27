@@ -23,11 +23,11 @@
 
 use core::marker::PhantomData;
 
+use statig::Outcome;
 use statig::blocking::{
     IntoStateMachine, IntoStateMachineExt as _, State as StatigState, StateMachine,
     Superstate as StatigSuperstate,
 };
-use statig::Outcome;
 
 // Internal capacities — these follow from how the machine works, not from the
 // deployment. The board owns `N` (chain length), `E` (effect-buffer size) and
@@ -348,6 +348,101 @@ enum Gating {
     NotGated,
 }
 
+/// A validated **chain of trust**: the ordered list of components the eRoT
+/// walks, verifies, and supervises, in walk order.
+///
+/// Build one with [`TryFrom`]/[`TryInto`] from a `heapless::Vec` of
+/// `(ComponentId, ComponentAttrs)` pairs. The conversion is the single place
+/// the reducer's structural invariants are enforced, so a malformed chain
+/// fails closed at the boundary instead of misbehaving later:
+///
+/// - the chain is non-empty,
+/// - every [`ComponentId`] is unique,
+/// - every `depends_on` names a component that exists and appears *strictly
+///   earlier* in the chain (no dangling, forward, or self dependencies — a
+///   dependency is always walked before its dependents),
+/// - the length fits `u8`, the `cursor` index type.
+///
+/// ```ignore
+/// let mut v = heapless::Vec::<_, 4>::new();
+/// v.push((ComponentId::new(0), ComponentAttrs::passive_required())).unwrap();
+/// let chain: Chain<4> = v.try_into()?;
+/// ```
+#[derive(Clone, Debug)]
+pub struct Chain<const N: usize> {
+    entries: heapless::Vec<(ComponentId, ComponentAttrs), N>,
+}
+
+/// Why a `heapless::Vec` of components is not a valid [`Chain`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChainError {
+    /// The chain has no components.
+    Empty,
+    /// The chain is longer than `u8::MAX`, so `cursor` could not index it.
+    TooLong,
+    /// The same [`ComponentId`] appears more than once.
+    DuplicateId(ComponentId),
+    /// A `depends_on` names an id that is not in the chain.
+    UnknownDependency {
+        component: ComponentId,
+        depends_on: ComponentId,
+    },
+    /// A `depends_on` names a component that does not appear strictly earlier
+    /// in the chain (a forward reference or a self-reference). A dependency
+    /// must be walked before its dependents.
+    ForwardDependency {
+        component: ComponentId,
+        depends_on: ComponentId,
+    },
+}
+
+impl<const N: usize> Chain<N> {
+    /// Consume the validated chain, yielding its components in walk order.
+    fn into_entries(self) -> heapless::Vec<(ComponentId, ComponentAttrs), N> {
+        self.entries
+    }
+}
+
+impl<const N: usize> TryFrom<heapless::Vec<(ComponentId, ComponentAttrs), N>> for Chain<N> {
+    type Error = ChainError;
+
+    fn try_from(
+        entries: heapless::Vec<(ComponentId, ComponentAttrs), N>,
+    ) -> Result<Self, ChainError> {
+        if entries.is_empty() {
+            return Err(ChainError::Empty);
+        }
+        if entries.len() > u8::MAX as usize {
+            return Err(ChainError::TooLong);
+        }
+        for (i, (id, _)) in entries.iter().enumerate() {
+            if entries[..i].iter().any(|(prev, _)| prev == id) {
+                return Err(ChainError::DuplicateId(*id));
+            }
+        }
+        for (i, (id, attrs)) in entries.iter().enumerate() {
+            if let Some(dep) = attrs.depends_on {
+                match entries.iter().position(|(cid, _)| *cid == dep) {
+                    None => {
+                        return Err(ChainError::UnknownDependency {
+                            component: *id,
+                            depends_on: dep,
+                        });
+                    }
+                    Some(j) if j >= i => {
+                        return Err(ChainError::ForwardDependency {
+                            component: *id,
+                            depends_on: dep,
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(Self { entries })
+    }
+}
+
 /// Shared storage: data that persists across events. `N` is the chain capacity
 /// and `E` the effect-buffer size — both board choices; the core sets no
 /// default. `E` must be at least `N + 2` (enforced in [`Rot::new`]).
@@ -382,15 +477,12 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// Compile-time floor: the effect buffer must hold a full cascade (`N`
     /// `AssertReset`s) plus the destination `PreSupervision` entry's two
     /// effects. Forced by `new` below, so an under-sized `E` fails to build.
-    const EFFECT_CAP_OK: () = assert!(
-        E >= N + 2,
-        "effect buffer E must be >= chain length N + 2"
-    );
+    const EFFECT_CAP_OK: () = assert!(E >= N + 2, "effect buffer E must be >= chain length N + 2");
 
-    pub fn new(chain: heapless::Vec<(ComponentId, ComponentAttrs), N>, max_retry: u8) -> Self {
+    pub fn new(chain: Chain<N>, max_retry: u8) -> Self {
         let () = Self::EFFECT_CAP_OK;
         Self {
-            chain,
+            chain: chain.into_entries(),
             cursor: 0,
             gated: heapless::Vec::new(),
             failed: None,
@@ -404,7 +496,10 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// Look up a component's attributes by id. `None` if the id is not in the
     /// chain (should never happen for ids the core itself produced).
     fn attrs_of(&self, id: ComponentId) -> Option<ComponentAttrs> {
-        self.chain.iter().find(|(cid, _)| *cid == id).map(|(_, a)| *a)
+        self.chain
+            .iter()
+            .find(|(cid, _)| *cid == id)
+            .map(|(_, a)| *a)
     }
 
     fn is_gated(&self, id: ComponentId) -> bool {
@@ -545,7 +640,12 @@ impl<const N: usize, const E: usize> IntoStateMachine for Rot<N, E> {
 }
 
 impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
-    fn call_handler(&mut self, rot: &mut Rot<N, E>, event: &Event, ctx: &mut Sink<E>) -> Outcome<State> {
+    fn call_handler(
+        &mut self,
+        rot: &mut Rot<N, E>,
+        event: &Event,
+        ctx: &mut Sink<E>,
+    ) -> Outcome<State> {
         match self {
             State::PowerOnReset => match event {
                 Event::PowerGood(PowerOnResult::Provisioned) => {
@@ -660,7 +760,10 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
                     // recovery, not a global budget (CSA: exhaustion is
                     // per-device). `failed` is always `Some` while in
                     // `Recovering`; treat a missing id as exhausted defensively.
-                    let attempts = rot.failed.map(|id| rot.bump_retry(id)).unwrap_or(rot.max_retry);
+                    let attempts = rot
+                        .failed
+                        .map(|id| rot.bump_retry(id))
+                        .unwrap_or(rot.max_retry);
                     if attempts < rot.max_retry {
                         Outcome::Transition(State::PreSupervision)
                     } else {
@@ -736,7 +839,12 @@ impl<const N: usize, const E: usize> StatigState<Rot<N, E>> for State {
 }
 
 impl<const N: usize, const E: usize> StatigSuperstate<Rot<N, E>> for Superstate<'_> {
-    fn call_handler(&mut self, rot: &mut Rot<N, E>, event: &Event, ctx: &mut Sink<E>) -> Outcome<State> {
+    fn call_handler(
+        &mut self,
+        rot: &mut Rot<N, E>,
+        event: &Event,
+        ctx: &mut Sink<E>,
+    ) -> Outcome<State> {
         match self {
             Superstate::SupervisingPlatform(_) => match event {
                 Event::AttestationChallenge => {
@@ -763,7 +871,7 @@ pub struct Orchestrator<const N: usize, const E: usize> {
 }
 
 impl<const N: usize, const E: usize> Orchestrator<N, E> {
-    pub fn new(chain: heapless::Vec<(ComponentId, ComponentAttrs), N>, max_retry: u8) -> Self {
+    pub fn new(chain: Chain<N>, max_retry: u8) -> Self {
         Self {
             machine: Rot::new(chain, max_retry).state_machine(),
         }
