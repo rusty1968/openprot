@@ -56,7 +56,8 @@ fn drive(
     chain: heapless::Vec<(ComponentId, ComponentAttrs), CAPACITY>,
     script: &[Event],
 ) -> (Vec<Effect>, State) {
-    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(chain, MAX_RETRY);
+    let mut orch =
+        Orchestrator::<CAPACITY, ECAP>::new(chain.try_into().expect("valid chain"), MAX_RETRY);
     let mut platform = Recorder::new();
     for &event in script {
         orch.dispatch(&mut platform, event);
@@ -238,7 +239,7 @@ fn retry_count_resets_after_successful_recovery() {
     let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
     c.push((C0, ComponentAttrs::passive_required()))
         .expect("fits");
-    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 2);
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), 2);
     let mut effects = Vec::new();
 
     for ev in [
@@ -277,7 +278,7 @@ fn retry_budget_is_per_component() {
         .expect("fits");
     c.push((C1, ComponentAttrs::passive_required()))
         .expect("fits");
-    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 2);
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), 2);
     let mut effects = Vec::new();
 
     for ev in [
@@ -304,7 +305,7 @@ fn custom_retry_cap_latches_sooner() {
     let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
     c.push((C0, ComponentAttrs::passive_required()))
         .expect("fits");
-    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 1);
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), 1);
     let mut effects = Vec::new();
     for ev in [
         BOOT,
@@ -326,7 +327,7 @@ fn custom_capacity_walks_full_chain() {
         c.push((id, ComponentAttrs::passive_required()))
             .expect("3 fits");
     }
-    let mut orch = Orchestrator::<3, 5>::new(c, MAX_RETRY);
+    let mut orch = Orchestrator::<3, 5>::new(c.try_into().expect("valid chain"), MAX_RETRY);
     let mut effects = Vec::new();
     for ev in [
         BOOT,
@@ -726,7 +727,7 @@ fn locked_is_terminal() {
     let mut c: heapless::Vec<(ComponentId, ComponentAttrs), CAPACITY> = heapless::Vec::new();
     c.push((C0, ComponentAttrs::passive_required())).unwrap();
     // max_retry = 1 so the first failed restore latches immediately.
-    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c, 1);
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), 1);
     let mut effects: Vec<Effect> = Vec::new();
 
     for ev in [BOOT, Event::VerificationFailed(C0), Event::Restored(C0)] {
@@ -786,7 +787,9 @@ fn speculative_read_effects_are_emitted_together() {
         chain(&[
             (C0, ComponentAttrs::active_required()),
             (C1, ComponentAttrs::passive_required()),
-        ]),
+        ])
+        .try_into()
+        .expect("valid chain"),
         MAX_RETRY,
     );
     let mut effects: Vec<Effect> = Vec::new();
@@ -830,4 +833,75 @@ fn single_active_chain_goes_directly_to_ready() {
             Effect::ReleaseReset(C0),
         ],
     );
+}
+
+/// An empty component list is not a valid chain of trust.
+#[test]
+fn chain_rejects_empty() {
+    let empty = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+    assert_eq!(Chain::try_from(empty).unwrap_err(), ChainError::Empty);
+}
+
+/// A repeated `ComponentId` is rejected: the reducer's linear id lookups would
+/// otherwise be ambiguous.
+#[test]
+fn chain_rejects_duplicate_id() {
+    let v = chain(&[
+        (C0, ComponentAttrs::passive_required()),
+        (C0, ComponentAttrs::passive_required()),
+    ]);
+    assert_eq!(Chain::try_from(v).unwrap_err(), ChainError::DuplicateId(C0),);
+}
+
+/// A `depends_on` that names a component not in the chain is rejected.
+#[test]
+fn chain_rejects_unknown_dependency() {
+    let v = chain(&[(C1, ComponentAttrs::passive_required().with_depends_on(C0))]);
+    assert_eq!(
+        Chain::try_from(v).unwrap_err(),
+        ChainError::UnknownDependency {
+            component: C1,
+            depends_on: C0,
+        },
+    );
+}
+
+/// A dependency must appear strictly earlier in the walk than its dependent;
+/// a forward reference is rejected.
+#[test]
+fn chain_rejects_forward_dependency() {
+    let v = chain(&[
+        (C0, ComponentAttrs::passive_required().with_depends_on(C1)),
+        (C1, ComponentAttrs::passive_cascading()),
+    ]);
+    assert_eq!(
+        Chain::try_from(v).unwrap_err(),
+        ChainError::ForwardDependency {
+            component: C0,
+            depends_on: C1,
+        },
+    );
+}
+
+/// A component may not depend on itself.
+#[test]
+fn chain_rejects_self_dependency() {
+    let v = chain(&[(C0, ComponentAttrs::passive_required().with_depends_on(C0))]);
+    assert_eq!(
+        Chain::try_from(v).unwrap_err(),
+        ChainError::ForwardDependency {
+            component: C0,
+            depends_on: C0,
+        },
+    );
+}
+
+/// A well-formed chain with a backward dependency validates successfully.
+#[test]
+fn chain_accepts_valid_dependency() {
+    let v = chain(&[
+        (C0, ComponentAttrs::passive_cascading()),
+        (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+    ]);
+    assert!(Chain::try_from(v).is_ok());
 }
