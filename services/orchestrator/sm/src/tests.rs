@@ -47,8 +47,9 @@ impl Recorder {
 }
 
 impl Platform for Recorder {
-    fn execute(&mut self, effect: Effect) {
+    fn execute(&mut self, effect: Effect) -> Result<(), EffectError> {
         self.recorded.push(effect);
+        Ok(())
     }
 }
 
@@ -249,7 +250,10 @@ fn retry_count_resets_after_successful_recovery() {
         Event::Restored(C0),
         Event::VerificationPassed(C0),
     ] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
     assert_eq!(orch.state(), State::Ready);
 
@@ -259,7 +263,10 @@ fn retry_count_resets_after_successful_recovery() {
         Event::Restored(C0),
         Event::VerificationPassed(C0),
     ] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
     assert_eq!(orch.state(), State::Ready);
     assert!(!effects[start..].contains(&Effect::LatchLockdown));
@@ -291,7 +298,10 @@ fn retry_budget_is_per_component() {
         Event::VerificationPassed(C0), // re-walk restarts at the top
         Event::VerificationPassed(C1), // chain done → Ready
     ] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
 
     assert_eq!(orch.state(), State::Ready);
@@ -313,7 +323,10 @@ fn custom_retry_cap_latches_sooner() {
         Event::CorruptionDetected(C0),
         Event::Restored(C0),
     ] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
     assert_eq!(orch.state(), State::Locked);
     assert_eq!(effects.last(), Some(&Effect::LatchLockdown));
@@ -335,7 +348,10 @@ fn custom_capacity_walks_full_chain() {
         Event::VerificationPassed(C1),
         Event::VerificationPassed(C2),
     ] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
     assert_eq!(orch.state(), State::Ready);
     assert_eq!(effects.last(), Some(&Effect::ReleaseReset(C2)));
@@ -731,7 +747,10 @@ fn locked_is_terminal() {
     let mut effects: Vec<Effect> = Vec::new();
 
     for ev in [BOOT, Event::VerificationFailed(C0), Event::Restored(C0)] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
     assert_eq!(orch.state(), State::Locked);
 
@@ -743,7 +762,10 @@ fn locked_is_terminal() {
         Event::UpdateRequest,
         Event::CorruptionDetected(C0),
     ] {
-        orch.dispatch_with(ev, |e| effects.push(e));
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(())
+        });
     }
     assert_eq!(
         effects.len(),
@@ -794,14 +816,20 @@ fn speculative_read_effects_are_emitted_together() {
     );
     let mut effects: Vec<Effect> = Vec::new();
 
-    orch.dispatch_with(BOOT, |e| effects.push(e));
+    orch.dispatch_with(BOOT, |e| {
+        effects.push(e);
+        Ok(())
+    });
     assert_eq!(
         effects,
         std::vec![Effect::ReadFirmware(C0), Effect::VerifyFirmware(C0)],
     );
 
     effects.clear();
-    orch.dispatch_with(Event::VerificationPassed(C0), |e| effects.push(e));
+    orch.dispatch_with(Event::VerificationPassed(C0), |e| {
+        effects.push(e);
+        Ok(())
+    });
     // All three effects emitted in the same handler, before ComponentReady.
     assert_eq!(
         effects,
@@ -904,4 +932,119 @@ fn chain_accepts_valid_dependency() {
         (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
     ]);
     assert!(Chain::try_from(v).is_ok());
+}
+
+/// A [`Platform`] that records every effect and fails a chosen one, to exercise
+/// the effect failure channel.
+struct FailOn {
+    trigger: Effect,
+    recorded: Vec<Effect>,
+    failed: bool,
+}
+
+impl FailOn {
+    fn new(trigger: Effect) -> Self {
+        Self {
+            trigger,
+            recorded: Vec::new(),
+            failed: false,
+        }
+    }
+}
+
+impl Platform for FailOn {
+    fn execute(&mut self, effect: Effect) -> Result<(), EffectError> {
+        self.recorded.push(effect);
+        if effect == self.trigger {
+            self.failed = true;
+            Err(EffectError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A failed reset actuation is fail-closed: the driver injects `EffectFailed`
+/// and the machine latches to `Locked`, emitting `LatchLockdown`.
+#[test]
+fn effect_failure_latches_lockdown() {
+    let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+    c.push((C0, ComponentAttrs::passive_required())).unwrap();
+    let mut orch =
+        Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), MAX_RETRY);
+    let mut plat = FailOn::new(Effect::ReleaseReset(C0));
+
+    orch.dispatch(&mut plat, BOOT); // ReadFirmware/VerifyFirmware C0 — both succeed
+    orch.dispatch(&mut plat, Event::VerificationPassed(C0)); // ReleaseReset(C0) fails
+
+    assert!(plat.failed, "the trigger effect should have been attempted");
+    assert_eq!(orch.state(), State::Locked);
+    assert!(plat.recorded.contains(&Effect::LatchLockdown));
+}
+
+/// A failed isolation actuation (`AssertReset`) is equally fail-closed: even a
+/// non-required component's containment failing latches the platform.
+#[test]
+fn failed_isolation_actuation_latches_lockdown() {
+    let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+    c.push((C0, ComponentAttrs::passive_required())).unwrap();
+    c.push((C1, ComponentAttrs::passive_isolable())).unwrap();
+    let mut orch =
+        Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), MAX_RETRY);
+    let mut plat = FailOn::new(Effect::AssertReset(C1));
+
+    orch.dispatch(&mut plat, BOOT);
+    orch.dispatch(&mut plat, Event::VerificationPassed(C0));
+    orch.dispatch(&mut plat, Event::VerificationPassed(C1)); // C1 released → Ready
+    orch.dispatch(&mut plat, Event::CorruptionDetected(C1)); // isolable → AssertReset(C1) fails
+
+    assert!(plat.failed);
+    assert_eq!(orch.state(), State::Locked);
+    assert!(plat.recorded.contains(&Effect::LatchLockdown));
+}
+
+/// A failed recovery actuation is fail-closed too: if the shell cannot even
+/// restore a required component's golden image, the platform latches rather
+/// than continuing with an unrecovered component.
+#[test]
+fn failed_restore_actuation_latches_lockdown() {
+    let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+    c.push((C0, ComponentAttrs::passive_required())).unwrap();
+    let mut orch =
+        Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), MAX_RETRY);
+    let mut plat = FailOn::new(Effect::RestoreGoldenImage(C0));
+
+    orch.dispatch(&mut plat, BOOT);
+    orch.dispatch(&mut plat, Event::VerificationFailed(C0)); // → Recovering → RestoreGoldenImage(C0) fails
+
+    assert!(plat.failed);
+    assert_eq!(orch.state(), State::Locked);
+    assert!(plat.recorded.contains(&Effect::LatchLockdown));
+}
+
+/// The lockdown latch is the last line of defense: even if *it* fails to
+/// actuate, the machine must not spin. The re-injected `EffectFailed` is
+/// ignored while `Locked`, so dispatch terminates and the latch is attempted
+/// exactly once.
+#[test]
+fn failed_lockdown_actuation_does_not_loop() {
+    let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+    c.push((C0, ComponentAttrs::passive_required())).unwrap();
+    let mut orch =
+        Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), MAX_RETRY);
+    let mut plat = FailOn::new(Effect::LatchLockdown);
+
+    // An unprovisioned power-on latches immediately; the latch actuation fails.
+    orch.dispatch(&mut plat, Event::PowerGood(PowerOnResult::Unprovisioned));
+
+    assert!(plat.failed, "the lockdown latch should have been attempted");
+    assert_eq!(orch.state(), State::Locked);
+    assert_eq!(
+        plat.recorded
+            .iter()
+            .filter(|&&e| e == Effect::LatchLockdown)
+            .count(),
+        1,
+        "a failing latch must not re-latch forever",
+    );
 }
