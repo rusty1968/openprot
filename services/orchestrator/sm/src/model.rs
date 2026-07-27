@@ -236,19 +236,32 @@ pub enum Effect {
     Emit(Event),
 }
 
-/// The states the machine can be in. None carry data; all mutable state lives
-/// in [`Rot`](crate::Rot) shared storage.
+/// The states the machine can be in. A variant carries exactly the data that is
+/// meaningful only while in that state; everything that spans states (the
+/// cursor, the gate set, retry counts) lives in [`Rot`](crate::Rot) shared
+/// storage.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum State {
     PowerOnReset,
     PreSupervision,
-    /// eRoT has released an `Active` component; waiting for its iRoT to finish
-    /// local verification and signal [`Event::ComponentReady`].
-    AwaitingReady,
+    /// eRoT has released an `Active` component; the payload is the component
+    /// whose iRoT readiness is outstanding (INV9).
+    ///
+    /// - `AwaitingReady(Some(id))` — waiting for `id`'s
+    ///   [`Event::ComponentReady`].
+    /// - `AwaitingReady(None)` — that readiness has been satisfied but the chain
+    ///   walk is not finished; the machine stays supervised while draining the
+    ///   remaining speculative verifications, and any further `ComponentReady`
+    ///   is spurious.
+    AwaitingReady(Option<ComponentId>),
     Ready,
     Updating,
-    Recovering,
+    /// A component failed verification (or was found corrupt under a
+    /// non-gating policy) and its golden image is being restored. The payload is
+    /// that component — always present, since the machine only enters this state
+    /// with a recovery target in hand.
+    Recovering(ComponentId),
     Locked,
 }
 

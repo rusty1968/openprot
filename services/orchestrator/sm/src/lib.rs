@@ -131,7 +131,6 @@ pub struct Rot<const N: usize, const E: usize> {
     /// trust-boundary gate: it persists across a return to `Ready` and is only
     /// cleared by a fresh `Rot` on `PowerOnReset`.
     gated: heapless::Vec<ComponentId, N>,
-    failed: Option<ComponentId>,
     /// Per-component consecutive failed-restore counts. An entry is present only
     /// for a component with at least one recorded attempt; absent means zero.
     /// Keyed by `ComponentId` so interleaved recoveries of different components
@@ -141,9 +140,6 @@ pub struct Rot<const N: usize, const E: usize> {
     /// cleared on a clean return to `Ready`.
     retries: heapless::Vec<(ComponentId, u8), N>,
     max_retry: u8,
-    /// The `Active` component whose iRoT readiness is outstanding. `Some` only
-    /// while in `AwaitingReady` (INV9).
-    awaiting: Option<ComponentId>,
     /// Ties the effect-buffer size `E` to this type (zero-sized).
     _effect_cap: PhantomData<[u8; E]>,
 }
@@ -160,10 +156,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             chain: chain.into_entries(),
             cursor: 0,
             gated: heapless::Vec::new(),
-            failed: None,
             retries: heapless::Vec::new(),
             max_retry,
-            awaiting: None,
             _effect_cap: PhantomData,
         }
     }
@@ -271,10 +265,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome {
         match self.gate_by_policy(ctx, id) {
             Gating::Gated => Outcome::Handled,
-            Gating::NotGated => {
-                self.failed = Some(id);
-                Outcome::Transition(State::Recovering)
-            }
+            Gating::NotGated => Outcome::Transition(State::Recovering(id)),
         }
     }
 
@@ -341,8 +332,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     if self.advance_to_next_ungated(ctx, next_idx) {
                         match current_kind {
                             Some(ComponentKind::Active) => {
-                                self.awaiting = Some(*id);
-                                Outcome::Transition(State::AwaitingReady)
+                                Outcome::Transition(State::AwaitingReady(Some(*id)))
                             }
                             _ => Outcome::Handled,
                         }
@@ -354,8 +344,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     // Recovery is attempted first for every failure, regardless
                     // of the component's recovery-failure policy (CSA: recover
                     // first, classify only once retries are exhausted).
-                    self.failed = Some(*id);
-                    Outcome::Transition(State::Recovering)
+                    Outcome::Transition(State::Recovering(*id))
                 }
                 // Minimal fix: react to a corruption report if one arrives,
                 // even though `PreSupervision` isn't linked to
@@ -370,19 +359,24 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 _ => Outcome::Super,
             },
 
-            State::AwaitingReady => match event {
+            // `awaiting` is the state's own payload, so changing it means
+            // re-entering the variant: `Outcome::Handled` leaves the payload
+            // untouched. That is behavior-identical to the old field write only
+            // because `AwaitingReady` has no entry action — do not add one.
+            State::AwaitingReady(awaiting) => match event {
                 Event::ComponentReady(id) => {
-                    if self.awaiting != Some(*id) {
+                    if awaiting != Some(*id) {
                         return Outcome::Handled; // spurious / stale (INV9)
                     }
-                    self.awaiting = None;
                     // If cursor is past the end, the eRoT side of the walk has
                     // already finished (chain done, or the remainder is held) —
                     // nothing left to verify, we're done.
                     if (self.cursor as usize) >= self.chain.len() {
                         Outcome::Transition(State::Ready)
                     } else {
-                        Outcome::Handled
+                        // Readiness satisfied, chain not done: stay supervised,
+                        // now awaiting nothing.
+                        Outcome::Transition(State::AwaitingReady(None))
                     }
                 }
                 Event::VerificationPassed(id) => {
@@ -392,6 +386,9 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     ctx.emit(Effect::ReleaseReset(*id));
                     let next_idx = (self.cursor as usize).saturating_add(1);
                     if self.advance_to_next_ungated(ctx, next_idx) {
+                        // `Handled` preserves the current payload, matching the
+                        // old behavior: `awaiting` was only ever cleared by
+                        // `ComponentReady` or `VerificationFailed`.
                         Outcome::Handled
                     } else {
                         Outcome::Transition(State::Ready)
@@ -400,9 +397,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 Event::VerificationFailed(id) => {
                     // Recovery is attempted first for every failure, regardless
                     // of the component's recovery-failure policy.
-                    self.failed = Some(*id);
-                    self.awaiting = None;
-                    Outcome::Transition(State::Recovering)
+                    Outcome::Transition(State::Recovering(*id))
                 }
                 _ => Outcome::Super,
             },
@@ -424,16 +419,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 _ => Outcome::Super,
             },
 
-            State::Recovering => match event {
+            State::Recovering(failed) => match event {
                 Event::Restored(_) => {
                     // Count this attempt against the specific component in
                     // recovery, not a global budget (CSA: exhaustion is
-                    // per-device). `failed` is always `Some` while in
-                    // `Recovering`; treat a missing id as exhausted defensively.
-                    let attempts = self
-                        .failed
-                        .map(|id| self.bump_retry(id))
-                        .unwrap_or(self.max_retry);
+                    // per-device). The recovery target is the state's payload,
+                    // so it is always present — no defensive fallback needed.
+                    let attempts = self.bump_retry(failed);
                     if attempts < self.max_retry {
                         Outcome::Transition(State::PreSupervision)
                     } else {
@@ -441,14 +433,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                         // the runtime-corruption path uses, so the two can never
                         // disagree. Gated → continue the walk; NotGated
                         // (Required/unknown) → lock down.
-                        match self.failed.map(|id| (id, self.gate_by_policy(ctx, id))) {
-                            Some((id, Gating::Gated)) => {
-                                self.clear_retry(id);
-                                self.failed = None;
+                        match self.gate_by_policy(ctx, failed) {
+                            Gating::Gated => {
+                                self.clear_retry(failed);
                                 Outcome::Transition(State::PreSupervision)
                             }
                             // `Required`, or an unknown/missing id: lock down.
-                            _ => {
+                            Gating::NotGated => {
                                 ctx.emit(Effect::Emit(Event::RecoveryFailed));
                                 Outcome::Handled
                             }
@@ -510,17 +501,14 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     fn entry_action(&mut self, state: State, ctx: &mut Sink<E>) {
         match state {
             State::PreSupervision => {
-                self.awaiting = None;
                 let _ = self.advance_to_next_ungated(ctx, 0);
             }
             State::Updating => {
                 ctx.emit(Effect::AuthenticateUpdate);
                 ctx.emit(Effect::StageUpdate);
             }
-            State::Recovering => {
-                if let Some(failed) = self.failed {
-                    ctx.emit(Effect::RestoreGoldenImage(failed));
-                }
+            State::Recovering(failed) => {
+                ctx.emit(Effect::RestoreGoldenImage(failed));
             }
             State::Locked => {
                 ctx.emit(Effect::LatchLockdown);
@@ -536,7 +524,6 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 // recovery episode is in flight, so every per-component streak
                 // resets to zero.
                 self.retries.clear();
-                self.failed = None;
             }
             _ => {}
         }
@@ -600,7 +587,7 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
     const fn is_supervised(state: State) -> bool {
         matches!(
             state,
-            State::AwaitingReady | State::Ready | State::Updating | State::Recovering
+            State::AwaitingReady(_) | State::Ready | State::Updating | State::Recovering(_)
         )
     }
 

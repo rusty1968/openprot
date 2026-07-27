@@ -209,7 +209,7 @@ fn corruption_during_presupervision_selfloop_triggers_recovery() {
             Event::CorruptionDetected(C0), // C0 already released, but caught anyway
         ],
     );
-    assert_eq!(state, State::Recovering);
+    assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
@@ -368,7 +368,7 @@ fn active_component_gates_on_component_ready() {
         ]),
         &[BOOT, Event::VerificationPassed(C0)],
     );
-    assert_eq!(state, State::AwaitingReady);
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
     assert!(effects.contains(&Effect::ReleaseReset(C0)));
     assert!(effects.contains(&Effect::ReadFirmware(C1)));
 
@@ -402,7 +402,7 @@ fn spurious_component_ready_is_ignored() {
             Event::ComponentReady(C1), // wrong id
         ],
     );
-    assert_eq!(state, State::AwaitingReady);
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
     assert!(!effects.contains(&Effect::ReleaseReset(C1)));
 }
 
@@ -420,7 +420,7 @@ fn attestation_in_awaiting_ready() {
             Event::AttestationChallenge,
         ],
     );
-    assert_eq!(state, State::AwaitingReady);
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
     assert_eq!(effects.last(), Some(&Effect::SignAttestation));
 }
 
@@ -593,7 +593,7 @@ fn required_runtime_corruption_triggers_recovery() {
             Event::CorruptionDetected(C0), // required → Recovering
         ],
     );
-    assert_eq!(state, State::Recovering);
+    assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
@@ -636,7 +636,7 @@ fn boot_failure_required_enters_recovering() {
         passive_required(&[C0, C1]),
         &[BOOT, Event::VerificationFailed(C0)],
     );
-    assert_eq!(state, State::Recovering);
+    assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
     // Component must never be released when its eRoT check failed.
     assert!(!effects.contains(&Effect::ReleaseReset(C0)));
@@ -676,7 +676,7 @@ fn required_failure_in_awaiting_ready_enters_recovering() {
             Event::VerificationFailed(C1), // required → Recovering
         ],
     );
-    assert_eq!(state, State::Recovering);
+    assert_eq!(state, State::Recovering(C1));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C1)));
     assert!(!effects.contains(&Effect::ReleaseReset(C1)));
 }
@@ -696,7 +696,7 @@ fn corruption_in_awaiting_ready_triggers_recovery() {
             Event::CorruptionDetected(C0),
         ],
     );
-    assert_eq!(state, State::Recovering);
+    assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
@@ -713,7 +713,7 @@ fn corruption_in_updating_triggers_recovery() {
             Event::CorruptionDetected(C0),
         ],
     );
-    assert_eq!(state, State::Recovering);
+    assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
@@ -839,7 +839,7 @@ fn speculative_read_effects_are_emitted_together() {
             Effect::VerifyFirmware(C1),
         ],
     );
-    assert_eq!(orch.state(), State::AwaitingReady);
+    assert_eq!(orch.state(), State::AwaitingReady(Some(C0)));
 }
 
 /// A chain with a single Active component goes directly to Ready on
