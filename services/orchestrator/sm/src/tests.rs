@@ -9,6 +9,7 @@ use std::vec::Vec;
 const C0: ComponentId = ComponentId::new(0);
 const C1: ComponentId = ComponentId::new(1);
 const C2: ComponentId = ComponentId::new(2);
+const C3: ComponentId = ComponentId::new(3);
 
 const BOOT: Event = Event::PowerGood(PowerOnResult::Provisioned);
 
@@ -740,6 +741,43 @@ fn cascading_exhaustion_reports_each_isolated() {
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
+/// Cascades propagate transitively, not just one hop: a `Cascading` failure at
+/// the root pulls down its direct dependent AND that dependent's dependent.
+/// This exercises the BFS re-enqueue in `cascade_hold` past a single iteration
+/// — propagation follows `depends_on` regardless of the dependent's own policy
+/// (C2/C3 are `Required` yet are still isolated because they hang off C1).
+#[test]
+fn cascading_runtime_corruption_cascades_transitively() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+            (C3, ComponentAttrs::passive_required().with_depends_on(C2)),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1),
+            Event::VerificationPassed(C2),
+            Event::VerificationPassed(C3), // walk done → Ready
+            Event::CorruptionDetected(C1), // Cascading root
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    // Root, its dependent, and the transitive dependent are all isolated and
+    // all reported — the two-hop chain C1 → C2 → C3 is fully gated.
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(effects.contains(&Effect::AssertReset(C2)));
+    assert!(effects.contains(&Effect::AssertReset(C3)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    assert!(effects.contains(&Effect::ReportIsolated(C2)));
+    assert!(effects.contains(&Effect::ReportIsolated(C3)));
+    // A non-required cascade never enters recovery or lockdown.
+    assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
 /// Runtime corruption under a non-`Required` policy reports too. This path
 /// never enters recovery at all, so without its own report the isolation would
 /// be silent.
@@ -940,6 +978,32 @@ fn corruption_in_updating_triggers_recovery() {
     );
     assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+}
+
+/// Concurrent faults: corruption of a *different* component arriving while the
+/// machine is already in `Recovering` re-targets recovery at the new component.
+/// `Recovering` is a supervised state, so `CorruptionDetected` falls through to
+/// the `SupervisingPlatform` handler even mid-recovery — the one supervising
+/// state with no other corruption-during-flight test. The second (Required)
+/// fault displaces the first: the machine ends in `Recovering(C2)`.
+#[test]
+fn corruption_while_recovering_retargets_to_new_component() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1, C2]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1),
+            Event::VerificationPassed(C2), // walk done → Ready
+            Event::CorruptionDetected(C1), // → Recovering(C1)
+            Event::CorruptionDetected(C2), // arrives mid-recovery → Recovering(C2)
+        ],
+    );
+    assert_eq!(state, State::Recovering(C2));
+    // Both recovery episodes kicked off a golden-image restore.
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C1)));
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C2)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
 /// UpdateVerified activates the staged image and returns to Ready.
