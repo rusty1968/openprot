@@ -63,10 +63,10 @@ enum Outcome {
 /// orchestrator gives each event a fresh `Sink` and drains it afterward.
 ///
 /// `E` is bounded from below by the chain length: the worst single event is a
-/// full cascade (up to `N` `AssertReset`s) plus the destination
-/// `PreSupervision` entry's `ReadFirmware`/`VerifyFirmware` (2), all landing in
-/// one `Sink`. `Rot::new` refuses to compile unless `E >= N + 2`, so a machine
-/// that builds can never overflow this buffer.
+/// full cascade (up to `N` `AssertReset`s, each paired with a `ReportIsolated`)
+/// plus the destination `PreSupervision` entry's `ReadFirmware`/`VerifyFirmware`
+/// (2), all landing in one `Sink`. `Rot::new` refuses to compile unless
+/// `E >= 2 * N + 2`, so a machine that builds can never overflow this buffer.
 pub struct Sink<const E: usize> {
     effects: heapless::Vec<Effect, E>,
 }
@@ -79,11 +79,11 @@ impl<const E: usize> Sink<E> {
     }
 
     /// Append one effect. `E` is sized so overflow is impossible for a machine
-    /// that compiles: `Rot::EFFECT_CAP_OK` proves `E >= N + 2` and no handler
-    /// emits more than `N + 2` effects into one `Sink`, so the push below can
-    /// never fail. The `Err` arm is therefore dead — dropped rather than
-    /// panicked, since a runtime panic here would be unreachable code shipped in
-    /// the binary.
+    /// that compiles: `Rot::EFFECT_CAP_OK` proves `E >= 2 * N + 2` and no
+    /// handler emits more than `2 * N + 2` effects into one `Sink`, so the push
+    /// below can never fail. The `Err` arm is therefore dead — dropped rather
+    /// than panicked, since a runtime panic here would be unreachable code
+    /// shipped in the binary.
     ///
     /// The driver runs the effects from one handler in the order they were
     /// emitted, and it does not run them as a single all-or-nothing group: if
@@ -91,14 +91,16 @@ impl<const E: usize> Sink<E> {
     /// effect fails, the driver stops there — it skips the rest and injects
     /// `EffectFailed` so the machine locks down. Stopping partway is still safe
     /// no matter what order the effects were in: a component is only ever
-    /// released after it has passed verification, and every other effect only
-    /// tightens things (holds a component in reset, or latches lockdown). So a
-    /// batch that stops early can only leave the platform more locked down, never
-    /// less.
+    /// released after it has passed verification, and every other effect either
+    /// tightens things (holds a component in reset, or latches lockdown) or just
+    /// reports what happened. So a batch that stops early can only leave the
+    /// platform more locked down, never less. A skipped report costs information,
+    /// not containment — and the batch was cut short by a failure that latches
+    /// lockdown anyway, which is the louder signal.
     pub fn emit(&mut self, effect: Effect) {
         // Dead Err arm: overflow is proved impossible by `Rot::EFFECT_CAP_OK`
-        // (`E >= N + 2`) plus the reducer never emitting more than `N + 2`
-        // effects into one Sink.
+        // (`E >= 2 * N + 2`) plus the reducer never emitting more than
+        // `2 * N + 2` effects into one Sink.
         let _ = self.effects.push(effect);
     }
 
@@ -125,7 +127,7 @@ enum Gating {
 
 /// Shared storage: data that persists across events. `N` is the chain capacity
 /// and `E` the effect-buffer size — both board choices; the core sets no
-/// default. `E` must be at least `N + 2` (enforced in [`Rot::new`]).
+/// default. `E` must be at least `2 * N + 2` (enforced in [`Rot::new`]).
 pub struct Rot<const N: usize, const E: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
     cursor: u8,
@@ -151,9 +153,13 @@ pub struct Rot<const N: usize, const E: usize> {
 
 impl<const N: usize, const E: usize> Rot<N, E> {
     /// Compile-time floor: the effect buffer must hold a full cascade (`N`
-    /// `AssertReset`s) plus the destination `PreSupervision` entry's two
-    /// effects. Forced by `new` below, so an under-sized `E` fails to build.
-    const EFFECT_CAP_OK: () = assert!(E >= N + 2, "effect buffer E must be >= chain length N + 2");
+    /// `AssertReset`s paired with `N` `ReportIsolated`s) plus the destination
+    /// `PreSupervision` entry's two effects. Forced by `new` below, so an
+    /// under-sized `E` fails to build.
+    const EFFECT_CAP_OK: () = assert!(
+        E >= 2 * N + 2,
+        "effect buffer E must be >= 2 * chain length N + 2",
+    );
 
     pub fn new(chain: Chain<N>, max_retry: u8) -> Self {
         let () = Self::EFFECT_CAP_OK;
@@ -240,7 +246,12 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     ///   outcome in its own context (recover, at runtime; lock down, once
     ///   recovery is exhausted).
     ///
-    /// Idempotent per component (guarded by `is_gated`).
+    /// Every component this gates also gets an [`Effect::ReportIsolated`], so
+    /// management software learns the platform is degraded no matter which path
+    /// took the component out of service.
+    ///
+    /// Idempotent per component (guarded by `is_gated`) — so is the reporting:
+    /// a component already gated is neither re-reset nor re-reported.
     fn gate_by_policy(&mut self, ctx: &mut Sink<E>, id: ComponentId) -> Gating {
         match self.attrs_of(id).map(|attrs| attrs.failure_policy) {
             Some(FailurePolicy::Cascading) => {
@@ -250,6 +261,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             Some(FailurePolicy::Isolable) => {
                 if !self.is_gated(id) {
                     ctx.emit(Effect::AssertReset(id));
+                    ctx.emit(Effect::ReportIsolated(id));
                     let _ = self.gated.push(id);
                 }
                 Gating::Gated
@@ -275,11 +287,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     }
 
     /// Hold `root` and cascade-hold every component whose `depends_on`
-    /// (transitively) names it. Emits `AssertReset` for each newly gated
-    /// component, including `root` itself.
+    /// (transitively) names it. Emits `AssertReset` and `ReportIsolated` for
+    /// each newly gated component, including `root` itself — every isolated
+    /// device is reported, not just the one that failed.
     fn cascade_hold(&mut self, ctx: &mut Sink<E>, root: ComponentId) {
         if !self.is_gated(root) {
             ctx.emit(Effect::AssertReset(root));
+            ctx.emit(Effect::ReportIsolated(root));
             let _ = self.gated.push(root);
         }
         let mut i = 0;
@@ -293,6 +307,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             }
             for id in newly_gated {
                 ctx.emit(Effect::AssertReset(id));
+                ctx.emit(Effect::ReportIsolated(id));
                 let _ = self.gated.push(id);
             }
         }
@@ -443,8 +458,12 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                                 self.clear_retry(failed);
                                 Outcome::Transition(State::PreSupervision)
                             }
-                            // `Required`, or an unknown/missing id: lock down.
+                            // `Required`, or an unknown/missing id: report the
+                            // component that forced the halt, then lock down.
+                            // The report precedes the internal `Emit`, so it is
+                            // actuated before the machine moves toward `Locked`.
                             Gating::NotGated => {
+                                ctx.emit(Effect::ReportRecoveryFailed(failed));
                                 ctx.emit(Effect::Emit(Event::RecoveryFailed));
                                 Outcome::Handled
                             }
@@ -602,8 +621,9 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
     /// The machine defines no exit actions and no supervisor entry/exit actions,
     /// so a transition's only side effect is the target state's entry action —
     /// and it lands in the *same* `ctx` as the handler that caused it, which the
-    /// `E >= N + 2` bound relies on (a full gate cascade plus the destination
-    /// `PreSupervision` entry's two effects share one `Sink`).
+    /// `E >= 2 * N + 2` bound relies on (a full gate cascade, with its paired
+    /// isolation reports, plus the destination `PreSupervision` entry's two
+    /// effects share one `Sink`).
     fn step(&mut self, event: &Event, ctx: &mut Sink<E>) {
         // 1. Dispatch to the current (leaf) state.
         let mut outcome = self.rot.handle(self.state, event, ctx);

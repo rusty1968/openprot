@@ -230,6 +230,16 @@ pub enum Effect {
     ActivateUpdate,
     DiscardStaged,
     RestoreGoldenImage(ComponentId),
+    /// Report that a component has been isolated (held in reset and removed
+    /// from the trust chain) so management software is aware the platform is
+    /// running degraded. Emitted once per component, at the moment it is
+    /// gated — CSA's degraded-mode clause requires the failure to be reported
+    /// through the platform management interface, not just contained.
+    ReportIsolated(ComponentId),
+    /// Report that a `Required` component exhausted its recovery attempts,
+    /// immediately before the machine latches to [`Locked`](crate::State::Locked).
+    /// Names the component that forced the halt.
+    ReportRecoveryFailed(ComponentId),
     LatchLockdown,
     /// Internal only — tells the orchestrator to handle this event next.
     /// Never forwarded to a [`Platform`](crate::Platform).
