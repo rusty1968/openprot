@@ -85,13 +85,16 @@ impl<const E: usize> Sink<E> {
     /// panicked, since a runtime panic here would be unreachable code shipped in
     /// the binary.
     ///
-    /// Effects buffered in one handler are actuated by the driver in emission
-    /// order and are **not** atomic: if effect *k* fails, effects `0..k` have
-    /// already hit hardware. Actuation is **fail-fast**, though — the driver
-    /// abandons `k+1..` and injects `EffectFailed` to latch lockdown, so no
-    /// effect ordered *after* a failure ever runs. A partially-applied prefix is
-    /// still possible, so emit the effect whose partial application is most
-    /// dangerous last, where it is least likely to be reached before a latch.
+    /// The driver runs the effects from one handler in the order they were
+    /// emitted, and it does not run them as a single all-or-nothing group: if
+    /// one effect fails, the ones before it have already happened. When an
+    /// effect fails, the driver stops there — it skips the rest and injects
+    /// `EffectFailed` so the machine locks down. Stopping partway is still safe
+    /// no matter what order the effects were in: a component is only ever
+    /// released after it has passed verification, and every other effect only
+    /// tightens things (holds a component in reset, or latches lockdown). So a
+    /// batch that stops early can only leave the platform more locked down, never
+    /// less.
     pub fn emit(&mut self, effect: Effect) {
         // Dead Err arm: overflow is proved impossible by `Rot::EFFECT_CAP_OK`
         // (`E >= N + 2`) plus the reducer never emitting more than `N + 2`
