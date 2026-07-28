@@ -201,6 +201,11 @@ pub enum Event {
     Restored(ComponentId),
     /// A required component's recovery was exhausted.
     RecoveryFailed,
+    /// The shell's boot-progress watchdog fired: `id` did not report readiness
+    /// within its configured boot timeout. Treated as a verification failure —
+    /// the awaited component enters recovery; a timeout for any other `id` is
+    /// stale/spurious and dropped.
+    Timeout(ComponentId),
     /// The shell could not carry out an emitted [`Effect`]; fail-closed, it
     /// latches to [`State::Locked`] from any state. Injected by the driver when
     /// a [`Platform::execute`](crate::Platform::execute) call fails; never
