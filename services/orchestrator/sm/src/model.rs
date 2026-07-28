@@ -195,6 +195,11 @@ pub enum Event {
     UpdateVerified,
     /// The staged update failed authentication.
     UpdateRejected,
+    /// The activated image proved itself healthy at runtime (supervised
+    /// health / attestation pass — not mere boot). Gates the anti-rollback
+    /// commit: only now is it safe to advance the SVN floor past this image,
+    /// because it has demonstrated it runs, not merely that it authenticated.
+    BootConfirmed(ComponentId),
     /// This component was found corrupt at runtime.
     CorruptionDetected(ComponentId),
     /// This component's golden image has been restored.
@@ -234,6 +239,13 @@ pub enum Effect {
     StageUpdate,
     ActivateUpdate,
     DiscardStaged,
+    /// Advance the anti-rollback (SVN) floor past `id`'s now-confirmed image.
+    /// Deliberately decoupled from [`ActivateUpdate`]: activation happens on
+    /// authentication (`UpdateVerified`), but the floor may only move once the
+    /// image has proven healthy ([`Event::BootConfirmed`]). Committing the
+    /// floor earlier would burn anti-rollback on an image that authenticated
+    /// but has not yet demonstrated it can boot and run.
+    CommitSvnFloor(ComponentId),
     RestoreGoldenImage(ComponentId),
     /// Report that a component has been isolated (held in reset and removed
     /// from the trust chain) so management software is aware the platform is
