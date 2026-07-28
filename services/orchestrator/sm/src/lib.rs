@@ -419,6 +419,18 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     // of the component's recovery-failure policy.
                     Outcome::Transition(State::Recovering(*id))
                 }
+                Event::Timeout(id) => {
+                    // The boot watchdog fired. Only the component we are
+                    // actually waiting on matters; a timeout for any other id
+                    // is stale or spurious and is dropped (same treatment as a
+                    // stale `ComponentReady`, INV9). The awaited component is
+                    // treated as a verification failure and enters recovery.
+                    if awaiting != Some(*id) {
+                        Outcome::Handled
+                    } else {
+                        Outcome::Transition(State::Recovering(*id))
+                    }
+                }
                 _ => Outcome::Super,
             },
 
