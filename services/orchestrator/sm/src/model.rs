@@ -32,8 +32,15 @@ pub enum ComponentKind {
     /// and iRoT-side (local self-verification) checks apply. The machine waits in
     /// [`State::AwaitingReady`] for [`Event::ComponentReady`] before advancing.
     Active,
-    /// No integrated iRoT. The eRoT's signature + SVN check is the only gate.
-    /// The chain walk advances immediately after `ReleaseReset`.
+    /// No integrated iRoT. The eRoT's signature + SVN check is the only *trust*
+    /// gate, so the chain walk advances speculatively after `ReleaseReset`
+    /// without blocking in [`State::AwaitingReady`]. The released component is
+    /// still watched for boot-progress liveness ([`Event::Booted`]) under the
+    /// same per-component watchdog as an `Active` component's
+    /// [`Event::ComponentReady`]: a passive device that never reports in before
+    /// its [`Event::Timeout`] is recovered like any other boot failure. CSA
+    /// boot-progress checkpointing is device-agnostic — every released device
+    /// owes a boot-progress signal, iRoT or not.
     Passive,
 }
 
@@ -187,6 +194,12 @@ pub enum Event {
     VerificationFailed(ComponentId),
     /// An `Active` component's iRoT has finished local verification and is ready.
     ComponentReady(ComponentId),
+    /// A `Passive` component reported boot-progress liveness — its firmware came
+    /// up. The passive-tier counterpart to [`Event::ComponentReady`]: a passive
+    /// component has no iRoT to self-verify, so "it booted" is the only
+    /// post-release signal it can produce. Clears that component's boot-progress
+    /// watchdog. Mirrors fwmanager's `BootProgress::Booted`.
+    Booted(ComponentId),
     /// A challenger has requested a signed attestation.
     AttestationChallenge,
     /// A firmware update has been requested.
@@ -206,10 +219,14 @@ pub enum Event {
     Restored(ComponentId),
     /// A required component's recovery was exhausted.
     RecoveryFailed,
-    /// The shell's boot-progress watchdog fired: `id` did not report readiness
-    /// within its configured boot timeout. Treated as a verification failure —
-    /// the awaited component enters recovery; a timeout for any other `id` is
-    /// stale/spurious and dropped.
+    /// The shell's boot-progress watchdog fired: `id` did not report its
+    /// boot-progress signal ([`Event::ComponentReady`] for an `Active`
+    /// component, [`Event::Booted`] for a `Passive` one) within its configured
+    /// boot timeout. Treated as a verification failure — a component still
+    /// awaiting boot-progress enters recovery. A timeout for a component that is
+    /// not awaiting boot (never released, already reported in, or already gated)
+    /// is stale/spurious and dropped. The watchdog is per component and
+    /// device-agnostic, matching CSA boot-progress checkpointing.
     Timeout(ComponentId),
     /// The shell could not carry out an emitted [`Effect`]; fail-closed, it
     /// latches to [`State::Locked`] from any state. Injected by the driver when
@@ -273,7 +290,9 @@ pub enum State {
     PowerOnReset,
     PreSupervision,
     /// eRoT has released an `Active` component; the payload is the component
-    /// whose iRoT readiness is outstanding (INV9).
+    /// whose iRoT readiness is outstanding (INV9). Only the active-tier readiness
+    /// checkpoint lives on this payload; per-component boot-progress liveness
+    /// (for both tiers) is tracked in each component's status, not here.
     ///
     /// - `AwaitingReady(Some(id))` — waiting for `id`'s
     ///   [`Event::ComponentReady`].
