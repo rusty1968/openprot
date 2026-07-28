@@ -1306,3 +1306,49 @@ fn batch_actuation_is_fail_fast() {
     assert_eq!(orch.state(), State::Locked);
     assert!(plat.recorded.contains(&Effect::LatchLockdown));
 }
+
+/// GAP 1 (red): a `Required` corruption of another device while an update is in
+/// flight preempts the update but leaves the staged image dangling. Correct
+/// behavior emits `DiscardStaged` when leaving `Updating` for recovery.
+#[test]
+fn corruption_during_update_discards_staged() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1), // → Ready
+            Event::UpdateRequest,          // → Updating (AuthenticateUpdate, StageUpdate)
+            Event::CorruptionDetected(C1), // Required corruption preempts the update
+        ],
+    );
+    assert_eq!(state, State::Recovering(C1));
+    assert!(
+        effects.contains(&Effect::DiscardStaged),
+        "leaving Updating for recovery must discard the staged image",
+    );
+}
+
+/// GAP 2 (red): a second `Required` corruption while already recovering clobbers
+/// the single `Recovering` slot, and because `Restored` is id-blind a restore
+/// for the *displaced* target is mis-credited to the new one. Correct behavior:
+/// a `Restored` whose id is not the recovery target does not advance recovery.
+#[test]
+fn restored_for_wrong_component_does_not_advance_recovery() {
+    let (_effects, state) = drive(
+        passive_required(&[C0, C1]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1), // → Ready
+            Event::CorruptionDetected(C0), // → Recovering(C0)
+            Event::CorruptionDetected(C1), // clobbers → Recovering(C1)
+            Event::Restored(C0),           // restore of the *displaced* target
+        ],
+    );
+    assert_eq!(
+        state,
+        State::Recovering(C1),
+        "a Restored for a non-target component must not be credited to the current recovery",
+    );
+}

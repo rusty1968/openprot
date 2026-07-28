@@ -448,11 +448,29 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     ctx.emit(Effect::DiscardStaged);
                     Outcome::Transition(State::Ready)
                 }
+                Event::CorruptionDetected(id) => {
+                    let outcome = self.handle_corruption(*id, ctx);
+                    // Only a *preemption* (transition out to recovery) orphans
+                    // the staged image. An `Isolable`/`Cascading` corruption
+                    // returns `Handled` and the update continues untouched, so
+                    // its staged image must survive — do not discard then.
+                    if matches!(outcome, Outcome::Transition(State::Recovering(_))) {
+                        ctx.emit(Effect::DiscardStaged);
+                    }
+                    outcome
+                }
                 _ => Outcome::Super,
             },
 
             State::Recovering(failed) => match event {
-                Event::Restored(_) => {
+                Event::Restored(id) => {
+                    // A `Restored` for a component other than the current
+                    // recovery target (e.g. an episode displaced by a later
+                    // corruption) must not be credited to this recovery. Drop
+                    // it; the eventual re-walk re-verifies every component.
+                    if *id != failed {
+                        return Outcome::Handled;
+                    }
                     // Count this attempt against the specific component in
                     // recovery, not a global budget (CSA: exhaustion is
                     // per-device). The recovery target is the state's payload,
