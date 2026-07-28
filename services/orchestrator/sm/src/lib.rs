@@ -125,27 +125,52 @@ enum Gating {
     NotGated,
 }
 
+/// Per-component service lifecycle — the ComponentStatus prototype. One
+/// [`ComponentLifecycle`] plus a retry count is stored per chain component,
+/// replacing the former `gated` set and `retries` map. NOTE: this prototype does
+/// **not** move the walk-phase payloads (`AwaitingReady`/`Recovering`) off the
+/// global [`State`]; see the evaluation for why those largely stay global. Named
+/// for the *component service* axis to keep it distinct from fwmanager's
+/// trial-boot/commit (update-slot) lifecycle, which is a separate concern.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ComponentLifecycle {
+    /// In the normal flow: held, under verification, or released. The global
+    /// `State` still carries which of those the walk is in.
+    Nominal,
+    /// Durably gated out of service — was membership in `gated`. Has a live
+    /// `AssertReset` and is skipped on every chain walk.
+    Isolated,
+}
+
+/// One per-component record (see [`Rot::statuses`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ComponentStatus {
+    lifecycle: ComponentLifecycle,
+    /// Consecutive failed-restore count (INV7: consecutive only).
+    retry: u8,
+}
+
+impl Default for ComponentStatus {
+    fn default() -> Self {
+        Self {
+            lifecycle: ComponentLifecycle::Nominal,
+            retry: 0,
+        }
+    }
+}
+
 /// Shared storage: data that persists across events. `N` is the chain capacity
 /// and `E` the effect-buffer size — both board choices; the core sets no
 /// default. `E` must be at least `2 * N + 2` (enforced in [`Rot::new`]).
 pub struct Rot<const N: usize, const E: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
     cursor: u8,
-    /// Components physically held in reset by a policy decision: runtime
-    /// corruption of a non-required component, or recovery exhausted under
-    /// `FailurePolicy::Isolable` or `Cascading`. Each id here has a live
-    /// `AssertReset` and is skipped on every chain walk. This is a **durable**
-    /// trust-boundary gate: it persists across a return to `Ready` and is only
-    /// cleared by a fresh `Rot` on `PowerOnReset`.
-    gated: heapless::Vec<ComponentId, N>,
-    /// Per-component consecutive failed-restore counts. An entry is present only
-    /// for a component with at least one recorded attempt; absent means zero.
-    /// Keyed by `ComponentId` so interleaved recoveries of different components
-    /// never share a retry budget — CSA frames recovery-attempt exhaustion per
-    /// device, not as a single global counter. A component's entry is cleared
-    /// when it passes verification (recovered) or is gated, and the whole map is
-    /// cleared on a clean return to `Ready`.
-    retries: heapless::Vec<(ComponentId, u8), N>,
+    /// One record per chain component (parallel to `chain` by index). Folds the
+    /// former `gated` set and `retries` map into a single per-component
+    /// [`ComponentStatus`]: `lifecycle` replaces membership in `gated`
+    /// (`Isolated`), and `retry` replaces the `retries` count. Durable across a
+    /// return to `Ready`; only a fresh `Rot` on `PowerOnReset` resets it.
+    statuses: heapless::Vec<ComponentStatus, N>,
     max_retry: u8,
     /// Ties the effect-buffer size `E` to this type (zero-sized).
     _effect_cap: PhantomData<[u8; E]>,
@@ -163,11 +188,16 @@ impl<const N: usize, const E: usize> Rot<N, E> {
 
     pub fn new(chain: Chain<N>, max_retry: u8) -> Self {
         let () = Self::EFFECT_CAP_OK;
+        let chain = chain.into_entries();
+        // One status record per chain component, parallel by index.
+        let mut statuses = heapless::Vec::new();
+        for _ in 0..chain.len() {
+            let _ = statuses.push(ComponentStatus::default());
+        }
         Self {
-            chain: chain.into_entries(),
+            chain,
             cursor: 0,
-            gated: heapless::Vec::new(),
-            retries: heapless::Vec::new(),
+            statuses,
             max_retry,
             _effect_cap: PhantomData,
         }
@@ -182,30 +212,52 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             .map(|(_, a)| *a)
     }
 
+    /// Index of `id` in the parallel `chain`/`statuses` arrays. `None` if the
+    /// id is not in the chain (should never happen for core-produced ids).
+    fn status_index(&self, id: ComponentId) -> Option<usize> {
+        self.chain.iter().position(|(cid, _)| *cid == id)
+    }
+
     fn is_gated(&self, id: ComponentId) -> bool {
-        self.gated.iter().any(|h| *h == id)
+        self.status_index(id)
+            .is_some_and(|i| self.statuses[i].lifecycle == ComponentLifecycle::Isolated)
+    }
+
+    /// Gate one component out of service, returning `true` if this newly gated
+    /// it (`false` if already `Isolated`). Emits the paired `AssertReset` +
+    /// `ReportIsolated` only on the newly-gated transition, so reporting is
+    /// idempotent per component.
+    fn gate_one(&mut self, ctx: &mut Sink<E>, id: ComponentId) -> bool {
+        if self.is_gated(id) {
+            return false;
+        }
+        ctx.emit(Effect::AssertReset(id));
+        ctx.emit(Effect::ReportIsolated(id));
+        if let Some(i) = self.status_index(id) {
+            self.statuses[i].lifecycle = ComponentLifecycle::Isolated;
+        }
+        true
     }
 
     /// Increment `id`'s consecutive failed-restore count and return the new
     /// value. Counts are kept per component so that interleaved recovery
     /// episodes for different components never share a budget.
     fn bump_retry(&mut self, id: ComponentId) -> u8 {
-        for entry in self.retries.iter_mut() {
-            if entry.0 == id {
-                entry.1 = entry.1.saturating_add(1);
-                return entry.1;
+        match self.status_index(id) {
+            Some(i) => {
+                self.statuses[i].retry = self.statuses[i].retry.saturating_add(1);
+                self.statuses[i].retry
             }
+            None => 0,
         }
-        let _ = self.retries.push((id, 1));
-        1
     }
 
     /// Drop `id`'s retry count. Called when the component recovers (passes
     /// verification) or is gated — either way its consecutive-failure streak
     /// ends, so a future failure starts counting fresh (INV7: consecutive only).
     fn clear_retry(&mut self, id: ComponentId) {
-        if let Some(pos) = self.retries.iter().position(|e| e.0 == id) {
-            let _ = self.retries.swap_remove(pos);
+        if let Some(i) = self.status_index(id) {
+            self.statuses[i].retry = 0;
         }
     }
 
@@ -259,11 +311,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 Gating::Gated
             }
             Some(FailurePolicy::Isolable) => {
-                if !self.is_gated(id) {
-                    ctx.emit(Effect::AssertReset(id));
-                    ctx.emit(Effect::ReportIsolated(id));
-                    let _ = self.gated.push(id);
-                }
+                self.gate_one(ctx, id);
                 Gating::Gated
             }
             // `Required`, or an unknown/missing id: not a gating policy.
@@ -291,13 +339,15 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// each newly gated component, including `root` itself — every isolated
     /// device is reported, not just the one that failed.
     fn cascade_hold(&mut self, ctx: &mut Sink<E>, root: ComponentId) {
-        if !self.is_gated(root) {
-            ctx.emit(Effect::AssertReset(root));
-            ctx.emit(Effect::ReportIsolated(root));
-            let _ = self.gated.push(root);
+        // BFS over the growing isolation front. `frontier` holds the components
+        // gated so far whose dependents still need visiting — the same order the
+        // old `gated`-Vec walk used, now that `gated` is folded into `statuses`.
+        let mut frontier: heapless::Vec<ComponentId, N> = heapless::Vec::new();
+        if self.gate_one(ctx, root) {
+            let _ = frontier.push(root);
         }
         let mut i = 0;
-        while let Some(&holder) = self.gated.get(i) {
+        while let Some(&holder) = frontier.get(i) {
             i += 1;
             let mut newly_gated: heapless::Vec<ComponentId, N> = heapless::Vec::new();
             for &(id, attrs) in self.chain.iter() {
@@ -306,9 +356,9 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 }
             }
             for id in newly_gated {
-                ctx.emit(Effect::AssertReset(id));
-                ctx.emit(Effect::ReportIsolated(id));
-                let _ = self.gated.push(id);
+                if self.gate_one(ctx, id) {
+                    let _ = frontier.push(id);
+                }
             }
         }
     }
@@ -576,8 +626,10 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 //
                 // Retry counts, by contrast, ARE cleared: a clean boot means no
                 // recovery episode is in flight, so every per-component streak
-                // resets to zero.
-                self.retries.clear();
+                // resets to zero. (The `Isolated` lifecycle is preserved.)
+                for s in self.statuses.iter_mut() {
+                    s.retry = 0;
+                }
             }
             _ => {}
         }
