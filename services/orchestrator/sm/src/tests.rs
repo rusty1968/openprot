@@ -1048,3 +1048,36 @@ fn failed_lockdown_actuation_does_not_loop() {
         "a failing latch must not re-latch forever",
     );
 }
+
+/// Actuation is fail-fast: once an effect in a batch fails, no effect ordered
+/// *after* it is attempted. Here `VerificationPassed(C0)` emits the batch
+/// `[ReleaseReset(C0), ReadFirmware(C1), VerifyFirmware(C1)]`; failing the first
+/// effect must abandon the two speculative reads of `C1` and latch, rather than
+/// actuate them for a transition that is immediately overridden by `Locked`.
+#[test]
+fn batch_actuation_is_fail_fast() {
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
+        passive_required(&[C0, C1]).try_into().expect("valid chain"),
+        MAX_RETRY,
+    );
+    let mut plat = FailOn::new(Effect::ReleaseReset(C0));
+
+    orch.dispatch(&mut plat, BOOT); // ReadFirmware/VerifyFirmware C0 — both succeed
+    orch.dispatch(&mut plat, Event::VerificationPassed(C0)); // ReleaseReset(C0) fails first
+
+    assert!(plat.failed, "the failing effect should have been attempted");
+    assert!(
+        plat.recorded.contains(&Effect::ReleaseReset(C0)),
+        "the failing effect itself is attempted",
+    );
+    assert!(
+        !plat.recorded.contains(&Effect::ReadFirmware(C1)),
+        "an effect ordered after the failure must not be actuated",
+    );
+    assert!(
+        !plat.recorded.contains(&Effect::VerifyFirmware(C1)),
+        "an effect ordered after the failure must not be actuated",
+    );
+    assert_eq!(orch.state(), State::Locked);
+    assert!(plat.recorded.contains(&Effect::LatchLockdown));
+}

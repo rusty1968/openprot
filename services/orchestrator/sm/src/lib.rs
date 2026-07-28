@@ -87,9 +87,11 @@ impl<const E: usize> Sink<E> {
     ///
     /// Effects buffered in one handler are actuated by the driver in emission
     /// order and are **not** atomic: if effect *k* fails, effects `0..k` have
-    /// already hit hardware and `k+1..` still run before the injected
-    /// `EffectFailed` latches lockdown. Emit the most irreversible effect of a
-    /// batch last, so a mid-batch failure latches before it rather than after.
+    /// already hit hardware. Actuation is **fail-fast**, though — the driver
+    /// abandons `k+1..` and injects `EffectFailed` to latch lockdown, so no
+    /// effect ordered *after* a failure ever runs. A partially-applied prefix is
+    /// still possible, so emit the effect whose partial application is most
+    /// dangerous last, where it is least likely to be reached before a latch.
     pub fn emit(&mut self, effect: Effect) {
         // Dead Err arm: overflow is proved impossible by `Rot::EFFECT_CAP_OK`
         // (`E >= N + 2`) plus the reducer never emitting more than `N + 2`
@@ -655,16 +657,26 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
                         let _ = pending.push(internal);
                     }
                     external => {
-                        if on_effect(external).is_err() && !pending.contains(&Event::EffectFailed) {
-                            // Fail-closed, but only once: `EffectFailed` is
-                            // idempotent and terminal (drives to `Locked`, which
-                            // discards everything after), so a second injection
-                            // would be a no-op. De-duping against this
-                            // append-only queue — which still holds the first
-                            // `EffectFailed` as its own marker — caps the queue at
-                            // the worst case `PENDING_CAP` is sized for. Dead Err
-                            // arm: that bound is below PENDING_CAP.
-                            let _ = pending.push(Event::EffectFailed);
+                        if on_effect(external).is_err() {
+                            // Fail-closed AND fail-fast: abandon the rest of this
+                            // batch so no effect ordered after the failed one hits
+                            // hardware. `step` has already advanced the state as if
+                            // the whole batch applied, so actuating `k+1..` would
+                            // carry out effects for a transition we are about to
+                            // override by latching to `Locked`.
+                            //
+                            // Inject `EffectFailed` once: it is idempotent and
+                            // terminal (drives to `Locked`, which discards
+                            // everything after), so a second injection would be a
+                            // no-op. De-duping against this append-only queue —
+                            // which still holds the first `EffectFailed` as its own
+                            // marker — caps the queue at the worst case
+                            // `PENDING_CAP` is sized for. Dead Err arm: that bound
+                            // is below PENDING_CAP.
+                            if !pending.contains(&Event::EffectFailed) {
+                                let _ = pending.push(Event::EffectFailed);
+                            }
+                            break;
                         }
                     }
                 }
