@@ -96,7 +96,7 @@ pub struct ComponentAttrs {
 |---|---|
 | `Required` | → `Recovering`; component held in reset; chain walk halts until restored |
 | `Isolable` | component held in reset; cursor advances; chain walk continues; no cascade to dependents |
-| `Cascading` | component held in reset; added to `Rot.held`; any component whose `depends_on` matches this id is also held in reset and skipped; cursor advances; chain walk continues |
+| `Cascading` | component marked `Isolated` (held in reset); any component whose `depends_on` matches this id is also marked `Isolated` and skipped; cursor advances; chain walk continues |
 
 A component that fails verification is **never** released from reset regardless
 of its failure policy — releasing a component whose firmware failed verification
@@ -104,12 +104,13 @@ would mean running untrusted code, which breaks the trust invariant.
 
 `depends_on` is only meaningful when the named component has `FailurePolicy::Cascading`.
 Only `Cascading`-failed components (and their transitively cascade-skipped dependents)
-are added to `Rot.held`. Before emitting `ReadFirmware` for any component, the core
-checks whether its `depends_on` names a component in `Rot.held`; if so, the depending
-component is also held in reset and added to `held` without emitting `ReadFirmware` or
-`VerifyFirmware`. This check repeats for each newly-held component's successors until
-no further cascade is triggered. An `Isolable` failure skips only the failed component;
-it does not populate `held` and causes no downstream cascade.
+are marked `Isolated`. Before emitting `ReadFirmware` for any component, the core
+checks whether its `depends_on` names a component already marked `Isolated`; if so, the
+depending component is also held in reset and marked `Isolated` without emitting
+`ReadFirmware` or `VerifyFirmware`. This check repeats for each newly-isolated
+component's successors until no further cascade is triggered. An `Isolable` failure
+skips only the failed component; it marks nothing else `Isolated` and causes no
+downstream cascade.
 
 Convenience constructors: `ComponentAttrs::active_required()`,
 `passive_required()`, `active_isolable()`, `passive_isolable()`,
@@ -280,7 +281,7 @@ It only emits descriptions. The complete split:
 | Release from reset | emits `ReleaseReset(id)` | executes: eRoT drives reset GPIO or equivalent |
 | Detect iRoT readiness | waits for `ComponentReady(id)` event | observes: integrated iRoT signals readiness (MCTP channel-up, GPIO, etc.); calls `dispatch` |
 | Per-component failure policy | checks `attrs.failure_policy` in handler | none — policy is encoded in the chain at startup |
-| Cascade-skip evaluation | checks `attrs.depends_on` against `Rot.held` before emitting `ReadFirmware` | encodes the dependency graph at chain-build time |
+| Cascade-skip evaluation | checks `attrs.depends_on` against the `Isolated` components in `statuses` before emitting `ReadFirmware` | encodes the dependency graph at chain-build time |
 | Recovery region membership | reads `attrs.recovery_region` when entering `Recovering` | assigns each component to a region at chain-build time |
 
 ---

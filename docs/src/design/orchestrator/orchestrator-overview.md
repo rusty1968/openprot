@@ -12,44 +12,11 @@ surrounding shell carries out; every piece of outside information arrives as an
 
 ## State Topology
 
-The diagram below shows the reachable states and the events (with guards) that
-drive transitions between them. Effects are omitted here to keep the topology
-readable — see [State Machine](./orchestrator-machine.md) for the full diagram
-with entry actions and effects.
-
-```mermaid
-stateDiagram-v2
-    [*] --> PowerOnReset
-
-    PowerOnReset --> PreSupervision : PowerGood [Provisioned]
-    PowerOnReset --> Locked            : PowerGood [Unprovisioned]
-    PowerOnReset --> Locked            : PowerGood [SelfVerificationFailed]
-
-    PreSupervision --> PreSupervision : VerificationPassed [more, Passive]
-
-    state SupervisingPlatform {
-        AwaitingReady --> Ready      : ComponentReady [chain done]
-        AwaitingReady --> Recovering : VerificationFailed [Required]
-        AwaitingReady --> Recovering : Timeout [id == awaiting]
-        Ready     --> Updating       : UpdateRequest
-        Updating  --> Ready          : UpdateVerified / UpdateRejected
-        Ready     --> Recovering     : CorruptionDetected [required]
-        Updating  --> Recovering     : CorruptionDetected [required]
-    }
-
-    SupervisingPlatform --> SupervisingPlatform : AttestationChallenge
-    SupervisingPlatform --> SupervisingPlatform : CorruptionDetected [optional]
-
-    PreSupervision --> AwaitingReady : VerificationPassed [more, Active]
-    PreSupervision --> Ready         : VerificationPassed [chain done]
-    PreSupervision --> Recovering    : VerificationFailed
-
-    Recovering --> PreSupervision : Restored [retry < max_retry]
-    Recovering --> PreSupervision : Restored [retry >= max_retry, Isolable or Cascading]
-    Recovering --> Locked            : Restored [retry >= max_retry, Required]
-
-    Locked --> [*]
-```
+The reachable states, the events (with guards) that drive transitions between
+them, and the effects each transition emits are all shown in the full state
+diagram in [State Machine](./orchestrator-machine.md#state-machine). That diagram
+is the single source of truth for the topology; it is not duplicated here to
+avoid the two drifting apart.
 
 ## Documents
 
@@ -61,13 +28,12 @@ stateDiagram-v2
 
 ## Design Principles
 
-**Effects, not actions.** Handlers call `ctx.emit(Effect::…)` to describe what
-should happen. The shell's `Platform::execute` carries it out. The core never
-reads flash, drives a GPIO, or opens a channel.
-
-**Reads as events.** The core never reads OTP, UFM, or any provisioning store.
-Outside information (power-on result, verification verdicts, iRoT readiness
-signals) arrives in event payloads.
+**Effects, not actions; reads as events.** Handlers only call
+`ctx.emit(Effect::…)` to describe what should happen, and receive every piece of
+outside information in event payloads — the core never reads flash, drives a
+GPIO, opens a channel, or touches a provisioning store. The full core/shell
+split is the [Platform Boundary](./orchestrator-model.md#5-the-platform-boundary)
+in the Verification Model.
 
 **Feedback as data.** Internal follow-up signals (e.g. the retry-cap lockdown
 `RecoveryFailed`) are emitted as `Effect::Emit(event)`. The orchestrator queues
@@ -90,7 +56,7 @@ the CSA architecture document:
 | Component with Caliptra iRoT requires two independent checks | `ComponentKind::Active` → `AwaitingReady` until `ComponentReady` |
 | Passive component (no iRoT): eRoT check only | `ComponentKind::Passive` → advance immediately after `ReleaseReset` |
 | Isolable component: failure skips, not blocks | `FailurePolicy::Isolable` → skip (held in reset); advance without `Recovering`; no cascade |
-| Cascading skip: failure also holds dependents | `FailurePolicy::Cascading` + `ComponentAttrs::depends_on` → cascade-skip in `Rot.held` |
+| Cascading skip: failure also holds dependents | `FailurePolicy::Cascading` + `ComponentAttrs::depends_on` → cascade-skip via `statuses` (`Isolated`) |
 | Boot-progress watchdog: component must signal readiness in time | `Timeout(ComponentId)` event → `AwaitingReady` → `Recovering` |
 | Recovery scope groups components that restore together | `ComponentAttrs::recovery_region` (`RegionId`) → shell restores full region on `RestoreGoldenImage` |
 
