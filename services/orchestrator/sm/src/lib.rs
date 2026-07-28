@@ -148,6 +148,14 @@ struct ComponentStatus {
     lifecycle: ComponentLifecycle,
     /// Consecutive failed-restore count (INV7: consecutive only).
     retry: u8,
+    /// Set while this component has been released from reset but has not yet
+    /// reported its boot-progress signal ([`Event::ComponentReady`] for an
+    /// `Active` component, [`Event::Booted`] for a `Passive` one). The shell
+    /// arms a per-component watchdog on release; this bit is what a later
+    /// [`Event::Timeout`] consults to tell a real boot failure from a stale or
+    /// spurious timeout. Orthogonal to `lifecycle`: a gated component owes no
+    /// boot-progress signal, so gating clears it.
+    awaiting_boot: bool,
 }
 
 impl Default for ComponentStatus {
@@ -155,6 +163,7 @@ impl Default for ComponentStatus {
         Self {
             lifecycle: ComponentLifecycle::Nominal,
             retry: 0,
+            awaiting_boot: false,
         }
     }
 }
@@ -236,6 +245,10 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         ctx.emit(Effect::ReportIsolated(id));
         if let Some(i) = self.status_index(id) {
             self.statuses[i].lifecycle = ComponentLifecycle::Isolated;
+            // A gated component is held in reset and no longer owes a
+            // boot-progress signal; drop any pending watchdog so a late
+            // `Timeout` can't drag an already-isolated component into recovery.
+            self.statuses[i].awaiting_boot = false;
         }
         true
     }
@@ -260,6 +273,32 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         if let Some(i) = self.status_index(id) {
             self.statuses[i].retry = 0;
         }
+    }
+
+    /// Record that `id` has been released and now owes a boot-progress signal.
+    /// Paired with the `ReleaseReset` emitted at each release site: the shell
+    /// arms its per-component boot watchdog there, and this arms ours.
+    fn mark_awaiting_boot(&mut self, id: ComponentId) {
+        if let Some(i) = self.status_index(id) {
+            self.statuses[i].awaiting_boot = true;
+        }
+    }
+
+    /// Clear `id`'s boot-progress watchdog because it reported in
+    /// ([`Event::ComponentReady`] or [`Event::Booted`]). Idempotent: a report
+    /// for a component not awaiting boot simply changes nothing.
+    fn clear_awaiting_boot(&mut self, id: ComponentId) {
+        if let Some(i) = self.status_index(id) {
+            self.statuses[i].awaiting_boot = false;
+        }
+    }
+
+    /// Whether `id` has been released and still owes a boot-progress signal.
+    /// A [`Event::Timeout`] is a real boot failure only for such a component;
+    /// otherwise it is stale/spurious.
+    fn is_awaiting_boot(&self, id: ComponentId) -> bool {
+        self.status_index(id)
+            .is_some_and(|i| self.statuses[i].awaiting_boot)
     }
 
     /// Advance `cursor` from `start_idx` to the first component not in
@@ -398,6 +437,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     // consecutive-failure streak ends (INV7: consecutive only).
                     self.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
+                    // Released: arm its boot-progress watchdog (both tiers).
+                    self.mark_awaiting_boot(*id);
                     let current_kind = self.chain.get(self.cursor as usize).map(|(_, a)| a.kind);
                     let next_idx = (self.cursor as usize).saturating_add(1);
                     if self.advance_to_next_ungated(ctx, next_idx) {
@@ -426,6 +467,30 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 // unhandled here (falls through to `Outcome::Super` and is
                 // discarded) — that's a separate question.
                 Event::CorruptionDetected(id) => self.handle_corruption(*id, ctx),
+                // Boot-progress liveness for a passive component released
+                // speculatively earlier in this same walk. Clear its watchdog
+                // even though `PreSupervision` is unsupervised — acting on a
+                // report we already have is never worse than dropping it (same
+                // rationale as `CorruptionDetected` above). An `Active`
+                // component's `ComponentReady` cannot arrive here: releasing an
+                // active moves the machine straight to `AwaitingReady`.
+                Event::Booted(id) => {
+                    self.clear_awaiting_boot(*id);
+                    Outcome::Handled
+                }
+                // Device-agnostic boot-progress watchdog. A passive component
+                // released speculatively can miss its window while the walk is
+                // still in `PreSupervision`; treat that as a boot failure and
+                // recover it, exactly as the supervised states do. A timeout for
+                // a component not awaiting boot (e.g. still under verification)
+                // is spurious and dropped.
+                Event::Timeout(id) => {
+                    if self.is_awaiting_boot(*id) {
+                        Outcome::Transition(State::Recovering(*id))
+                    } else {
+                        Outcome::Handled
+                    }
+                }
                 Event::EffectFailed => Outcome::Transition(State::Locked),
                 _ => Outcome::Super,
             },
@@ -436,8 +501,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             // entry action — do not add one.
             State::AwaitingReady(awaiting) => match event {
                 Event::ComponentReady(id) => {
+                    // Clear this component's boot-progress watchdog whether or
+                    // not it is the one this state's slot is tracking: a later
+                    // `Active` released speculatively reports its readiness here
+                    // too, and its watchdog must be cleared just the same.
+                    self.clear_awaiting_boot(*id);
                     if awaiting != Some(*id) {
-                        return Outcome::Handled; // spurious / stale (INV9)
+                        return Outcome::Handled; // not the tracked slot (INV9)
                     }
                     // If cursor is past the end, the eRoT side of the walk has
                     // already finished (chain done, or the remainder is held) —
@@ -455,6 +525,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     // consecutive-failure streak ends (INV7: consecutive only).
                     self.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
+                    // Released: arm its boot-progress watchdog (both tiers).
+                    self.mark_awaiting_boot(*id);
                     let next_idx = (self.cursor as usize).saturating_add(1);
                     if self.advance_to_next_ungated(ctx, next_idx) {
                         // `Handled` preserves the current payload: `awaiting` is
@@ -469,18 +541,10 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     // of the component's recovery-failure policy.
                     Outcome::Transition(State::Recovering(*id))
                 }
-                Event::Timeout(id) => {
-                    // The boot watchdog fired. Only the component we are
-                    // actually waiting on matters; a timeout for any other id
-                    // is stale or spurious and is dropped (same treatment as a
-                    // stale `ComponentReady`, INV9). The awaited component is
-                    // treated as a verification failure and enters recovery.
-                    if awaiting != Some(*id) {
-                        Outcome::Handled
-                    } else {
-                        Outcome::Transition(State::Recovering(*id))
-                    }
-                }
+                // `Timeout` is intentionally not handled here: it falls through
+                // to `handle_supervising`, which runs the device-agnostic
+                // boot-progress watchdog uniformly across every supervised state
+                // (an `AwaitingReady` timeout is no longer special-cased).
                 _ => Outcome::Super,
             },
 
@@ -601,6 +665,26 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 Outcome::Handled
             }
             Event::CorruptionDetected(id) => self.handle_corruption(*id, ctx),
+            // Boot-progress signals arriving after the walk left `PreSupervision`
+            // / `AwaitingReady` (e.g. once the machine is already `Ready`): clear
+            // the component's watchdog. `ComponentReady` is the active tier,
+            // `Booted` the passive tier; both just retire the outstanding wait.
+            Event::ComponentReady(id) | Event::Booted(id) => {
+                self.clear_awaiting_boot(*id);
+                Outcome::Handled
+            }
+            // Device-agnostic boot-progress watchdog across every supervised
+            // state: a released component that never reported in before its
+            // window closed is recovered like any other boot failure. A timeout
+            // for a component not awaiting boot (already reported, gated, or
+            // never released) is stale/spurious and dropped.
+            Event::Timeout(id) => {
+                if self.is_awaiting_boot(*id) {
+                    Outcome::Transition(State::Recovering(*id))
+                } else {
+                    Outcome::Handled
+                }
+            }
             Event::EffectFailed => Outcome::Transition(State::Locked),
             _ => Outcome::Super,
         }
@@ -620,6 +704,10 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 ctx.emit(Effect::StageUpdate);
             }
             State::Recovering(failed) => {
+                // The component under recovery is being restored, not booting;
+                // drop any pending boot-progress watchdog so a late `Timeout`
+                // can't re-enter recovery for it.
+                self.clear_awaiting_boot(failed);
                 ctx.emit(Effect::RestoreGoldenImage(failed));
             }
             State::Locked => {

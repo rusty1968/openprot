@@ -440,8 +440,10 @@ fn timeout_awaited_enters_recovering() {
     assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
-/// D2 (INV9): a timeout for a component we are not awaiting is stale/spurious
-/// and is dropped — the machine keeps waiting on the real component.
+/// D2: a timeout for a component that is not awaiting boot-progress is
+/// stale/spurious and is dropped. Here `C1` has only been *verified*
+/// speculatively, not released, so no boot watchdog is armed for it; the
+/// machine keeps waiting on the component it actually released (`C0`).
 #[test]
 fn timeout_stale_id_ignored() {
     let (effects, state) = drive(
@@ -452,11 +454,64 @@ fn timeout_stale_id_ignored() {
         &[
             BOOT,
             Event::VerificationPassed(C0),
-            Event::Timeout(C1), // not the awaited id
+            Event::Timeout(C1), // verified but never released → not awaiting boot
         ],
     );
     assert_eq!(state, State::AwaitingReady(Some(C0)));
     assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+}
+
+/// Device-agnostic boot-progress: a *passive* component that is released but
+/// never reports [`Event::Booted`] before its watchdog fires is recovered like
+/// any other boot failure — even while the walk is still in `PreSupervision`.
+/// This closes the release-and-forget gap (CSA boot-progress checkpointing is
+/// device-agnostic; fwmanager arms a `boot_timeout` for every device).
+#[test]
+fn passive_boot_timeout_enters_recovering() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1]),
+        // C0 released (watchdog armed), walk speculatively verifies C1, then
+        // C0's boot window closes with no `Booted`.
+        &[BOOT, Event::VerificationPassed(C0), Event::Timeout(C0)],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert!(effects.contains(&Effect::ReleaseReset(C0)));
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+}
+
+/// A passive boot timeout is caught even after the chain walk has completed and
+/// the machine has reached `Ready`: speculative release means a component can
+/// still owe a boot-progress signal in `Ready`, and the supervisor runs the
+/// same device-agnostic watchdog there.
+#[test]
+fn passive_boot_timeout_in_ready_enters_recovering() {
+    let (effects, state) = drive(
+        passive_required(&[C0]),
+        // Single passive: reaches `Ready` on VerificationPassed while still
+        // awaiting C0's boot-progress; the timeout then fires in `Ready`.
+        &[BOOT, Event::VerificationPassed(C0), Event::Timeout(C0)],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+}
+
+/// A passive component that reports [`Event::Booted`] retires its watchdog, so a
+/// later timeout for it is stale and dropped — the machine stays `Ready`.
+#[test]
+fn passive_booted_clears_watchdog_then_timeout_is_stale() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::Booted(C0), // C0 reports in → watchdog cleared
+            Event::VerificationPassed(C1),
+            Event::Booted(C1),
+            Event::Timeout(C0), // stale: C0 already booted
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
 /// D2: full path — timeout drives recovery, restore rewalks from the top, and
