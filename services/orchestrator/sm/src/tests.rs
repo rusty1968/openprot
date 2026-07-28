@@ -424,6 +424,64 @@ fn attestation_in_awaiting_ready() {
     assert_eq!(effects.last(), Some(&Effect::SignAttestation));
 }
 
+/// D2: a boot-progress timeout for the awaited component is treated as a
+/// verification failure and enters recovery.
+#[test]
+fn timeout_awaited_enters_recovering() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[BOOT, Event::VerificationPassed(C0), Event::Timeout(C0)],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+}
+
+/// D2 (INV9): a timeout for a component we are not awaiting is stale/spurious
+/// and is dropped — the machine keeps waiting on the real component.
+#[test]
+fn timeout_stale_id_ignored() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::Timeout(C1), // not the awaited id
+        ],
+    );
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
+    assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+}
+
+/// D2: full path — timeout drives recovery, restore rewalks from the top, and
+/// the chain then completes normally.
+#[test]
+fn timeout_recovers_then_rewalks_to_ready() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::Timeout(C0),  // → Recovering(C0)
+            Event::Restored(C0), // → PreSupervision, rewalk from top
+            Event::VerificationPassed(C0),
+            Event::ComponentReady(C0),
+            Event::VerificationPassed(C1),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+    assert!(effects.contains(&Effect::ReleaseReset(C1)));
+}
+
 /// Isolable component: every `VerificationFailed` is retried through a full
 /// recovery episode first; only once retries are exhausted does the
 /// component get held in reset and the walk continue to `Ready`.
