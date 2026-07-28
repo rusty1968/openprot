@@ -486,6 +486,14 @@ impl<const N: usize, const E: usize> Rot<N, E> {
 
             State::Ready => match event {
                 Event::UpdateRequest => Outcome::Transition(State::Updating),
+                // Proven-boot checkpoint: the image authenticated at
+                // `ActivateUpdate`, but the SVN floor only advances now, once
+                // the shell reports it healthy. Handled in place — confirming a
+                // running image is not a state change.
+                Event::BootConfirmed(id) => {
+                    ctx.emit(Effect::CommitSvnFloor(*id));
+                    Outcome::Handled
+                }
                 _ => Outcome::Super,
             },
 

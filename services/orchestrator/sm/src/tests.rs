@@ -1025,6 +1025,42 @@ fn update_verified_activates_update() {
     assert!(!effects.contains(&Effect::RestoreGoldenImage(C0)));
 }
 
+/// The anti-rollback floor is committed only on a proven-healthy boot, never
+/// at activation. `UpdateVerified` activates the image (authentication) but
+/// must NOT emit `CommitSvnFloor`; a later `BootConfirmed` (the runtime health
+/// proof) is what advances the floor. This pins the decoupling so activation
+/// can never silently commit the floor early.
+#[test]
+fn svn_floor_commits_on_boot_confirmed_not_on_activation() {
+    // Activation alone: no floor commit yet.
+    let (activated, activated_state) = drive(
+        passive_required(&[C0]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::UpdateRequest,
+            Event::UpdateVerified,
+        ],
+    );
+    assert_eq!(activated_state, State::Ready);
+    assert!(activated.contains(&Effect::ActivateUpdate));
+    assert!(!activated.contains(&Effect::CommitSvnFloor(C0)));
+
+    // Proven-healthy boot: the floor advances now, without leaving Ready.
+    let (confirmed, confirmed_state) = drive(
+        passive_required(&[C0]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::UpdateRequest,
+            Event::UpdateVerified,
+            Event::BootConfirmed(C0),
+        ],
+    );
+    assert_eq!(confirmed_state, State::Ready);
+    assert!(confirmed.contains(&Effect::CommitSvnFloor(C0)));
+}
+
 /// Locked is a terminal state: no effects are produced in response to any
 /// event after the machine latches.
 #[test]
