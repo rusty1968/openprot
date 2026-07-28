@@ -125,20 +125,20 @@ enum Gating {
     NotGated,
 }
 
-/// Per-component service lifecycle — the ComponentStatus prototype. One
-/// [`ComponentLifecycle`] plus a retry count is stored per chain component,
-/// replacing the former `gated` set and `retries` map. NOTE: this prototype does
-/// **not** move the walk-phase payloads (`AwaitingReady`/`Recovering`) off the
-/// global [`State`]; see the evaluation for why those largely stay global. Named
-/// for the *component service* axis to keep it distinct from fwmanager's
-/// trial-boot/commit (update-slot) lifecycle, which is a separate concern.
+/// Per-component service lifecycle. Each chain component carries one of these
+/// inside its [`ComponentStatus`], recording whether it is in normal service or
+/// gated out. The walk-phase payloads (`AwaitingReady`/`Recovering`) stay on the
+/// global [`State`] rather than here — those phases are properties of the whole
+/// machine, not of one component. Named for the *component service* axis to keep
+/// it distinct from fwmanager's trial-boot/commit (update-slot) lifecycle, which
+/// is a separate concern.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ComponentLifecycle {
     /// In the normal flow: held, under verification, or released. The global
-    /// `State` still carries which of those the walk is in.
+    /// `State` carries which of those the walk is in.
     Nominal,
-    /// Durably gated out of service — was membership in `gated`. Has a live
-    /// `AssertReset` and is skipped on every chain walk.
+    /// Durably gated out of service: has a live `AssertReset` and is skipped on
+    /// every chain walk.
     Isolated,
 }
 
@@ -165,11 +165,12 @@ impl Default for ComponentStatus {
 pub struct Rot<const N: usize, const E: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
     cursor: u8,
-    /// One record per chain component (parallel to `chain` by index). Folds the
-    /// former `gated` set and `retries` map into a single per-component
-    /// [`ComponentStatus`]: `lifecycle` replaces membership in `gated`
-    /// (`Isolated`), and `retry` replaces the `retries` count. Durable across a
-    /// return to `Ready`; only a fresh `Rot` on `PowerOnReset` resets it.
+    /// One record per chain component (parallel to `chain` by index). Each
+    /// [`ComponentStatus`] holds the component's service `lifecycle` (`Isolated`
+    /// means gated out of the walk) and its consecutive failed-restore `retry`
+    /// count, kept per component so interleaved recoveries never share a budget.
+    /// Durable across a return to `Ready`; only a fresh `Rot` on `PowerOnReset`
+    /// resets it.
     statuses: heapless::Vec<ComponentStatus, N>,
     max_retry: u8,
     /// Ties the effect-buffer size `E` to this type (zero-sized).
@@ -340,8 +341,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// device is reported, not just the one that failed.
     fn cascade_hold(&mut self, ctx: &mut Sink<E>, root: ComponentId) {
         // BFS over the growing isolation front. `frontier` holds the components
-        // gated so far whose dependents still need visiting — the same order the
-        // old `gated`-Vec walk used, now that `gated` is folded into `statuses`.
+        // gated so far whose dependents still need visiting; `statuses` records
+        // the durable `Isolated` mark for each.
         let mut frontier: heapless::Vec<ComponentId, N> = heapless::Vec::new();
         if self.gate_one(ctx, root) {
             let _ = frontier.push(root);
@@ -431,8 +432,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
 
             // `awaiting` is the state's own payload, so changing it means
             // re-entering the variant: `Outcome::Handled` leaves the payload
-            // untouched. That is behavior-identical to the old field write only
-            // because `AwaitingReady` has no entry action — do not add one.
+            // untouched. That is correct only because `AwaitingReady` has no
+            // entry action — do not add one.
             State::AwaitingReady(awaiting) => match event {
                 Event::ComponentReady(id) => {
                     if awaiting != Some(*id) {
@@ -456,9 +457,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     ctx.emit(Effect::ReleaseReset(*id));
                     let next_idx = (self.cursor as usize).saturating_add(1);
                     if self.advance_to_next_ungated(ctx, next_idx) {
-                        // `Handled` preserves the current payload, matching the
-                        // old behavior: `awaiting` was only ever cleared by
-                        // `ComponentReady` or `VerificationFailed`.
+                        // `Handled` preserves the current payload: `awaiting` is
+                        // cleared only by `ComponentReady` or `VerificationFailed`.
                         Outcome::Handled
                     } else {
                         Outcome::Transition(State::Ready)
