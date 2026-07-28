@@ -13,7 +13,7 @@ const C2: ComponentId = ComponentId::new(2);
 const BOOT: Event = Event::PowerGood(PowerOnResult::Provisioned);
 
 const CAPACITY: usize = 8;
-const ECAP: usize = CAPACITY + 2;
+const ECAP: usize = 2 * CAPACITY + 2;
 const MAX_RETRY: u8 = 3;
 
 fn chain(
@@ -340,7 +340,7 @@ fn custom_capacity_walks_full_chain() {
         c.push((id, ComponentAttrs::passive_required()))
             .expect("3 fits");
     }
-    let mut orch = Orchestrator::<3, 5>::new(c.try_into().expect("valid chain"), MAX_RETRY);
+    let mut orch = Orchestrator::<3, 8>::new(c.try_into().expect("valid chain"), MAX_RETRY);
     let mut effects = Vec::new();
     for ev in [
         BOOT,
@@ -625,6 +625,173 @@ fn cascading_runtime_corruption_cascades() {
     // No recovery is started for a non-required corruption.
     assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
     assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
+/// Degraded mode (CSA): isolating a component is only half the requirement —
+/// the failure must also be *reported* through the platform management
+/// interface. An `Isolable` component that exhausts recovery emits
+/// `ReportIsolated` alongside its `AssertReset`, and the platform keeps running.
+#[test]
+fn isolable_exhaustion_reports_isolation() {
+    let mut script = std::vec![BOOT, Event::VerificationPassed(C0)];
+    for _ in 0..MAX_RETRY {
+        script.push(Event::VerificationFailed(C1));
+        script.push(Event::Restored(C1));
+        script.push(Event::VerificationPassed(C0));
+    }
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &script,
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    // Degraded, not halted: this is an isolation report, not a halt report.
+    assert!(!effects.contains(&Effect::ReportRecoveryFailed(C1)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
+/// Every component taken out of service by a cascade is reported, not just the
+/// one that failed: operators need to know that C2 is down too, even though
+/// nothing was wrong with C2 itself.
+#[test]
+fn cascading_exhaustion_reports_each_isolated() {
+    let mut script = std::vec![BOOT, Event::VerificationPassed(C0)];
+    for _ in 0..MAX_RETRY {
+        script.push(Event::VerificationFailed(C1));
+        script.push(Event::Restored(C1));
+        script.push(Event::VerificationPassed(C0));
+    }
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+        ]),
+        &script,
+    );
+    assert_eq!(state, State::Ready);
+    // The root and its transitive dependent are both isolated and both reported.
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(effects.contains(&Effect::AssertReset(C2)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    assert!(effects.contains(&Effect::ReportIsolated(C2)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
+/// Runtime corruption under a non-`Required` policy reports too. This path
+/// never enters recovery at all, so without its own report the isolation would
+/// be silent.
+#[test]
+fn runtime_corruption_isolable_reports() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1),
+            Event::CorruptionDetected(C1),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    assert!(!effects.contains(&Effect::RestoreGoldenImage(C1)));
+}
+
+/// A `Required` component whose recovery is exhausted is named in a
+/// `ReportRecoveryFailed` *before* the platform latches, so management software
+/// learns which component forced the halt rather than just that one did.
+#[test]
+fn required_exhaustion_reports_before_lockdown() {
+    let mut script = std::vec![BOOT, Event::VerificationPassed(C0)];
+    script.push(Event::CorruptionDetected(C0));
+    for _ in 0..(MAX_RETRY - 1) {
+        script.push(Event::Restored(C0));
+        script.push(Event::VerificationFailed(C0));
+    }
+    script.push(Event::Restored(C0));
+
+    let (effects, state) = drive(passive_required(&[C0]), &script);
+
+    assert_eq!(state, State::Locked);
+    let report = effects
+        .iter()
+        .position(|e| *e == Effect::ReportRecoveryFailed(C0))
+        .expect("the component that forced the halt is reported");
+    let latch = effects
+        .iter()
+        .position(|e| *e == Effect::LatchLockdown)
+        .expect("the platform latches");
+    assert!(
+        report < latch,
+        "the report must be actuated before the latch",
+    );
+}
+
+/// A component that recovers within its retry budget is not degraded, so
+/// nothing is reported — reports mark components taken *out of service*, not
+/// every transient failure.
+#[test]
+fn successful_recovery_emits_no_isolation_report() {
+    let (effects, state) = drive(
+        passive_required(&[C0]),
+        &[
+            BOOT,
+            Event::VerificationFailed(C0),
+            Event::Restored(C0),
+            Event::VerificationPassed(C0),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::RestoreGoldenImage(C0)));
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::ReportIsolated(_) | Effect::ReportRecoveryFailed(_)
+        )),
+        "a recovered component is not degraded",
+    );
+}
+
+/// Reporting is guarded by `is_gated` exactly like the reset it accompanies, so
+/// a repeated corruption report on an already-isolated component does not
+/// re-report it. Management software sees one isolation event per component.
+#[test]
+fn report_isolated_emitted_once_per_component() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1),
+            Event::CorruptionDetected(C1), // isolable → gate + report
+            Event::CorruptionDetected(C1), // already gated → nothing
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| **e == Effect::ReportIsolated(C1))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| **e == Effect::AssertReset(C1))
+            .count(),
+        1,
+    );
 }
 
 /// Boot-time VerificationFailed on a required component → Recovering.
