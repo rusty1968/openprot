@@ -1061,6 +1061,74 @@ fn corruption_while_recovering_retargets_to_new_component() {
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
+/// An `UpdateRequest` arriving mid-recovery is declined, not silently dropped:
+/// the machine emits `ReportUpdateDeferred` and stays in `Recovering`, leaving
+/// the in-flight recovery untouched (single-flight, recovery-priority).
+#[test]
+fn update_request_while_recovering_is_deferred() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1]),
+        &[
+            BOOT,
+            Event::VerificationFailed(C0), // → Recovering(C0)
+            Event::UpdateRequest,          // declined while recovering
+        ],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert_eq!(effects.last(), Some(&Effect::ReportUpdateDeferred));
+}
+
+/// A second `UpdateRequest` while an update is already staged (`Updating`) is
+/// declined the same way — reported, not dropped, and the staged update is
+/// left in place.
+#[test]
+fn update_request_while_updating_is_deferred() {
+    let (effects, state) = drive(
+        passive_required(&[C0]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::UpdateRequest, // → Updating
+            Event::UpdateRequest, // declined while updating
+        ],
+    );
+    assert_eq!(state, State::Updating);
+    assert_eq!(effects.last(), Some(&Effect::ReportUpdateDeferred));
+}
+
+/// An `UpdateRequest` while the chain walk is still finishing (`AwaitingReady`)
+/// is declined too: the machine is not yet `Ready`, so it reports the refusal
+/// and keeps waiting on the outstanding component.
+#[test]
+fn update_request_while_awaiting_ready_is_deferred() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // active released → AwaitingReady(Some(C0))
+            Event::UpdateRequest,          // declined while awaiting readiness
+        ],
+    );
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
+    assert_eq!(effects.last(), Some(&Effect::ReportUpdateDeferred));
+}
+
+/// Negative control: from `Ready` an `UpdateRequest` is *accepted* — it starts
+/// an update (→ `Updating`) and never emits `ReportUpdateDeferred`. `Ready`
+/// intercepts the request upstream, so it can never reach the deferral arm.
+#[test]
+fn update_request_in_ready_starts_update_not_deferred() {
+    let (effects, state) = drive(
+        passive_required(&[C0]),
+        &[BOOT, Event::VerificationPassed(C0), Event::UpdateRequest],
+    );
+    assert_eq!(state, State::Updating);
+    assert!(!effects.contains(&Effect::ReportUpdateDeferred));
+}
+
 /// UpdateVerified activates the staged image and returns to Ready.
 /// (Complements update_rollback_is_not_recovery which tests UpdateRejected.)
 #[test]
@@ -1482,6 +1550,34 @@ fn corruption_during_update_discards_staged() {
         effects.contains(&Effect::DiscardStaged),
         "leaving Updating for recovery must discard the staged image",
     );
+    assert!(
+        effects.contains(&Effect::ReportUpdateAborted),
+        "preempting an in-flight update must report it aborted, not drop it silently",
+    );
+}
+
+/// The abort report is *only* for a genuine preemption. An `Isolable`
+/// corruption of another device while `Updating` is contained (`Handled`) and
+/// the update continues untouched — so neither `DiscardStaged` nor
+/// `ReportUpdateAborted` is emitted, and the machine stays in `Updating`.
+#[test]
+fn contained_corruption_during_update_does_not_abort() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1), // → Ready
+            Event::UpdateRequest,          // → Updating
+            Event::CorruptionDetected(C1), // isolable: contained, update survives
+        ],
+    );
+    assert_eq!(state, State::Updating);
+    assert!(!effects.contains(&Effect::ReportUpdateAborted));
+    assert!(!effects.contains(&Effect::DiscardStaged));
 }
 
 /// GAP 2 (red): a second `Required` corruption while already recovering clobbers

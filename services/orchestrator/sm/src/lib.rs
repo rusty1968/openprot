@@ -577,7 +577,11 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     // returns `Handled` and the update continues untouched, so
                     // its staged image must survive — do not discard then.
                     if matches!(outcome, Outcome::Transition(State::Recovering(_))) {
+                        // Dispose of the orphaned image *and* answer the update
+                        // requester: the update it was awaiting a verdict on has
+                        // been superseded by recovery, not merely delayed.
                         ctx.emit(Effect::DiscardStaged);
+                        ctx.emit(Effect::ReportUpdateAborted);
                     }
                     outcome
                 }
@@ -684,6 +688,17 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 } else {
                     Outcome::Handled
                 }
+            }
+            // A new update cannot start from any supervised state except
+            // `Ready` (the machine is mid-walk, mid-update, or mid-recovery).
+            // `Ready` accepts `UpdateRequest` upstream in `handle` (→ `Updating`)
+            // and so never reaches here; this arm therefore fires only for
+            // `AwaitingReady`, `Updating`, and `Recovering`. Report the refusal
+            // rather than dropping it silently, and leave the in-flight
+            // walk/update/recovery untouched (`Handled`, no transition).
+            Event::UpdateRequest => {
+                ctx.emit(Effect::ReportUpdateDeferred);
+                Outcome::Handled
             }
             Event::EffectFailed => Outcome::Transition(State::Locked),
             _ => Outcome::Super,
