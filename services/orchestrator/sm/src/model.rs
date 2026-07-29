@@ -274,6 +274,28 @@ pub enum Effect {
     /// immediately before the machine latches to [`Locked`](crate::State::Locked).
     /// Names the component that forced the halt.
     ReportRecoveryFailed(ComponentId),
+    /// Report that an [`Event::UpdateRequest`] was declined because the machine
+    /// is busy in a supervised state other than [`Ready`](crate::State::Ready)
+    /// — a chain walk is finishing ([`AwaitingReady`](crate::State::AwaitingReady)),
+    /// an update is already staged ([`Updating`](crate::State::Updating)), or a
+    /// recovery is in flight ([`Recovering`](crate::State::Recovering)). Emitted
+    /// instead of silently dropping the request, so the refusal is visible in
+    /// the effect trace and the driver can answer the requester (e.g. a PLDM
+    /// "retry later" completion code). Advisory only: it changes no state and
+    /// does not perturb the in-flight update or recovery. `Ready` never produces
+    /// this — it accepts the request and transitions to `Updating`.
+    ReportUpdateDeferred,
+    /// Report that an update *already in flight* ([`Updating`](crate::State::Updating))
+    /// was aborted because a `Required` component was found corrupt and recovery
+    /// preempted it (the machine left `Updating` for
+    /// [`Recovering`](crate::State::Recovering)). Its counterpart on the intake
+    /// side is [`ReportUpdateDeferred`]: `Deferred` refuses an update that never
+    /// started, `Aborted` announces the loss of one that had. Paired with the
+    /// [`DiscardStaged`] that cleans up the orphaned image — `DiscardStaged`
+    /// disposes of the *image*, this answers the *request*, so the requester
+    /// (which was awaiting `UpdateVerified`/`UpdateRejected`) learns the update
+    /// was superseded by recovery and can retry once the platform is whole.
+    ReportUpdateAborted,
     LatchLockdown,
     /// Internal only — tells the orchestrator to handle this event next.
     /// Never forwarded to a [`Platform`](crate::Platform).
