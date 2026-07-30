@@ -270,6 +270,52 @@ hardware where iRoT initialization can take several seconds.
 
 ## 5. The Platform Boundary
 
+The orchestrator is split into a **pure core** and the **platform** that hosts
+it. The core is a deterministic state machine: it receives an `Event`, updates its
+own in-memory state, and appends `Effect` descriptions to a write-only `Sink`.
+It performs no I/O, reads no hardware, and cannot observe the result of any
+effect except as a future `Event`. Everything that touches the world — flash,
+reset lines, transports, timers, measurement results — lives in the platform.
+
+```mermaid
+graph LR
+    subgraph WORLD ["World  (board / platform)  —  examples/board.rs"]
+        W1["reads OTP/UFM<br/>hardware IRQs<br/>measurement results"]
+        W2["Platform::execute<br/>drives flash / reset<br/>SPI / I3C / MCTP"]
+    end
+
+    subgraph CORE ["Pure Core  —  src/lib.rs"]
+        ORCH["Orchestrator<br/>dispatch loop"]
+        SM["StateMachine<br/>Rot shared storage<br/>State handlers<br/>Operational superstate"]
+        SINK["Sink<br/>append-only effect buffer<br/>cannot read or do IO"]
+        ORCH --> SM
+        SM -->|"ctx.emit"| SINK
+    end
+
+    W1 -->|"Event"| ORCH
+    SINK -->|"Effect<br/>drained after each dispatch"| W2
+```
+
+Only two value types cross the boundary, and they cross in opposite directions:
+
+- **`Event` (world → core)** — the platform's report of something that already
+  happened: a verdict (`VerificationPassed`/`Failed`), a readiness signal
+  (`ComponentReady`), a timer expiry (`Timeout`), or a power-on result. Events
+  are the *only* way the core learns anything about the world.
+- **`Effect` (core → world)** — a description of work the platform should
+  perform: `ReadFirmware`, `VerifyFirmware`, `ReleaseReset`, `RecoverComponent`,
+  and so on. Effects are inert data; the core never waits on them and never
+  sees them succeed or fail directly.
+
+This inversion is what keeps the core testable without hardware: a test drives
+`Event`s in and asserts on the `Effect`s that come out, with no flash, no
+transports, and no clocks. It also fixes *where mechanism lives*. The core
+names **what** must happen to **which** component; the platform decides **how**.
+For example, `Effect::RecoverComponent(id)` says only "recover this component" —
+whether that resolves to a golden-image restore, an A/B slot swap, a streamed
+image, or a vendor-specific scheme is a platform/configuration decision, never
+encoded in the core.
+
 The core never reads flash, never checks signatures, never observes reset lines.
 It only emits descriptions. The complete split:
 
