@@ -330,6 +330,32 @@ It only emits descriptions. The complete split:
 | Cascade-skip evaluation | checks `attrs.depends_on` against the `Isolated` components in `statuses` before emitting `ReadFirmware` | encodes the dependency graph at chain-build time |
 | Recovery region membership | reads `attrs.recovery_region` when entering `Recovering` | assigns each component to a region at chain-build time |
 
+**The core is policy-free.** It carries no tunable policy and no mechanism of
+its own — every policy input is either board-supplied config data or arrives as
+an event:
+
+- **Failure handling is data-driven.** The handlers *read* each component's
+  `FailurePolicy` from the chain and branch on it; nothing is hardcoded.
+  Fail-open vs fail-close is therefore a *per-component* configuration choice
+  (`Required` = fail-close; `Isolable`/`Cascading` = fail-open), set at
+  chain-build time.
+- **The retry cap is supplied, not baked in.** `max_retry` is a constructor
+  argument, not a constant.
+- **Timing lives outside.** The core sets no durations; `Timeout` and
+  `CommitTimeout` arrive as events from the platform's watchdogs. The core only
+  decides whether a given timeout is actionable.
+- **Mechanism is deferred.** Effects name *what* to do to *which* component;
+  the platform decides *how* (see `RecoverComponent` above).
+
+The core supervises only the components in the configured chain. If an event
+ever names a component id the chain does not contain, the core drops it: the
+id describes something the core has no model of and never released, so there is
+nothing to hold, recover, or protect. This is uniform across every event —
+verdicts, corruption reports, and liveness signals alike — so a malformed
+report from the platform can neither drive a spurious recovery nor latch the
+platform to `Locked`. It is a guard against bad input from the world, not a
+policy deployments configure.
+
 ---
 
 ## 6. What This Model Does Not Cover
