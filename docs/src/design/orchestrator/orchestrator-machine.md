@@ -189,6 +189,14 @@ An update is in progress.
 
 **Entry action**: emit `AuthenticateUpdate` + `StageUpdate`.
 
+> **Rejected** here has a specific meaning from the CSA authenticated-update
+> sequence: the staged candidate failed verification — its signature did not
+> validate under the platform's provisioned DSA public key (or it failed the
+> anti-rollback/SVN check). A failed verification is answered with a reject, the
+> candidate is discarded (`DiscardStaged`), and the device keeps running its
+> current image. Rejection is therefore an *update* outcome, not a corruption of
+> the running image — hence INV4 keeps it off the recovery path.
+
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
 | `UpdateVerified` | — | `ActivateUpdate` | `Ready` |
