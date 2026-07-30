@@ -81,7 +81,7 @@ inspects the membership.
 
 ### `ComponentAttrs`
 
-Per-component attributes that combine three orthogonal axes:
+Per-component attributes:
 
 ```rust
 pub struct ComponentAttrs {
