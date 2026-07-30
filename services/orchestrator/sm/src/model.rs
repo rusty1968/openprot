@@ -26,7 +26,6 @@ impl ComponentId {
 /// Corresponds directly to the two-tier model in the CSA architecture document:
 /// `Active` = eRoT gate + iRoT gate; `Passive` = eRoT gate only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum ComponentKind {
     /// Has an integrated iRoT (e.g. Caliptra). Both eRoT-side (signature + SVN)
     /// and iRoT-side (local self-verification) checks apply. The machine waits in
@@ -54,7 +53,6 @@ pub enum ComponentKind {
 /// (The narrative design docs sometimes call the `Required` outcome "platform
 /// halt" — same behavior, this is the type-level name.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum FailurePolicy {
     /// Stop the boot sequence entirely: self-emits [`Event::RecoveryFailed`],
     /// which drives the machine to [`State::Locked`].
@@ -172,7 +170,6 @@ impl ComponentAttrs {
 
 /// The result of the board's power-on checks, delivered inside [`Event::PowerGood`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum PowerOnResult {
     /// Self-verified and provisioned.
     Provisioned,
@@ -184,7 +181,6 @@ pub enum PowerOnResult {
 
 /// Everything the outside world can tell the state machine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum Event {
     /// Power-on, carrying the shell's self-verification and provisioning result.
     PowerGood(PowerOnResult),
@@ -215,7 +211,7 @@ pub enum Event {
     BootConfirmed(ComponentId),
     /// This component was found corrupt at runtime.
     CorruptionDetected(ComponentId),
-    /// This component's golden image has been restored.
+    /// This component has been restored from its configured recovery source.
     Restored(ComponentId),
     /// A required component's recovery was exhausted.
     RecoveryFailed,
@@ -228,11 +224,54 @@ pub enum Event {
     /// is stale/spurious and dropped. The watchdog is per component and
     /// device-agnostic, matching CSA boot-progress checkpointing.
     Timeout(ComponentId),
+    /// The driver's *commit* watchdog fired: an update was activated
+    /// ([`Effect::ActivateUpdate`]) but did not report [`Event::BootConfirmed`]
+    /// within the policy window. Distinct from [`Event::Timeout`], which is the
+    /// per-component boot-progress watchdog; this one bounds the single
+    /// activated-but-not-committed window in [`State::Ready`]. Handled only while
+    /// that window is open: it latches [`State::Locked`] (commit-or-lock — the
+    /// anti-rollback floor is never advanced for an unproven image, and the
+    /// downgrade window may not stay open indefinitely). Outside the window
+    /// (nothing pending) it is stale and dropped. The driver arms this watchdog
+    /// when it executes [`Effect::ActivateUpdate`] and cancels it on
+    /// [`Effect::CommitSvnFloor`].
+    CommitTimeout,
     /// The shell could not carry out an emitted [`Effect`]; fail-closed, it
     /// latches to [`State::Locked`] from any state. Injected by the driver when
     /// a [`Platform::execute`](crate::Platform::execute) call fails; never
     /// produced by a handler.
     EffectFailed,
+}
+
+impl Event {
+    /// The component this event is about, or `None` for events that name no
+    /// component (`PowerGood`, `UpdateRequest`, `CommitTimeout`, …).
+    ///
+    /// This is the single enumeration of the id-carrying events, consulted once
+    /// at the dispatch boundary ([`Orchestrator::step`](crate::Orchestrator::step))
+    /// to drop any event that names a component outside the configured chain
+    /// before a handler ever sees it. A new id-carrying variant must be listed
+    /// here, or it will bypass that membership check.
+    pub(crate) fn component_id(&self) -> Option<ComponentId> {
+        match self {
+            Event::VerificationPassed(id)
+            | Event::VerificationFailed(id)
+            | Event::ComponentReady(id)
+            | Event::Booted(id)
+            | Event::BootConfirmed(id)
+            | Event::CorruptionDetected(id)
+            | Event::Restored(id)
+            | Event::Timeout(id) => Some(*id),
+            Event::PowerGood(_)
+            | Event::AttestationChallenge
+            | Event::UpdateRequest
+            | Event::UpdateVerified
+            | Event::UpdateRejected
+            | Event::RecoveryFailed
+            | Event::CommitTimeout
+            | Event::EffectFailed => None,
+        }
+    }
 }
 
 /// Everything the state machine can ask the outside world to do.
@@ -241,7 +280,6 @@ pub enum Event {
 /// queues the carried event for immediate handling, making follow-up events
 /// visible in the effect trace instead of hidden state changes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum Effect {
     ReadFirmware(ComponentId),
     VerifyFirmware(ComponentId),
@@ -263,7 +301,12 @@ pub enum Effect {
     /// floor earlier would burn anti-rollback on an image that authenticated
     /// but has not yet demonstrated it can boot and run.
     CommitSvnFloor(ComponentId),
-    RestoreGoldenImage(ComponentId),
+    /// Recover `id` from its configured recovery source. The mechanism —
+    /// golden image, A/B slot, streamed image, or vendor-specific scheme — is
+    /// deferred to the [`Platform`](crate::Platform) driver, which resolves it
+    /// per configuration policy. The reducer only names the component to
+    /// recover; it does not encode how recovery is performed.
+    RecoverComponent(ComponentId),
     /// Report that a component has been isolated (held in reset and removed
     /// from the trust chain) so management software is aware the platform is
     /// running degraded. Emitted once per component, at the moment it is
@@ -307,7 +350,6 @@ pub enum Effect {
 /// cursor, the gate set, retry counts) lives in [`Rot`](crate::Rot) shared
 /// storage.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum State {
     PowerOnReset,
     PreSupervision,
@@ -326,7 +368,8 @@ pub enum State {
     Ready,
     Updating,
     /// A component failed verification (or was found corrupt under a
-    /// non-gating policy) and its golden image is being restored. The payload is
+    /// non-gating policy) and is being restored from its configured recovery
+    /// source. The payload is
     /// that component — always present, since the machine only enters this state
     /// with a recovery target in hand.
     Recovering(ComponentId),
@@ -360,7 +403,6 @@ pub struct Chain<const N: usize> {
 
 /// Why a `heapless::Vec` of components is not a valid [`Chain`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum ChainError {
     /// The chain has no components.
     Empty,

@@ -182,6 +182,21 @@ pub struct Rot<const N: usize, const E: usize> {
     /// resets it.
     statuses: heapless::Vec<ComponentStatus, N>,
     max_retry: u8,
+    /// Set when an update has been activated ([`Effect::ActivateUpdate`]) but
+    /// its anti-rollback floor has not yet been committed, i.e. the machine is
+    /// in the *activated-but-not-committed* window inside [`State::Ready`]. A
+    /// [`Event::BootConfirmed`] commits the floor and clears this; a
+    /// [`Event::CommitTimeout`] fired while this is set latches
+    /// [`State::Locked`] (commit-or-lock: the floor is never advanced for an
+    /// image that has not proven healthy, and the downgrade window is never left
+    /// open indefinitely). Cleared on [`Event::BootConfirmed`] (the window
+    /// closes normally) and on entry to the two states that end the window by
+    /// leaving `Ready` while still running — [`State::Updating`] (a superseding
+    /// update) and [`State::Recovering`] (corruption/timeout) — so any path that
+    /// leaves and later re-enters `Ready` resets the window without per-branch
+    /// bookkeeping. (It is *not* cleared on `Ready` entry, because activation
+    /// sets it while transitioning *into* `Ready`.)
+    pending_commit: bool,
     /// Ties the effect-buffer size `E` to this type (zero-sized).
     _effect_cap: PhantomData<[u8; E]>,
 }
@@ -209,6 +224,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             cursor: 0,
             statuses,
             max_retry,
+            pending_commit: false,
             _effect_cap: PhantomData,
         }
     }
@@ -226,6 +242,14 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// id is not in the chain (should never happen for core-produced ids).
     fn status_index(&self, id: ComponentId) -> Option<usize> {
         self.chain.iter().position(|(cid, _)| *cid == id)
+    }
+
+    /// Whether `id` names a component in the configured chain. The core only
+    /// supervises chain components, so an event that names an id outside the
+    /// chain is dropped rather than acted on — it describes something the core
+    /// has no model of and never released.
+    fn in_chain(&self, id: ComponentId) -> bool {
+        self.status_index(id).is_some()
     }
 
     fn is_gated(&self, id: ComponentId) -> bool {
@@ -365,8 +389,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// so this path and the recovery-exhaustion path can never diverge:
     /// `Isolable`/`Cascading` → gate the component (single or cascade) and stay
     /// put, so a later re-walk skips it instead of silently re-releasing one we
-    /// already found corrupt; `Required`/unknown → recover first (the
-    /// halt-on-exhaustion decision happens later in `Recovering`).
+    /// already found corrupt; `Required` → recover first (the halt-on-exhaustion
+    /// decision happens later in `Recovering`).
     fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome {
         match self.gate_by_policy(ctx, id) {
             Gating::Gated => Outcome::Handled,
@@ -552,11 +576,25 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 Event::UpdateRequest => Outcome::Transition(State::Updating),
                 // Proven-boot checkpoint: the image authenticated at
                 // `ActivateUpdate`, but the SVN floor only advances now, once
-                // the shell reports it healthy. Handled in place — confirming a
-                // running image is not a state change.
+                // the driver reports it healthy. Handled in place — confirming a
+                // running image is not a state change. Closing the window clears
+                // `pending_commit` so a later `CommitTimeout` cannot lock a
+                // device that has already committed.
                 Event::BootConfirmed(id) => {
                     ctx.emit(Effect::CommitSvnFloor(*id));
+                    self.pending_commit = false;
                     Outcome::Handled
+                }
+                // Commit watchdog. If the activated-but-not-committed window is
+                // still open, fail closed: never commit an unproven image, and
+                // never leave the downgrade window open indefinitely. Outside
+                // the window this is a stale watchdog fire and is dropped.
+                Event::CommitTimeout => {
+                    if self.pending_commit {
+                        Outcome::Transition(State::Locked)
+                    } else {
+                        Outcome::Handled
+                    }
                 }
                 _ => Outcome::Super,
             },
@@ -564,6 +602,11 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             State::Updating => match event {
                 Event::UpdateVerified => {
                     ctx.emit(Effect::ActivateUpdate);
+                    // Open the activated-but-not-committed window: the floor is
+                    // NOT advanced here; it waits for `BootConfirmed`. The
+                    // driver arms its commit watchdog on `ActivateUpdate`, and
+                    // `CommitTimeout` bounds this window (commit-or-lock).
+                    self.pending_commit = true;
                     Outcome::Transition(State::Ready)
                 }
                 Event::UpdateRejected => {
@@ -715,15 +758,22 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 let _ = self.advance_to_next_ungated(ctx, 0);
             }
             State::Updating => {
+                // A new update supersedes any activated-but-not-committed image;
+                // the prior commit window is void.
+                self.pending_commit = false;
                 ctx.emit(Effect::AuthenticateUpdate);
                 ctx.emit(Effect::StageUpdate);
             }
             State::Recovering(failed) => {
+                // Recovery voids any activated-but-not-committed image: the
+                // running image is now under suspicion, so its commit window
+                // ends here.
+                self.pending_commit = false;
                 // The component under recovery is being restored, not booting;
                 // drop any pending boot-progress watchdog so a late `Timeout`
                 // can't re-enter recovery for it.
                 self.clear_awaiting_boot(failed);
-                ctx.emit(Effect::RestoreGoldenImage(failed));
+                ctx.emit(Effect::RecoverComponent(failed));
             }
             State::Locked => {
                 ctx.emit(Effect::LatchLockdown);
@@ -818,6 +868,18 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
     /// isolation reports, plus the destination `PreSupervision` entry's two
     /// effects share one `Sink`).
     fn step(&mut self, event: &Event, ctx: &mut Sink<E>) {
+        // 0. Single point of id-membership enforcement. The core supervises
+        //    only the components in the configured chain, so an event that names
+        //    an id the chain does not contain is dropped here, before any
+        //    handler runs — no handler needs its own membership check, and none
+        //    can act on a component the core never modeled. Events that name no
+        //    component (`component_id() == None`) always pass through.
+        if let Some(id) = event.component_id()
+            && !self.rot.in_chain(id)
+        {
+            return;
+        }
+
         // 1. Dispatch to the current (leaf) state.
         let mut outcome = self.rot.handle(self.state, event, ctx);
 
