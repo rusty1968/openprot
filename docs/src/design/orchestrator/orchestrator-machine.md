@@ -49,10 +49,10 @@ across events and is visible to every handler. States are a plain `State` enum
 
 | Field | Type | Purpose |
 |---|---|---|
-| `chain` | `Vec<(ComponentId, ComponentAttrs), N>` | Ordered trust chain, supplied by the shell at construction time. Never mutated after build. |
+| `chain` | `Vec<(ComponentId, ComponentAttrs), N>` | Ordered trust chain, supplied by the platform driver at construction time. Never mutated after build. |
 | `cursor` | `u8` | Index of the component currently under verification. Reset to 0 on every `PreSupervision` entry. Advances on each `VerificationPassed`, and past any component marked `Isolated` in `statuses` (skipped without verification), via `Outcome::Handled`. |
 | `statuses` | `Vec<ComponentStatus, N>` | One record per chain component, parallel by index. Each `ComponentStatus` is `{ lifecycle: ComponentLifecycle, retry: u8 }`. `lifecycle` (`Nominal` / `Isolated`) marks whether the component has been gated out of service — an `Isolated` component is held in reset and skipped on every walk. `retry` is its consecutive failed-restore count, kept per component so interleaved recoveries never share a budget. Durable across a return to `Ready` (only `retry` is cleared there; `Isolated` persists); reset only by a fresh `Rot` on `PowerOnReset`. |
-| `max_retry` | `u8` | Shell-chosen ceiling for a component's `retry`. When `statuses[i].retry >= max_retry` recovery is **exhausted** and the failed component's recovery-failure policy (`Isolable`/`Cascading`/`Required`) is applied. |
+| `max_retry` | `u8` | Ceiling for a component's `retry`, chosen by the platform driver. When `statuses[i].retry >= max_retry` recovery is **exhausted** and the failed component's recovery-failure policy (`Isolable`/`Cascading`/`Required`) is applied. |
 | `_effect_cap` | `PhantomData<[u8; E]>` | Zero-sized; ties the effect-buffer size `E` to the type so the `E >= 2 * N + 2` bound is enforced at construction. |
 
 Two pieces of per-episode data are **not** stored on `Rot`: the component whose
@@ -200,7 +200,7 @@ An update is in progress.
 | Event | Guard | Effects | Next state |
 |---|---|---|---|
 | `UpdateVerified` | — | `ActivateUpdate` | `Ready` |
-| `UpdateRejected` | — | `DiscardStaged` | `Ready` (rejected update is not corruption — INV4) |
+| `UpdateRejected` | — | `DiscardStaged` | `Ready` (INV4) |
 | `CorruptionDetected(id)` | `Required`/unknown | `DiscardStaged` (then `RestoreGoldenImage` on entry) | `Recovering(id)` (update preempted; staged image discarded) |
 | `CorruptionDetected(id)` | `Isolable`/`Cascading` | `AssertReset(id)` · `ReportIsolated(id)` | `Handled` (component gated; update continues, staged image kept) |
 | anything else | — | — | `Outcome::Super` → `SupervisingPlatform` |
@@ -220,8 +220,9 @@ The machine is attempting to restore a corrupted or rejected component.
 **Entry action**: emit `RestoreGoldenImage(failed)`, where `failed` is the
 `Recovering(ComponentId)` payload — targets the failed component's *recovery
 region*: all components sharing the same `RegionId` are restored together. The
-core supplies the failed component ID; the shell resolves region membership from
-the chain at startup. Only the named component triggers the restore, but the
+core supplies the failed component ID; the platform driver resolves region
+membership from the chain at startup. Only the named component triggers the
+restore, but the
 entire region is affected (not the whole chain — INV5).
 
 | Event | Guard | Effects | Next state |
@@ -297,8 +298,8 @@ scratch, and a fresh failure restarts the two-stage recovery for that component.
 
 Terminal state. All events are discarded.
 
-**Entry action**: emit `LatchLockdown` — instruct the shell to hold all
-components in reset permanently.
+**Entry action**: emit `LatchLockdown` — instruct the platform driver to hold
+all components in reset permanently.
 
 ---
 
@@ -374,5 +375,5 @@ easy thing: a state that does nothing falls through to the shared rule.
 
 
 `initial()` is a `fn() -> State` with no `self`, so the machine always starts
-in `PowerOnReset`. The shell-supplied `PowerGood(PowerOnResult)` event is the
-first real branching point.
+in `PowerOnReset`. The `PowerGood(PowerOnResult)` event supplied by the platform
+driver is the first real branching point.
