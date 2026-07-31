@@ -348,7 +348,7 @@ the named test(s).
 | INV5 | Runtime corruption targets the **named** component and re-walks the chain from the top after restore. | `runtime_corruption_targets_component_and_rewalks` |
 | INV6 | `AttestationChallenge` is answerable from **every** `SupervisingPlatform` state, with no transition. | `attestation_shared_across_supervising_platform_states` |
 | INV7 | Recovery retries count **consecutive** failures only; after `MAX_RETRY` restores the core self-emits `RecoveryFailed` and latches `Locked`; a successful recovery resets the count. | `retry_cap_self_latches_via_emit`, `retry_count_resets_after_successful_recovery` |
-| INV8 | *Unused — numbering gap; no current invariant or test.* | — |
+| INV8 | Verify-before-release (whole-input-space): across arbitrary event sequences, a component is released only if it was verified since its most recent hold — never on a verification from before it was last taken down. This is the fuzz-checked form of "recovery is a re-boot". | `property_verify_before_release_holds_under_random_sequences` |
 | INV9 | A `ComponentReady` for a component other than the awaited one is silently ignored. | `spurious_component_ready_is_ignored` |
 | INV10 | An `Active` component **gates** the chain walk — the cursor does not advance past it until its `ComponentReady` arrives. | `active_component_gates_on_component_ready` |
 | INV11 | `SelfVerificationFailed` at power-on latches `Locked` immediately, without entering `PreSupervision`. | `self_verification_failure_latches_immediately` |

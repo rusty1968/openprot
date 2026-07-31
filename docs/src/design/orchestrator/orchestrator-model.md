@@ -3,7 +3,7 @@
 This document describes how platform firmware verification is modelled in the
 orchestrator state machine (`services/orchestrator/sm`): the problem it solves,
 the types that carry the domain, the states that sequence the work, and the
-boundary between the pure core and the platform shell that executes it.
+boundary between the pure core and the platform that executes it.
 
 ---
 
@@ -31,8 +31,8 @@ sequence: "The eRoT and the iRoT provide complementary guarantees: the eRoT
 controls whether a component is released from reset; the iRoT controls whether
 the component's own firmware executes."
 
-The **verification boundary** is the interface between the platform shell and the
-pure state-machine core. Only verdicts cross it: the shell performs all
+The **verification boundary** is the interface between the platform and the
+pure state-machine core. Only verdicts cross it: the platform performs all
 cryptographic work (reading flash, checking signatures and SVN) and then signals
 the outcome via an event. The core never sees raw firmware data or hash values —
 it only acts on the resulting `VerificationPassed` or `VerificationFailed`. This
@@ -44,7 +44,7 @@ keeps the core free of I/O and testable without hardware.
 
 ### `ComponentKind`
 
-Classifies the iRoT gate for a component. Supplied by the shell at chain-build
+Classifies the iRoT gate for a component. Supplied by the platform at chain-build
 time; the core never derives it.
 
 ```
@@ -75,7 +75,7 @@ Cascading  — same as Isolable, and additionally hold in reset any component
 
 An opaque `u8` that groups components into a *recovery region*. Components
 assigned the same `RegionId` must be restored together; when any region member
-triggers `Recovering`, the shell issues a joint restore operation for the
+triggers `Recovering`, the platform issues a joint restore operation for the
 entire region. The core treats the id as an equality key only and never
 inspects the membership.
 
@@ -119,26 +119,26 @@ Convenience constructors: `ComponentAttrs::active_required()`,
 ### `ComponentId`
 
 An opaque `u8` the core carries and equality-compares but never inspects. The
-shell decides which id maps to which physical device.
+platform decides which id maps to which physical device.
 
 ### Events that cross the verification boundary
 
 | Event | Direction | Meaning |
 |---|---|---|
-| `VerificationPassed(ComponentId)` | shell → core | The eRoT-side check passed: signature and SVN valid. |
-| `VerificationFailed(ComponentId)` | shell → core | The eRoT-side check failed: image rejected. |
-| `ComponentReady(ComponentId)` | shell → core | An `Active` component's integrated iRoT has finished its local verification and the component is operational (e.g. MCTP channel established). |
-| `Timeout(ComponentId)` | shell → core | The shell's watchdog fired: the named `Active` component did not deliver `ComponentReady` within the platform-policy window. The shell arms the watchdog after emitting `ReleaseReset` and cancels it on `ComponentReady`. Treated as a verification failure for recovery purposes. |
+| `VerificationPassed(ComponentId)` | platform → core | The eRoT-side check passed: signature and SVN valid. |
+| `VerificationFailed(ComponentId)` | platform → core | The eRoT-side check failed: image rejected. |
+| `ComponentReady(ComponentId)` | platform → core | An `Active` component's integrated iRoT has finished its local verification and the component is operational (e.g. MCTP channel established). |
+| `Timeout(ComponentId)` | platform → core | The platform's watchdog fired: the named `Active` component did not deliver `ComponentReady` within the platform-policy window. The platform arms the watchdog after emitting `ReleaseReset` and cancels it on `ComponentReady`. Treated as a verification failure for recovery purposes. |
 
 ### Effects the core emits for verification work
 
 | Effect | Meaning |
 |---|---|
-| `ReadFirmware(ComponentId)` | Ask the shell to read the component's firmware image from eRoT-controlled flash. |
-| `VerifyFirmware(ComponentId)` | Ask the shell to verify the image against the RIM/PFM. The shell responds with `VerificationPassed` or `VerificationFailed`. |
+| `ReadFirmware(ComponentId)` | Ask the platform to read the component's firmware image from eRoT-controlled flash. |
+| `VerifyFirmware(ComponentId)` | Ask the platform to verify the image against the RIM/PFM. The platform responds with `VerificationPassed` or `VerificationFailed`. |
 | `ReleaseReset(ComponentId)` | Release the named component from reset. Emitted only after `VerificationPassed`. |
 
-These are descriptions, not actions. The shell's `Platform::execute` carries
+These are descriptions, not actions. The platform's `Platform::execute` carries
 them out; the core never touches hardware.
 
 ---
@@ -268,7 +268,54 @@ hardware where iRoT initialization can take several seconds.
 
 ---
 
-## 5. The Platform Boundary
+## 5. Recovery Is a Re-boot
+
+A firmware check is only meaningful while its component is held in reset. This
+is a CSA/NIST principle, not an orchestrator invention: corruption detection is
+defined *at boot* and *at rest*, both operating on the firmware image in NVM
+rather than on running code, and *"the eRoT holds each downstream component in
+reset until verification is complete and then releases it"* — *"no component
+executes unverified firmware"* (CSA boot sequence; NIST SP 800-193 Protection
+and Recovery). The reason is concrete: if a component is already executing, the
+verdict says nothing about the code actually running — a live component can be
+running something other than what is in flash, and can rewrite its own flash the
+instant after the check passes. `VerifyFirmware` is therefore an *at-rest*
+operation, and the initial power-on walk is sound only because the platform
+holds every component in reset at power-on and the core releases each one
+(`ReleaseReset`) solely after its own `VerificationPassed`.
+
+Recovery re-runs that walk, so it must re-establish the same precondition. CSA
+grounds this too: recovery *activates through a reset* — its Recovery Sequence
+ends by marking the recovered slot as the boot target and *initiating a reset or
+slot-switch*, so a recovered component always re-enters service from a held,
+freshly-verified state rather than being patched live.
+
+**Design decision (orchestrator-specific):** CSA describes recovery *per
+device* — write the recovery image to the failed slot, reset that device. This
+orchestrator goes further: on re-entering `PreSupervision` the core first
+asserts reset on **every** non-isolated component, then walks the whole chain
+from a fully-held state and re-releases each part in order. Quiescing the entire
+chain (not just the failed device) is our choice, not a verbatim CSA
+requirement; it *follows from* the at-rest principle and buys two things — a
+single verification path shared with power-on, and the removal of any foothold a
+compromised neighbor may have gained after it was released. The result is one
+invariant:
+
+> Every running component was verified while held in reset, immediately before
+> it was released, since the most recent full walk. No live component is ever
+> re-verified.
+
+Re-verifying a still-live sibling from a previous walk would be meaningless: its
+earlier pass belongs to a walk that is over, and nothing has held it at rest
+since. Recovery returns the platform to a known-held state and rebuilds trust
+from there, exactly as power-on does.
+
+The strength of this rests on a platform-side precondition on `AssertReset`; see
+§6.
+
+---
+
+## 6. The Platform Boundary
 
 The orchestrator is split into a **pure core** and the **platform** that hosts
 it. The core is a deterministic state machine: it receives an `Event`, updates its
@@ -319,9 +366,9 @@ encoded in the core.
 The core never reads flash, never checks signatures, never observes reset lines.
 It only emits descriptions. The complete split:
 
-| Responsibility | Core (`sm/src/lib.rs`) | Shell (`Platform` impl) |
+| Responsibility | Core (`sm/src/lib.rs`) | Platform (`Platform` impl) |
 |---|---|---|
-| Chain order and `ComponentAttrs` | reads from `Rot.chain`, set by shell at startup | decides and provides |
+| Chain order and `ComponentAttrs` | reads from `Rot.chain`, set by platform at startup | decides and provides |
 | Read firmware image | emits `ReadFirmware(id)` | executes: eRoT reads via SPI interposition, I3C, or other transport |
 | Verify signature / SVN | emits `VerifyFirmware(id)` | executes: eRoT checks against RIM/PFM; responds with `VerificationPassed` or `VerificationFailed` |
 | Release from reset | emits `ReleaseReset(id)` | executes: eRoT drives reset GPIO or equivalent |
@@ -329,6 +376,13 @@ It only emits descriptions. The complete split:
 | Per-component failure policy | checks `attrs.failure_policy` in handler | none — policy is encoded in the chain at startup |
 | Cascade-skip evaluation | checks `attrs.depends_on` against the `Isolated` components in `statuses` before emitting `ReadFirmware` | encodes the dependency graph at chain-build time |
 | Recovery region membership | reads `attrs.recovery_region` when entering `Recovering` | assigns each component to a region at chain-build time |
+
+**Reset must hold until release.** The core only emits the *ordering* of
+`AssertReset` and `ReleaseReset`; it relies on the platform to make
+`AssertReset` durable — a held quiesce, not a pulse — and to guarantee that no
+component executes between its reset assertion and its post-verification
+`ReleaseReset`. This is what makes an at-rest check meaningful, and it is the
+precondition the recovery re-boot (§5) depends on.
 
 **The core is policy-free.** It carries no tunable policy and no mechanism of
 its own — every policy input is either board-supplied config data or arrives as
@@ -358,7 +412,7 @@ policy deployments configure.
 
 ---
 
-## 6. What This Model Does Not Cover
+## 7. What This Model Does Not Cover
 
 - **Self-verification of the eRoT firmware itself**: happens one boot layer down
   (eRoT ROM + measuring bootloader) before this machine runs. The result is
@@ -371,6 +425,6 @@ policy deployments configure.
   architecture allows platform policy to require multiple intermediate
   readiness signals before a component is considered fully booted. This model
   simplifies that to a single `ComponentReady` event per `Active` component.
-  The shell is responsible for aggregating any intermediate signals and
+  The platform is responsible for aggregating any intermediate signals and
   delivering `ComponentReady` only once all platform-policy checkpoints have
   been satisfied.
