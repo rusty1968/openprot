@@ -65,8 +65,12 @@ enum Outcome {
 /// `E` is bounded from below by the chain length: the worst single event is a
 /// full cascade (up to `N` `AssertReset`s, each paired with a `ReportIsolated`)
 /// plus the destination `PreSupervision` entry's `ReadFirmware`/`VerifyFirmware`
-/// (2), all landing in one `Sink`. `Rot::new` refuses to compile unless
-/// `E >= 2 * N + 2`, so a machine that builds can never overflow this buffer.
+/// (2), all landing in one `Sink`. The re-walk quiesce (an `AssertReset` per
+/// live component) never pushes past this bound, because gating and quiescing
+/// are mutually exclusive per component: a component the cascade isolates is not
+/// also live, so the two counts never sum above the full-cascade worst case.
+/// `Rot::new` refuses to compile unless `E >= 2 * N + 2`, so a machine that
+/// builds can never overflow this buffer.
 pub struct Sink<const E: usize> {
     effects: heapless::Vec<Effect, E>,
 }
@@ -156,6 +160,17 @@ struct ComponentStatus {
     /// spurious timeout. Orthogonal to `lifecycle`: a gated component owes no
     /// boot-progress signal, so gating clears it.
     awaiting_boot: bool,
+    /// Set while this component has been released from reset and not since held
+    /// again — i.e. it is *live*, executing code. Set at every `ReleaseReset`,
+    /// cleared at every `AssertReset` (gating, recovery, or the pre-walk
+    /// quiesce). This is what makes recovery a genuine platform re-boot: on
+    /// re-entering [`State::PreSupervision`] the machine asserts reset on every
+    /// live component before re-verifying, so `VerifyFirmware` never runs
+    /// against code that is still executing (a live check says nothing about
+    /// what is running and is open to a post-check flash rewrite). Distinct from
+    /// `awaiting_boot`, which is cleared once the component reports in but stays
+    /// live: a booted component is `released` yet no longer `awaiting_boot`.
+    released: bool,
 }
 
 impl Default for ComponentStatus {
@@ -164,6 +179,7 @@ impl Default for ComponentStatus {
             lifecycle: ComponentLifecycle::Nominal,
             retry: 0,
             awaiting_boot: false,
+            released: false,
         }
     }
 }
@@ -272,7 +288,9 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             // A gated component is held in reset and no longer owes a
             // boot-progress signal; drop any pending watchdog so a late
             // `Timeout` can't drag an already-isolated component into recovery.
+            // It is also no longer live — the `AssertReset` above holds it.
             self.statuses[i].awaiting_boot = false;
+            self.statuses[i].released = false;
         }
         true
     }
@@ -301,10 +319,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
 
     /// Record that `id` has been released and now owes a boot-progress signal.
     /// Paired with the `ReleaseReset` emitted at each release site: the shell
-    /// arms its per-component boot watchdog there, and this arms ours.
-    fn mark_awaiting_boot(&mut self, id: ComponentId) {
+    /// arms its per-component boot watchdog there, and this arms ours. Also
+    /// marks the component *live* (`released`), which a later re-entry to
+    /// [`State::PreSupervision`] uses to quiesce it before re-verifying.
+    fn mark_released(&mut self, id: ComponentId) {
         if let Some(i) = self.status_index(id) {
             self.statuses[i].awaiting_boot = true;
+            self.statuses[i].released = true;
         }
     }
 
@@ -347,8 +368,31 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         false
     }
 
-    /// Gate a component out of service according to its [`FailurePolicy`], and
-    /// report the [`Gating`] outcome. This is the **single source of truth**
+    /// Hold the whole platform for an at-rest re-verification: assert reset on
+    /// every component that is currently *live* (`released`) and drop its
+    /// boot-progress watchdog, so the walk that follows verifies code that is
+    /// quiesced rather than executing. This is what makes recovery a genuine
+    /// platform re-boot — no released component is ever re-verified while it is
+    /// still running (a live check says nothing about what is executing and is
+    /// open to a post-check flash rewrite).
+    ///
+    /// Lifecycle is untouched: these components are held for re-check, not gated
+    /// (`Nominal` stays `Nominal`), and each is released again by its
+    /// `ReleaseReset` once it re-passes verification. Isolated components are
+    /// already held (`released == false`) and are skipped, as is anything under
+    /// active recovery. At the initial power-on walk nothing is live yet, so
+    /// this emits nothing and cold boot is unchanged.
+    fn quiesce_all(&mut self, ctx: &mut Sink<E>) {
+        for i in 0..self.chain.len() {
+            if !self.statuses[i].released {
+                continue;
+            }
+            let (id, _) = self.chain[i];
+            ctx.emit(Effect::AssertReset(id));
+            self.statuses[i].released = false;
+            self.statuses[i].awaiting_boot = false;
+        }
+    }
     /// shared by both paths that take a component out of service — the
     /// runtime-corruption path ([`handle_corruption`](Self::handle_corruption))
     /// and the recovery-exhaustion path — so the two can never disagree about
@@ -457,12 +501,22 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             // Cursor walk via Outcome::Handled — a self-transition would reset cursor.
             State::PreSupervision => match event {
                 Event::VerificationPassed(id) => {
+                    // Only the component currently under verification
+                    // (`chain[cursor]`, whose `VerifyFirmware` was just emitted)
+                    // may be released. A verdict for any other id is stale or
+                    // out-of-turn and is dropped, so a misordered or hostile
+                    // report cannot release an unverified component (cf. INV9
+                    // for `ComponentReady`).
+                    if self.chain.get(self.cursor as usize).map(|(c, _)| c) != Some(id) {
+                        return Outcome::Handled;
+                    }
                     // The component passed its check — it has recovered, so its
                     // consecutive-failure streak ends (INV7: consecutive only).
                     self.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
-                    // Released: arm its boot-progress watchdog (both tiers).
-                    self.mark_awaiting_boot(*id);
+                    // Released: it is now live, and owes a boot-progress signal
+                    // (both tiers).
+                    self.mark_released(*id);
                     let current_kind = self.chain.get(self.cursor as usize).map(|(_, a)| a.kind);
                     let next_idx = (self.cursor as usize).saturating_add(1);
                     if self.advance_to_next_ungated(ctx, next_idx) {
@@ -545,12 +599,20 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     }
                 }
                 Event::VerificationPassed(id) => {
+                    // Only the component currently under verification
+                    // (`chain[cursor]`) may be released; a verdict for any other
+                    // id is stale or out-of-turn and is dropped (cf. INV9 for
+                    // `ComponentReady`).
+                    if self.chain.get(self.cursor as usize).map(|(c, _)| c) != Some(id) {
+                        return Outcome::Handled;
+                    }
                     // The component passed its check — it has recovered, so its
                     // consecutive-failure streak ends (INV7: consecutive only).
                     self.clear_retry(*id);
                     ctx.emit(Effect::ReleaseReset(*id));
-                    // Released: arm its boot-progress watchdog (both tiers).
-                    self.mark_awaiting_boot(*id);
+                    // Released: it is now live, and owes a boot-progress signal
+                    // (both tiers).
+                    self.mark_released(*id);
                     let next_idx = (self.cursor as usize).saturating_add(1);
                     if self.advance_to_next_ungated(ctx, next_idx) {
                         // `Handled` preserves the current payload: `awaiting` is
@@ -755,6 +817,12 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     fn entry_action(&mut self, state: State, ctx: &mut Sink<E>) {
         match state {
             State::PreSupervision => {
+                // Recovery is a full platform re-boot: quiesce every live
+                // component before the walk, so verification always covers code
+                // at rest, never a component whose earlier pass says nothing
+                // about what it is currently running. Empty at the initial
+                // power-on walk (nothing live yet), so cold boot is unchanged.
+                self.quiesce_all(ctx);
                 let _ = self.advance_to_next_ungated(ctx, 0);
             }
             State::Updating => {
@@ -771,8 +839,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 self.pending_commit = false;
                 // The component under recovery is being restored, not booting;
                 // drop any pending boot-progress watchdog so a late `Timeout`
-                // can't re-enter recovery for it.
+                // can't re-enter recovery for it. It is also held (not live)
+                // while the platform restores it, so it is not quiesced again on
+                // the re-walk.
                 self.clear_awaiting_boot(failed);
+                if let Some(i) = self.status_index(failed) {
+                    self.statuses[i].released = false;
+                }
                 ctx.emit(Effect::RecoverComponent(failed));
             }
             State::Locked => {
@@ -815,6 +888,13 @@ pub struct EffectError;
 /// - **Honest, complete feedback.** The reducer's correctness rests entirely on
 ///   the event stream the shell feeds back; dropping, reordering, or
 ///   synthesizing events silently breaks the state machine's invariants.
+/// - **`AssertReset` holds, it does not pulse.** A reset must keep the component
+///   quiesced and non-executing until its matching `ReleaseReset`. The reducer's
+///   at-rest verification guarantee depends on this: it re-asserts reset on
+///   every live component before a recovery re-walk (`quiesce_all`) so that
+///   `VerifyFirmware` covers code that cannot run or rewrite its own flash
+///   between the check and the release. A reset that merely pulses would let a
+///   component resume before verification and void that guarantee.
 /// - **A failed [`Effect::LatchLockdown`] is a hard fault.** Lockdown is the top
 ///   of the escalation ladder — the reducer has nothing stronger to emit and
 ///   will *believe* it is `Locked`. The shell must treat that failure as

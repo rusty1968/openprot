@@ -191,6 +191,112 @@ fn runtime_corruption_targets_component_and_rewalks() {
     assert_eq!(state, State::PreSupervision);
 }
 
+/// Recovery is a full platform re-boot: a live sibling is held in reset before
+/// the re-walk re-verifies, so `VerifyFirmware` never runs against executing
+/// code. Here C0 and C1 both boot and go live; C0 is then corrupted and
+/// restored. The re-walk must `AssertReset(C1)` (quiesce the live sibling)
+/// before it re-reads and re-verifies C0 from a fully-held state.
+#[test]
+fn recovery_rewalk_quiesces_live_siblings_first() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1), // both live → Ready
+            Event::CorruptionDetected(C0), // required → Recovering(C0)
+            Event::Restored(C0),           // re-walk: quiesce C1, then re-verify C0
+        ],
+    );
+    // The re-walk holds the live sibling before any re-verification.
+    let tail = &effects[effects.len() - 3..];
+    assert_eq!(
+        tail,
+        &[
+            Effect::AssertReset(C1),
+            Effect::ReadFirmware(C0),
+            Effect::VerifyFirmware(C0),
+        ],
+    );
+    assert_eq!(state, State::PreSupervision);
+}
+
+/// `quiesce_all` holds *every* live component, not just the immediate
+/// neighbor: with three live parts, recovering one asserts reset on both
+/// siblings before the re-walk re-verifies anything.
+#[test]
+fn recovery_rewalk_quiesces_all_live_siblings() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1, C2]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1),
+            Event::VerificationPassed(C2), // all live → Ready
+            Event::CorruptionDetected(C0), // required → Recovering(C0)
+            Event::Restored(C0),           // re-walk: quiesce C1 and C2 first
+        ],
+    );
+    // Both live siblings are held before the re-walk re-reads the chain.
+    let rewalk_read = effects
+        .iter()
+        .rposition(|e| *e == Effect::ReadFirmware(C0))
+        .unwrap();
+    let hold_c1 = effects
+        .iter()
+        .position(|e| *e == Effect::AssertReset(C1))
+        .unwrap();
+    let hold_c2 = effects
+        .iter()
+        .position(|e| *e == Effect::AssertReset(C2))
+        .unwrap();
+    assert!(hold_c1 < rewalk_read);
+    assert!(hold_c2 < rewalk_read);
+    assert_eq!(state, State::PreSupervision);
+}
+
+/// The TOCTOU closure: a live sibling is not trusted across a recovery on
+/// its old pass. The re-walk holds it (`AssertReset`), re-verifies it from
+/// that held state (`ReadFirmware`/`VerifyFirmware`), and only then releases
+/// it again — so the sibling is verified twice and released twice, with the
+/// hold in between.
+#[test]
+fn recovery_rewalk_reverifies_live_sibling_at_rest() {
+    let (effects, state) = drive(
+        passive_required(&[C0, C1]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1), // both live → Ready
+            Event::CorruptionDetected(C0), // required → Recovering(C0)
+            Event::Restored(C0),           // re-walk: quiesce C1
+            Event::VerificationPassed(C0), // re-release C0, re-read C1
+            Event::VerificationPassed(C1), // re-verify C1 at rest → Ready
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    let count = |target: Effect| effects.iter().filter(|e| **e == target).count();
+    // C1 is held once (quiesce), and verified + released a second time.
+    assert_eq!(count(Effect::AssertReset(C1)), 1);
+    assert_eq!(count(Effect::VerifyFirmware(C1)), 2);
+    assert_eq!(count(Effect::ReleaseReset(C1)), 2);
+    // The re-verification and re-release both come after the hold.
+    let hold = effects
+        .iter()
+        .position(|e| *e == Effect::AssertReset(C1))
+        .unwrap();
+    let reverify = effects
+        .iter()
+        .rposition(|e| *e == Effect::VerifyFirmware(C1))
+        .unwrap();
+    let rerelease = effects
+        .iter()
+        .rposition(|e| *e == Effect::ReleaseReset(C1))
+        .unwrap();
+    assert!(hold < reverify);
+    assert!(reverify < rerelease);
+}
+
 /// `PreSupervision` reacts to `CorruptionDetected` directly (via
 /// [`Rot::handle_corruption`]), even though it isn't linked to
 /// `SupervisingPlatform` (so `AttestationChallenge` is still discarded
@@ -675,7 +781,15 @@ fn isolable_runtime_corruption_holds_across_rewalk() {
             .count(),
         1,
     );
-    assert!(effects.contains(&Effect::AssertReset(C1)));
+    // C1 is held exactly once (the gate). `quiesce_all` skips it on the
+    // recovery re-walk because it is already held — no duplicate reset.
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| **e == Effect::AssertReset(C1))
+            .count(),
+        1,
+    );
 }
 
 /// A durable gate must survive a return to `Ready`. The gate set is *not*
@@ -1719,4 +1833,136 @@ fn restored_for_wrong_component_does_not_advance_recovery() {
         State::Recovering(C1),
         "a Restored for a non-target component must not be credited to the current recovery",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Property / model test
+//
+// Instead of enumerating hand-picked traces, drive the machine with thousands
+// of *arbitrary* event sequences — including nonsensical and adversarial
+// orderings a hostile platform could inject — and assert the one safety
+// invariant that no example-based test generalizes across the whole input
+// space. It complements the example suite: those pin *behavior*, this pins
+// *safety* over every ordering.
+//
+// The lockdown-absorbing and membership properties are intentionally *not*
+// re-checked here — they are already covered by dedicated example tests
+// (`self_verification_failure_latches_immediately`, the boundary-guard
+// `*_out_of_chain_id_is_dropped` cases), so repeating them under the fuzzer
+// would add cost without signal.
+//
+// Invariant checked:
+//   INV8  Verify-before-release. A component is released (`ReleaseReset`)
+//         only if it was verified (`VerifyFirmware`) since its most recent
+//         hold. A component starts held; `AssertReset` and `RecoverComponent`
+//         re-hold it. So a component is never released on a stale verification
+//         from before it was last taken down — the whole-input-space form of
+//         "recovery is a re-boot" / "no live component trusted without an
+//         at-rest recheck". This is the property the quiesce change introduced
+//         and the one no single example trace captures.
+// ---------------------------------------------------------------------------
+
+/// SplitMix64 — a tiny, dependency-free deterministic PRNG. `no_std`/bazel
+/// friendly: no external proptest/quickcheck crate required.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform-ish value in `0..n`.
+    fn below(&mut self, n: u32) -> u32 {
+        (self.next_u64() % n as u64) as u32
+    }
+}
+
+/// Build one random event over the given id palette. Id-less events ignore it.
+fn random_event(rng: &mut SplitMix64, ids: &[ComponentId]) -> Event {
+    let id = ids[rng.below(ids.len() as u32) as usize];
+    match rng.below(15) {
+        0 => Event::VerificationPassed(id),
+        1 => Event::VerificationFailed(id),
+        2 => Event::ComponentReady(id),
+        3 => Event::Booted(id),
+        4 => Event::BootConfirmed(id),
+        5 => Event::CorruptionDetected(id),
+        6 => Event::Restored(id),
+        7 => Event::Timeout(id),
+        8 => Event::AttestationChallenge,
+        9 => Event::UpdateRequest,
+        10 => Event::UpdateVerified,
+        11 => Event::UpdateRejected,
+        12 => Event::RecoveryFailed,
+        13 => Event::CommitTimeout,
+        _ => Event::EffectFailed,
+    }
+}
+
+#[test]
+fn property_verify_before_release_holds_under_random_sequences() {
+    const RUNS: u64 = 4000;
+    const MAX_LEN: u32 = 24;
+
+    // C0..C2 are in-chain; C3 is intentionally out-of-chain — fed as noise so
+    // the fuzzer also exercises the dispatch-boundary guard, but membership is
+    // asserted by the dedicated boundary-guard example tests, not here.
+    let palette = [C0, C1, C2, C3];
+
+    for seed in 0..RUNS {
+        let mut rng = SplitMix64(seed.wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(1));
+
+        let ch = chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::active_isolable()),
+            (C2, ComponentAttrs::passive_required()),
+        ]);
+        let mut orch =
+            Orchestrator::<CAPACITY, ECAP>::new(ch.try_into().expect("valid chain"), MAX_RETRY);
+        let mut platform = Recorder::new();
+
+        // Power on first — usually a clean provisioned boot, occasionally a
+        // degraded power-on result so lockdown paths get exercised too.
+        let boot = match rng.below(12) {
+            0 => Event::PowerGood(PowerOnResult::Unprovisioned),
+            1 => Event::PowerGood(PowerOnResult::SelfVerificationFailed),
+            _ => BOOT,
+        };
+        orch.dispatch(&mut platform, boot);
+
+        let len = 1 + rng.below(MAX_LEN);
+        for _ in 0..len {
+            let event = random_event(&mut rng, &palette);
+            orch.dispatch(&mut platform, event);
+        }
+
+        // Post-hoc structural scan over the full effect trace.
+        let trace = &platform.recorded;
+
+        // INV8: verify-before-release. A component starts held; AssertReset
+        // and RecoverComponent re-hold it; VerifyFirmware clears it for release.
+        let mut verified = [false; CAPACITY];
+
+        for effect in trace {
+            match effect {
+                Effect::AssertReset(id) | Effect::RecoverComponent(id) => {
+                    verified[id.get() as usize] = false;
+                }
+                Effect::VerifyFirmware(id) => {
+                    verified[id.get() as usize] = true;
+                }
+                Effect::ReleaseReset(id) => {
+                    assert!(
+                        verified[id.get() as usize],
+                        "seed {seed}: released {id:?} without a verify since its last hold",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
