@@ -7,7 +7,7 @@ corruption recovery).
 
 It lives in `services/orchestrator/sm` as a pure state machine: it never touches
 hardware directly. Every action is described as an [`Effect`] value that the
-surrounding shell carries out; every piece of outside information arrives as an
+surrounding platform carries out; every piece of outside information arrives as an
 [`Event`]. This keeps the core testable without hardware and free of I/O.
 
 ## State Topology
@@ -31,7 +31,7 @@ avoid the two drifting apart.
 **Effects, not actions; reads as events.** Handlers only call
 `ctx.emit(Effect::…)` to describe what should happen, and receive every piece of
 outside information in event payloads — the core never reads flash, drives a
-GPIO, opens a channel, or touches a provisioning store. The full core/shell
+GPIO, opens a channel, or touches a provisioning store. The full core/platform
 split is the [Platform Boundary](./orchestrator-model.md#5-the-platform-boundary)
 in the Verification Model.
 
@@ -42,7 +42,7 @@ hiding them as implicit state changes. See the
 [`Recovering` state](./orchestrator-machine.md#recovering) for a worked example.
 
 **Board-supplied policy.** The core hard-codes no deployment-specific values.
-The shell supplies the trust chain (component ids, kinds, and required/optional
+The platform supplies the trust chain (component ids, kinds, and required/optional
 policy) and the recovery-retry cap at startup.
 
 ## Relationship to CSA Architecture
@@ -58,7 +58,7 @@ the CSA architecture document:
 | Isolable component: failure skips, not blocks | `FailurePolicy::Isolable` → skip (held in reset); advance without `Recovering`; no cascade |
 | Cascading skip: failure also holds dependents | `FailurePolicy::Cascading` + `ComponentAttrs::depends_on` → cascade-skip via `statuses` (`Isolated`) |
 | Boot-progress watchdog: component must signal readiness in time | `Timeout(ComponentId)` event → `AwaitingReady` → `Recovering` |
-| Recovery scope groups components that restore together | `ComponentAttrs::recovery_region` (`RegionId`) → shell restores full region on `RestoreGoldenImage` |
+| Recovery scope groups components that restore together | `ComponentAttrs::recovery_region` (`RegionId`) → platform restores full region on `RestoreGoldenImage` |
 
 ## Applicability Across Admissible Architectures
 
