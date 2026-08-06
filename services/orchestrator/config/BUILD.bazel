@@ -4,19 +4,14 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
-    name = "orchestrator_api",
-    srcs = [
-        "src/boot_control.rs",
-        "src/boot_monitor.rs",
-        "src/config.rs",
-        "src/lib.rs",
-    ],
+    name = "orchestrator_config",
+    srcs = ["src/lib.rs"],
     edition = "2024",
     visibility = ["//visibility:public"],
 )
 
 # Host tests: build on the host platform, no kernel/QEMU.
 rust_test(
-    name = "orchestrator_api_test",
-    crate = ":orchestrator_api",
+    name = "orchestrator_config_test",
+    crate = ":orchestrator_config",
 )

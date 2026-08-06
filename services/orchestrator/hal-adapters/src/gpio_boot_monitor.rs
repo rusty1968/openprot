@@ -7,7 +7,7 @@
 use openprot_hal_blocking::gpio_port::{
     ActivePolarity, GpioError, GpioErrorKind, GpioPort, PinMask,
 };
-use orchestrator_api::{BootMonitor, BootStatus};
+use orchestrator_capabilities::{BootMonitor, BootStatus};
 
 /// Adapts any HAL GPIO error into a [`core::error::Error`].
 ///

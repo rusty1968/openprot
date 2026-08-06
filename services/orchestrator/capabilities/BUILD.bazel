@@ -4,22 +4,18 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
-    name = "orchestrator_hal_adapters",
+    name = "orchestrator_capabilities",
     srcs = [
-        "src/gpio_boot_monitor.rs",
-        "src/hal_boot_control.rs",
+        "src/boot_control.rs",
+        "src/boot_monitor.rs",
         "src/lib.rs",
     ],
     edition = "2024",
     visibility = ["//visibility:public"],
-    deps = [
-        "//hal/blocking",
-        "//services/orchestrator/capabilities:orchestrator_capabilities",
-    ],
 )
 
 # Host tests: build on the host platform, no kernel/QEMU.
 rust_test(
-    name = "orchestrator_hal_adapters_test",
-    crate = ":orchestrator_hal_adapters",
+    name = "orchestrator_capabilities_test",
+    crate = ":orchestrator_capabilities",
 )

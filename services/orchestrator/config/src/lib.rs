@@ -5,6 +5,8 @@
 //! (`target/<board>/devices.rs`) declare the values; no concrete line or
 //! device is named here.
 
+#![cfg_attr(not(test), no_std)]
+
 /// What the orchestrator requires before it commits a staged image.
 ///
 /// Intentionally exhaustive (not `#[non_exhaustive]`): adding a variant is
