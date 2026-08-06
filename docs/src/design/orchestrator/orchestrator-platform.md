@@ -1,12 +1,6 @@
 # Platform Architecture
 
-The orchestrator is the eRoT service that owns the
-firmware lifecycle of the platform's downstream devices: verify before
-running, supervise the boot, recover from corruption, apply updates,
-report every degradation. In NIST SP 800-193 terms: *protect*, *detect*,
-*recover*.
-
-It is pure policy. It decides *when* a device leaves reset, *which* image
+The orchestrator is pure policy. It decides *when* a device leaves reset, *which* image
 gets verified, *whether* an update activates — the platform's controllers
 and services carry the decisions out. It never drives a wire, parses a bus
 protocol, or holds a key (see [Where the responsibility
