@@ -3,13 +3,13 @@
 
 //! HAL-backed adapters for the Boot Orchestrator capability traits.
 //!
-//! Each type here implements a capability trait from `orchestrator-api` against
-//! a HAL-blocking trait: [`HalBootControl`] drives `BootControl` over a
+//! Each type here implements a capability trait from `orchestrator-capabilities`
+//! against a HAL-blocking trait: [`HalBootControl`] drives `BootControl` over a
 //! `ResetControl` line, and [`GpioBootMonitor`] reads `BootMonitor` off a
 //! `GpioPort` input line. Adapters live in this crate — not in the leaf
-//! `orchestrator-api` — so that depending on a capability contract never pulls
-//! in the HAL. A transport-backed adapter belongs in its own crate depending
-//! on its own stack, by the same rule.
+//! `orchestrator-capabilities` — so that depending on a capability contract
+//! never pulls in the HAL. A transport-backed adapter belongs in its own crate
+//! depending on its own stack, by the same rule.
 
 #![cfg_attr(not(test), no_std)]
 
