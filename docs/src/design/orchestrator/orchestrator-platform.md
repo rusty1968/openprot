@@ -118,9 +118,7 @@ them:
 - **Exclusive security state.** Only the orchestrator holds the write
   capability for the lockdown latch, retry counts, and pending-update
   record; a persist with unknown outcome counts as failed and latches the
-  machine locked. The anti-rollback (SVN) floor is the same kind of state:
-  it advances only after a new image proves it boots and runs, never on
-  staging alone.
+  machine locked.
 - **Fail-safe resets.** Managed reset lines default to asserted in
   hardware on every controller restart, not just cold boot — a
   controller crash resets healthy running devices. That availability

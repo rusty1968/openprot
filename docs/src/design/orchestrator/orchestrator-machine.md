@@ -211,6 +211,12 @@ emit `DiscardStaged` first — the in-flight staged image would otherwise be
 orphaned. An `Isolable`/`Cascading` corruption is gated and the update continues,
 so its staged image is kept.
 
+> **Anti-rollback commits on boot, not on staging.** `ActivateUpdate` makes the
+> new image the one that runs, but the anti-rollback (SVN) floor advances only
+> after that image proves it boots and runs — never on staging alone. An update
+> that fails to come up leaves the floor untouched, so the prior version stays
+> valid to fall back to.
+
 ---
 
 ### `Recovering`
