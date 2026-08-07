@@ -1,10 +1,11 @@
 # Platform Architecture
 
-The orchestrator decides, it never executes. It decides *when* a device leaves reset, *which* image
-gets verified, *whether* an update activates — the platform's controllers
-and services carry the decisions out. It never drives a wire, parses a bus
-protocol, or holds a key (see [Where the responsibility
-ends](#where-the-responsibility-ends)).
+The platform is the machinery that carries out the decision core's choices. The
+core (`services/orchestrator/sm`) decides *when* a device leaves reset, *which*
+image is verified, *whether* an update activates; the platform turns those
+choices into signals on wires and traffic on buses, and feeds hardware events
+back to the core. It is the only part of the orchestrator that does I/O (see
+[Where the responsibility ends](#where-the-responsibility-ends)).
 
 ## Structure
 
@@ -32,16 +33,15 @@ and the board-specific driver that runs them.
 
 ## Where the responsibility ends
 
-The orchestrator stops at the capability contracts.
-Controllers that touch signals and buses belong to the platform HAL and
-drivers; crypto and transport are services it *uses* but does not own.
-Two rules follow:
+The orchestrator owns the decision *and* the machinery that carries it out — the
+state machine, the capability contracts, their HAL adapters, and the board
+driver. It stops there: crypto, transport, storage, and the SPI and reset
+controllers are services it *uses* but does not own. Two rules follow:
 
-- **Decide *what*, never *how*.** The orchestrator says "hold device 3
-  in reset" — not "drive GPIO pin 14 low." The pin-to-device mapping lives
-  in the board device table; the register access lives in the HAL behind
-  the capability traits. Porting to a new board means a new table and HAL,
-  zero policy changes.
+- **Portable by construction.** Every device access runs through the capability
+  traits: the core names *what* ("hold device 3 in reset"), the board device
+  table maps it to a pin, and the HAL does the register write. Porting to a new
+  board is a new table and HAL — zero policy changes.
 - **Protection survives its crash.** The SPI monitor filters flash traffic
   in hardware, on its own; the orchestrator only loads its rules at
   boot and is not in the data path. Its hardware write filter stays armed
