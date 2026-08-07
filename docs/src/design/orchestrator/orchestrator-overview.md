@@ -1,14 +1,18 @@
-# Orchestrator State Machine
+# Orchestrator
 
 The orchestrator is the eRoT's boot-sequence controller. It walks the platform
 trust chain — verifying each component's firmware and releasing it from reset in
 order — and then governs the operational lifecycle (attestation, firmware update,
 corruption recovery).
 
-It lives in `services/orchestrator/sm` as a pure state machine: it never touches
-hardware directly. Every action is described as an [`Effect`] value that the
-surrounding platform carries out; every piece of outside information arrives as an
-[`Event`]. This keeps the core testable without hardware and free of I/O.
+It is a subsystem, not a single module: a pure decision **core** that decides
+what must happen, wrapped by the **platform** machinery that carries those
+decisions out. The core (`services/orchestrator/sm`) is a state machine that
+touches no hardware — every action it takes is an [`Effect`] value the platform
+executes, and every fact it learns arrives as an [`Event`], which keeps it
+testable without hardware and free of I/O. The platform half — capability
+contracts, the board device table, and the board-specific driver that does the
+I/O — is described in [Platform Architecture](./orchestrator-platform.md).
 
 ## State Topology
 
@@ -29,7 +33,10 @@ avoid the two drifting apart.
   the core — surrounding services, capability contracts, the board device table,
   and the fail-safe rules at the responsibility boundary.
 
-## Design Principles
+## Core Design Principles
+
+These govern the pure core (`sm`); the platform-side boundary rules live in
+[Platform Architecture](./orchestrator-platform.md#where-the-responsibility-ends).
 
 **Effects, not actions; reads as events.** Handlers only call
 `ctx.emit(Effect::…)` to describe what should happen, and receive every piece of
