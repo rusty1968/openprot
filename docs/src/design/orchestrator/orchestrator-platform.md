@@ -8,13 +8,14 @@ ends](#where-the-responsibility-ends)).
 
 ## Structure
 
-Three board-agnostic layers, plus the board-specific driver that runs them:
+The platform wraps the decision core (`services/orchestrator/sm`) — the pure
+state machine that emits effects (verify this image, release that reset, recover
+a corrupt component) and holds no policy or I/O of its own; see the
+[Orchestrator](./orchestrator-overview.md) overview and
+[State Machine](./orchestrator-machine.md). The core is *not* part of the
+platform — the platform is the machinery around it: two board-agnostic layers
+and the board-specific driver that runs them.
 
-- **Decision state machine** (`services/orchestrator/sm`) — emits the effects the
-  other layers execute (verify this image, release that reset, recover a corrupt
-  component). Pure: no policy, no I/O of its own. See the
-  [Orchestrator](./orchestrator-overview.md) overview and
-  [State Machine](./orchestrator-machine.md) for the core.
 - **Device capabilities** (`services/orchestrator/capabilities`) — the narrow contracts
   the state machine's effects are executed against, e.g. `BootControl`
   (hold a device in reset / release it). HAL bindings live in
