@@ -3,13 +3,10 @@
 
 //! `openprot_orchestrator_sm` — the eRoT boot-sequence state machine.
 //!
-//! This is the pure-reducer core ported from `rot_reducer`. It describes side
-//! effects as [`Effect`] values rather than performing them; the surrounding
-//! OpenPRoT shell carries them out via a [`Platform`] impl. No concrete hardware
-//! appears here — the machine is generic over an opaque [`ComponentId`].
-//!
-//! See `docs/verification-model.md` and `docs/state-machine.md` in the
-//! `rot_reducer` workspace for the full domain context and design rationale.
+//! This is the pure decision core: it describes side effects as [`Effect`]
+//! values rather than performing them; the surrounding OpenPRoT shell carries
+//! them out via a [`Platform`] impl. No concrete hardware appears here — the
+//! machine is generic over an opaque [`ComponentId`].
 //!
 //! Three invariants define the boundary:
 //!   1. **Effects flow through [`Sink`]** — fresh per event, drained afterward.
@@ -103,7 +100,7 @@ impl<const E: usize> Sink<E> {
     /// lockdown anyway, which is the louder signal.
     pub fn emit(&mut self, effect: Effect) {
         // Dead Err arm: overflow is proved impossible by `Rot::EFFECT_CAP_OK`
-        // (`E >= 2 * N + 2`) plus the reducer never emitting more than
+        // (`E >= 2 * N + 2`) plus the state machine never emitting more than
         // `2 * N + 2` effects into one Sink.
         let _ = self.effects.push(effect);
     }
@@ -473,7 +470,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     }
 }
 
-/// The reducer proper: the per-state handlers, the superstate handler, and the
+/// The state machine proper: the per-state handlers, the superstate handler, and the
 /// entry actions. These are pure functions of `(stored data, state, event)` —
 /// they mutate [`Rot`]'s storage and push [`Effect`]s into the [`Sink`], and
 /// return an [`Outcome`] describing what should happen to the current state.
@@ -844,10 +841,20 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 // while the platform restores it, so it is not quiesced again on
                 // the re-walk.
                 self.clear_awaiting_boot(failed);
-                if let Some(i) = self.status_index(failed) {
-                    self.statuses[i].released = false;
-                }
-                ctx.emit(Effect::RecoverComponent(failed));
+                // `retry` here is the consecutive-recovery count for `failed`
+                // (0 on the first attempt); hand it to the driver so it need not
+                // track its own. It is bumped later, on `Restored`.
+                let attempt = match self.status_index(failed) {
+                    Some(i) => {
+                        self.statuses[i].released = false;
+                        self.statuses[i].retry
+                    }
+                    None => 0,
+                };
+                ctx.emit(Effect::RecoverComponent {
+                    id: failed,
+                    attempt,
+                });
             }
             State::Locked => {
                 ctx.emit(Effect::LatchLockdown);
@@ -885,19 +892,19 @@ pub struct EffectError;
 /// [`EffectError`] if it could not be performed. Never called with
 /// [`Effect::Emit`] — the orchestrator consumes those internally.
 ///
-/// Contract the reducer relies on:
-/// - **Honest, complete feedback.** The reducer's correctness rests entirely on
+/// Contract the state machine relies on:
+/// - **Honest, complete feedback.** The core's correctness rests entirely on
 ///   the event stream the shell feeds back; dropping, reordering, or
 ///   synthesizing events silently breaks the state machine's invariants.
 /// - **`AssertReset` holds, it does not pulse.** A reset must keep the component
-///   quiesced and non-executing until its matching `ReleaseReset`. The reducer's
+///   quiesced and non-executing until its matching `ReleaseReset`. The core's
 ///   at-rest verification guarantee depends on this: it re-asserts reset on
 ///   every live component before a recovery re-walk (`quiesce_all`) so that
 ///   `VerifyFirmware` covers code that cannot run or rewrite its own flash
 ///   between the check and the release. A reset that merely pulses would let a
 ///   component resume before verification and void that guarantee.
 /// - **A failed [`Effect::LatchLockdown`] is a hard fault.** Lockdown is the top
-///   of the escalation ladder — the reducer has nothing stronger to emit and
+///   of the escalation ladder — the core has nothing stronger to emit and
 ///   will *believe* it is `Locked`. The shell must treat that failure as
 ///   terminal (halt/reset), not a recoverable error.
 pub trait Platform {
@@ -1011,7 +1018,7 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
             for &effect in buf.effects() {
                 match effect {
                     Effect::Emit(internal) => {
-                        // Dead Err arm: the reducer emits at most one `Emit`
+                        // Dead Err arm: the state machine emits at most one `Emit`
                         // (`RecoveryFailed`) per settle, well within PENDING_CAP.
                         let _ = pending.push(internal);
                     }
