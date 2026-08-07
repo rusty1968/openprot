@@ -3,7 +3,7 @@
 
 //! Domain vocabulary for the orchestrator state machine: the component model,
 //! events, effects, states, and the validated [`Chain`] of trust. These types
-//! carry no reducer behavior; the state machine itself lives in the crate root.
+//! carry no behavior; the state machine itself lives in the crate root.
 
 /// An opaque identifier for one platform component. The core never inspects it;
 /// the board layer decides which real hardware each id refers to.
@@ -304,9 +304,20 @@ pub enum Effect {
     /// Recover `id` from its configured recovery source. The mechanism —
     /// golden image, A/B slot, streamed image, or vendor-specific scheme — is
     /// deferred to the [`Platform`](crate::Platform) driver, which resolves it
-    /// per configuration policy. The reducer only names the component to
+    /// per configuration policy. The core only names the component to
     /// recover; it does not encode how recovery is performed.
-    RecoverComponent(ComponentId),
+    ///
+    /// `attempt` is this component's consecutive-recovery count (0 on the first
+    /// attempt), taken straight from the core's own retry counter — the same
+    /// value the retry cap is measured against. It rides on the effect so the
+    /// driver can try a different recovery source each time (say, slot A on
+    /// attempt 0, slot B on 1, golden on 2) without counting attempts itself —
+    /// a count of its own could drift from the core's, since the driver never
+    /// sees when a recovery succeeds.
+    RecoverComponent {
+        id: ComponentId,
+        attempt: u8,
+    },
     /// Report that a component has been isolated (held in reset and removed
     /// from the trust chain) so management software is aware the platform is
     /// running degraded. Emitted once per component, at the moment it is
@@ -381,7 +392,7 @@ pub enum State {
 ///
 /// Build one with [`TryFrom`]/[`TryInto`] from a `heapless::Vec` of
 /// `(ComponentId, ComponentAttrs)` pairs. The conversion is the single place
-/// the reducer's structural invariants are enforced, so a malformed chain
+/// the state machine's structural invariants are enforced, so a malformed chain
 /// fails closed at the boundary instead of misbehaving later:
 ///
 /// - the chain is non-empty,

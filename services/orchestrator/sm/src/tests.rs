@@ -317,7 +317,7 @@ fn corruption_during_presupervision_selfloop_triggers_recovery() {
         ],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// INV7 (feedback-as-data): after MAX_RETRY restores the core self-emits
@@ -543,7 +543,7 @@ fn timeout_awaited_enters_recovering() {
         &[BOOT, Event::VerificationPassed(C0), Event::Timeout(C0)],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// D2: a timeout for a component that is not awaiting boot-progress is
@@ -564,7 +564,7 @@ fn timeout_stale_id_ignored() {
         ],
     );
     assert_eq!(state, State::AwaitingReady(Some(C0)));
-    assert!(!effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
 }
 
 /// An out-of-chain id in a `VerificationFailed` report is dropped: the core
@@ -576,7 +576,7 @@ fn verification_failed_out_of_chain_id_is_dropped() {
         passive_required(&[C0, C1]),
         &[BOOT, Event::VerificationFailed(C3)],
     );
-    assert!(!effects.contains(&Effect::RecoverComponent(C3)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C3, attempt: 0 }));
     // Untouched: still walking the chain from the top with C0 under verification.
     assert_eq!(state, State::PreSupervision);
 }
@@ -595,7 +595,7 @@ fn corruption_out_of_chain_id_is_dropped() {
             Event::CorruptionDetected(C3),
         ],
     );
-    assert!(!effects.contains(&Effect::RecoverComponent(C3)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C3, attempt: 0 }));
     assert_eq!(state, State::Ready);
 }
 
@@ -614,7 +614,7 @@ fn passive_boot_timeout_enters_recovering() {
     );
     assert_eq!(state, State::Recovering(C0));
     assert!(effects.contains(&Effect::ReleaseReset(C0)));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// A passive boot timeout is caught even after the chain walk has completed and
@@ -630,7 +630,7 @@ fn passive_boot_timeout_in_ready_enters_recovering() {
         &[BOOT, Event::VerificationPassed(C0), Event::Timeout(C0)],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// A passive component that reports [`Event::Booted`] retires its watchdog, so a
@@ -649,7 +649,7 @@ fn passive_booted_clears_watchdog_then_timeout_is_stale() {
         ],
     );
     assert_eq!(state, State::Ready);
-    assert!(!effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// D2: full path — timeout drives recovery, restore rewalks from the top, and
@@ -672,7 +672,7 @@ fn timeout_recovers_then_rewalks_to_ready() {
         ],
     );
     assert_eq!(state, State::Ready);
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
     assert!(effects.contains(&Effect::ReleaseReset(C1)));
 }
 
@@ -698,7 +698,7 @@ fn isolable_component_exhausts_recovery_then_skips() {
     // C1 must never be released.
     assert!(!effects.contains(&Effect::ReleaseReset(C1)));
     // Recovery IS attempted before C1 is classified and held.
-    assert!(effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
     assert!(effects.contains(&Effect::AssertReset(C1)));
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
@@ -724,7 +724,7 @@ fn isolable_active_component_exhausted_in_awaiting_ready_skips() {
     );
     assert_eq!(state, State::Ready);
     assert!(!effects.contains(&Effect::ReleaseReset(C1)));
-    assert!(effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
     assert!(effects.contains(&Effect::AssertReset(C1)));
 }
 
@@ -746,7 +746,7 @@ fn isolable_runtime_corruption_is_ignored() {
     );
     assert_eq!(state, State::Ready);
     assert!(effects.contains(&Effect::AssertReset(C1)));
-    assert!(!effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
@@ -854,7 +854,7 @@ fn required_runtime_corruption_triggers_recovery() {
         ],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// Runtime corruption of a `Cascading` component must gate the whole
@@ -883,7 +883,7 @@ fn cascading_runtime_corruption_cascades() {
     assert!(effects.contains(&Effect::AssertReset(C1)));
     assert!(effects.contains(&Effect::AssertReset(C2)));
     // No recovery is started for a non-required corruption.
-    assert!(!effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
@@ -975,7 +975,7 @@ fn cascading_runtime_corruption_cascades_transitively() {
     assert!(effects.contains(&Effect::ReportIsolated(C2)));
     assert!(effects.contains(&Effect::ReportIsolated(C3)));
     // A non-required cascade never enters recovery or lockdown.
-    assert!(!effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
@@ -998,7 +998,7 @@ fn runtime_corruption_isolable_reports() {
     );
     assert_eq!(state, State::Ready);
     assert!(effects.contains(&Effect::ReportIsolated(C1)));
-    assert!(!effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
 }
 
 /// A `Required` component whose recovery is exhausted is named in a
@@ -1046,7 +1046,7 @@ fn successful_recovery_emits_no_isolation_report() {
         ],
     );
     assert_eq!(state, State::Ready);
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
     assert!(
         !effects.iter().any(|e| matches!(
             e,
@@ -1101,7 +1101,7 @@ fn boot_failure_required_enters_recovering() {
         &[BOOT, Event::VerificationFailed(C0)],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
     // Component must never be released when its eRoT check failed.
     assert!(!effects.contains(&Effect::ReleaseReset(C0)));
 }
@@ -1120,7 +1120,7 @@ fn boot_failure_recovery_cycle_completes() {
         ],
     );
     assert_eq!(state, State::Ready);
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
     // ReleaseReset only after the recovery re-walk passes.
     assert!(effects.contains(&Effect::ReleaseReset(C0)));
 }
@@ -1141,7 +1141,7 @@ fn required_failure_in_awaiting_ready_enters_recovering() {
         ],
     );
     assert_eq!(state, State::Recovering(C1));
-    assert!(effects.contains(&Effect::RecoverComponent(C1)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
     assert!(!effects.contains(&Effect::ReleaseReset(C1)));
 }
 
@@ -1161,7 +1161,7 @@ fn corruption_in_awaiting_ready_triggers_recovery() {
         ],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// CorruptionDetected while in Updating (required component) → Recovering
@@ -1178,7 +1178,7 @@ fn corruption_in_updating_triggers_recovery() {
         ],
     );
     assert_eq!(state, State::Recovering(C0));
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// Concurrent faults: corruption of a *different* component arriving while the
@@ -1202,8 +1202,8 @@ fn corruption_while_recovering_retargets_to_new_component() {
     );
     assert_eq!(state, State::Recovering(C2));
     // Both recovery episodes kicked off a recovery.
-    assert!(effects.contains(&Effect::RecoverComponent(C1)));
-    assert!(effects.contains(&Effect::RecoverComponent(C2)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C2, attempt: 0 }));
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
@@ -1291,7 +1291,7 @@ fn update_verified_activates_update() {
     assert_eq!(state, State::Ready);
     assert!(effects.contains(&Effect::ActivateUpdate));
     assert!(!effects.contains(&Effect::DiscardStaged));
-    assert!(!effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// The anti-rollback floor is committed only on a proven-healthy boot, never
@@ -1475,7 +1475,7 @@ fn isolable_first_component_exhausts_then_walk_continues() {
     assert!(!effects.contains(&Effect::ReleaseReset(C0)));
     assert!(effects.contains(&Effect::ReleaseReset(C1)));
     // Recovery IS attempted before C0 is classified and held.
-    assert!(effects.contains(&Effect::RecoverComponent(C0)));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
     assert!(effects.contains(&Effect::AssertReset(C0)));
 }
 
@@ -1549,7 +1549,7 @@ fn chain_rejects_empty() {
     assert_eq!(Chain::try_from(empty).unwrap_err(), ChainError::Empty);
 }
 
-/// A repeated `ComponentId` is rejected: the reducer's linear id lookups would
+/// A repeated `ComponentId` is rejected: the state machine's linear id lookups would
 /// otherwise be ambiguous.
 #[test]
 fn chain_rejects_duplicate_id() {
@@ -1691,7 +1691,7 @@ fn failed_restore_actuation_latches_lockdown() {
     c.push((C0, ComponentAttrs::passive_required())).unwrap();
     let mut orch =
         Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), MAX_RETRY);
-    let mut plat = FailOn::new(Effect::RecoverComponent(C0));
+    let mut plat = FailOn::new(Effect::RecoverComponent { id: C0, attempt: 0 });
 
     orch.dispatch(&mut plat, BOOT);
     orch.dispatch(&mut plat, Event::VerificationFailed(C0)); // → Recovering → RecoverComponent(C0) fails
@@ -1949,7 +1949,7 @@ fn property_verify_before_release_holds_under_random_sequences() {
 
         for effect in trace {
             match effect {
-                Effect::AssertReset(id) | Effect::RecoverComponent(id) => {
+                Effect::AssertReset(id) | Effect::RecoverComponent { id, .. } => {
                     verified[id.get() as usize] = false;
                 }
                 Effect::VerifyFirmware(id) => {
