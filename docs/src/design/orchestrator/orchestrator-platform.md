@@ -10,11 +10,11 @@ ends](#where-the-responsibility-ends)).
 
 Three board-agnostic layers, plus the board-specific driver that runs them:
 
-- **Decision state machine** (`services/orchestrator/sm`) — a pure state machine
-  that consumes events (verification results, boot signals, update requests,
-  timeouts) and emits effects (verify this image, release that reset,
-  recover a corrupt component). It holds no policy of its own: the board supplies
-  the trust chain and retry cap, and it performs no I/O itself.
+- **Decision state machine** (`services/orchestrator/sm`) — emits the effects the
+  other layers execute (verify this image, release that reset, recover a corrupt
+  component). Pure: no policy, no I/O of its own. See the
+  [Orchestrator](./orchestrator-overview.md) overview and
+  [State Machine](./orchestrator-machine.md) for the core.
 - **Device capabilities** (`services/orchestrator/capabilities`) — the narrow contracts
   the state machine's effects are executed against, e.g. `BootControl`
   (hold a device in reset / release it). HAL bindings live in
