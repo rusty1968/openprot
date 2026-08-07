@@ -1,56 +1,33 @@
 # Platform Architecture
 
-The orchestrator is pure policy. It decides *when* a device leaves reset, *which* image
+The orchestrator decides, it never executes. It decides *when* a device leaves reset, *which* image
 gets verified, *whether* an update activates — the platform's controllers
 and services carry the decisions out. It never drives a wire, parses a bus
 protocol, or holds a key (see [Where the responsibility
 ends](#where-the-responsibility-ends)).
 
-## Responsibilities
-
-1. **Verified boot.** Walk the chain of trust in dependency order.
-   Devices with eRoT-readable flash (BMC flash behind the SPI monitor)
-   are verified (signature + SVN) while held in reset; the monitor's
-   hardware write filter stays armed until first fetch, closing the
-   time-of-check/time-of-use window. Devices with private flash (NIC,
-   retimer) rely on their own boot ROM and join the trust chain only
-   after SPDM attestation.
-2. **Boot supervision.** After release, wait on the device's declared
-   boot checkpoints (boot-complete GPIO, heartbeat, MCTP ready, version
-   query). An expired checkpoint window means the boot failed — hung
-   devices report nothing.
-3. **Recovery and isolation.** Restore a corrupt device from its recovery
-   image, with a bounded retry count. If its policy allows degraded
-   operation, isolate it instead: hold in reset, drop from the trust
-   chain, report. If a required device cannot be recovered, latch the
-   platform locked.
-4. **Firmware update.** Accept, authenticate, stage, activate; defer
-   requests while a boot walk, update, or recovery is in flight. The
-   anti-rollback (SVN) floor advances only after the new image proves it
-   boots and runs.
-5. **Attestation and reporting.** Answer attestation challenges as the
-   SPDM responder's policy half: the orchestrator decides which
-   measurements answer a challenge, the crypto engine signs them on its
-   behalf — the key never leaves the vault, the transport only carries
-   the session. Report isolation, recovery failure, and deferred or
-   aborted updates to platform management.
-
 ## Structure
 
-Three board-agnostic layers:
+Three board-agnostic layers, plus the board-specific driver that runs them:
 
-- **Policy state machine** (`services/orchestrator/sm`) — a pure reducer
+- **Decision state machine** (`services/orchestrator/sm`) — a pure state machine
   that consumes events (verification results, boot signals, update requests,
   timeouts) and emits effects (verify this image, release that reset,
-  restore golden image). It performs no I/O itself.
-- **Device capabilities** (`services/orchestrator/api`) — the narrow contracts
+  recover a corrupt component). It holds no policy of its own: the board supplies
+  the trust chain and retry cap, and it performs no I/O itself.
+- **Device capabilities** (`services/orchestrator/capabilities`) — the narrow contracts
   the state machine's effects are executed against, e.g. `BootControl`
   (hold a device in reset / release it). HAL bindings live in
   `services/orchestrator/hal-adapters`.
-- **Board device table** (`services/orchestrator/api`, schema; values in
+- **Board device table** (`services/orchestrator/config`, schema; values in
   `target/<board>/devices.rs`) — declares the managed devices: reset signal,
   boot checkpoints and windows, commit policy. Validated at compile time, so
   a malformed table is a build error.
+- **Platform driver** (board-specific shell) — the only layer that does I/O.
+  It runs the event loop: feeds the state machine events, carries out each
+  emitted effect through the capability contracts, and turns hardware signals
+  back into events. It implements the `Platform` trait the core dispatches
+  against.
 
 ## Where the responsibility ends
 
@@ -66,7 +43,10 @@ Two rules follow:
   zero policy changes.
 - **Protection survives its crash.** The SPI monitor filters flash traffic
   in hardware, on its own; the orchestrator only loads its rules at
-  boot and is not in the data path. Busy or crashed, it cannot be bypassed
+  boot and is not in the data path. Its hardware write filter stays armed
+  until a device's first fetch, so flash verified while the device is held
+  in reset cannot be swapped before it runs — the time-of-check/time-of-use
+  window is closed. Busy or crashed, the monitor cannot be bypassed
   — there is nothing to bypass.
 
 
@@ -137,7 +117,9 @@ them:
 - **Exclusive security state.** Only the orchestrator holds the write
   capability for the lockdown latch, retry counts, and pending-update
   record; a persist with unknown outcome counts as failed and latches the
-  machine locked.
+  machine locked. The anti-rollback (SVN) floor is the same kind of state:
+  it advances only after a new image proves it boots and runs, never on
+  staging alone.
 - **Fail-safe resets.** Managed reset lines default to asserted in
   hardware on every controller restart, not just cold boot — a
   controller crash resets healthy running devices. That availability
@@ -146,7 +128,8 @@ them:
 - **Transport without authority.** Images and attestation are
   authenticated end-to-end (signatures via crypto, SPDM sessions), so the
   transport can drop traffic but never forge it; a dropped boot signal
-  just becomes a checkpoint timeout, and the boot-complete GPIO line
+  just becomes a checkpoint timeout — a hung device reports nothing, so an
+  expired window is read as boot failure — and the boot-complete GPIO line
   remains a transport-free liveness path.
 
 ## TODO
