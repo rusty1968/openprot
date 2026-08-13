@@ -76,4 +76,5 @@ rust_test(
         "emulator",
         "exclusive",
     ],
+    deps = ["//target/veer/tests/i3c_host"],
 )
