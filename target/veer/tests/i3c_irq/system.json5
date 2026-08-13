@@ -1,0 +1,19 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+{
+  arch: {
+    type: "riscv",
+  },
+  kernel: {
+    flash_start_address: 0xA0010000,
+    flash_size_bytes: 65536,
+    ram_start_address: 0x10000000,
+    ram_size_bytes: 32768,
+    interrupt_table: {
+      table: {
+        // IRQ 2 = I3C on the emulated VeeR PIC (McuRootBus::I3C_IRQ).
+        "2": "i3c_interrupt_handler",
+      }
+    },
+  },
+}
