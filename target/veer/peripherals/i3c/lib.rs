@@ -17,10 +17,12 @@
 //! - **Incoming write** (controller → target): hardware pushes a descriptor
 //!   into `tti_rx_desc_queue_port` then `data_length` words into
 //!   `tti_rx_data_port`.  Poll `rx_pending()` or enable the RX interrupt.
-//! - **Outgoing read** (target → controller): firmware writes data words to
-//!   `tti_tx_data_port` then a descriptor to `tti_tx_desc_queue_port`.
-//! - **IBI**: write MDB + optional payload words to `tti_tti_ibi_port` then
-//!   the IBI descriptor; hardware raises the IBI on the bus.
+//! - **Outgoing read** (target → controller): firmware writes a descriptor
+//!   to `tti_tx_desc_queue_port` then `data_length` words to
+//!   `tti_tx_data_port`.
+//! - **IBI**: write the IBI descriptor (MDB + payload length) to
+//!   `tti_tti_ibi_port` then the payload words; hardware raises the IBI on
+//!   the bus.
 
 #![no_std]
 
@@ -127,8 +129,16 @@ impl CaliptraI3cTarget {
     // -------------------------------------------------------------------------
 
     /// Queue `data` as the response to the next private-read from the controller.
+    ///
+    /// The descriptor must be written before the data words: the hardware
+    /// (and the emulator model) opens a new TX buffer on the descriptor
+    /// write and appends subsequent data-port writes to it, matching the
+    /// upstream caliptra-mcu-sw runtime driver.
     pub fn tx_write(&mut self, data: &[u8]) {
         let regs = self.regs();
+        // Descriptor: data_length in lower 16 bits; saturate rather than truncate.
+        regs.tti_tx_desc_queue_port
+            .set(u32::try_from(data.len()).unwrap_or(u16::MAX as u32));
         let mut chunks = data.chunks_exact(4);
         for chunk in &mut chunks {
             let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -140,9 +150,6 @@ impl CaliptraI3cTarget {
             tmp[..rem.len()].copy_from_slice(rem);
             regs.tti_tx_data_port.set(u32::from_le_bytes(tmp));
         }
-        // Descriptor: data_length in lower 16 bits; saturate rather than truncate.
-        regs.tti_tx_desc_queue_port
-            .set(u32::try_from(data.len()).unwrap_or(u16::MAX as u32));
     }
 
     // -------------------------------------------------------------------------
@@ -151,9 +158,16 @@ impl CaliptraI3cTarget {
 
     /// Raise an IBI with the given Mandatory Data Byte and optional payload.
     /// Payload must be ≤255 bytes; excess bytes are silently dropped.
+    ///
+    /// The descriptor word must be written before the payload words: the
+    /// hardware (and the emulator model) parses the first word written to
+    /// the IBI port as the descriptor and takes the payload length from it.
     pub fn ibi_raise(&mut self, mdb: u8, payload: &[u8]) {
         let payload = &payload[..payload.len().min(255)];
         let regs = self.regs();
+        // IBI descriptor: MDB in bits [31:24], payload length in bits [7:0].
+        let desc = ((mdb as u32) << 24) | (payload.len() as u32 & 0xff);
+        regs.tti_tti_ibi_port.set(desc);
         let mut chunks = payload.chunks_exact(4);
         for chunk in &mut chunks {
             let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -165,8 +179,5 @@ impl CaliptraI3cTarget {
             tmp[..rem.len()].copy_from_slice(rem);
             regs.tti_tti_ibi_port.set(u32::from_le_bytes(tmp));
         }
-        // IBI descriptor: MDB in bits [31:24], payload length in bits [7:0].
-        let desc = ((mdb as u32) << 24) | (payload.len() as u32 & 0xff);
-        regs.tti_tti_ibi_port.set(desc);
     }
 }
