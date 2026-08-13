@@ -33,6 +33,10 @@ git_override(
         # Fix syscall_defs/syscall_user being gated on userspace_build_enabled,
         # which breaks userspace=False kernel builds (pigweed regression).
         "//third_party/pigweed:syscall_no_userspace_constraint.patch",
+        # Program the VeeR external-interrupt redirect table (MEIVT) in
+        # veer_pic early_init; without it the first external interrupt
+        # vectors through an unprogrammed table to address 0.
+        "//third_party/pigweed:veer_pic_meivt.patch",
     ],
     remote = "https://pigweed.googlesource.com/pigweed/pigweed",
 )

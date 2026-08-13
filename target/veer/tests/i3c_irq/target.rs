@@ -35,40 +35,6 @@ const I3C_IRQ: u32 = 2;
 // AtomicBool with store/load only: riscv32imc has no atomic RMW instructions.
 static RX_EVENT: AtomicBool = AtomicBool::new(false);
 
-/// Program the VeeR external-interrupt redirect table (MEIVT).
-///
-/// The emulated VeeR core delivers an external interrupt by jumping to the
-/// address stored at `MEIVT[irq]` (fast redirect), and requires the table to
-/// live in DCCM. pw_kernel never programs MEIVT, so the first external
-/// interrupt otherwise escalates to a "table not in DCCM" NMI whose vector
-/// is also unprogrammed, and the CPU jumps to address 0 (the terminal
-/// mcause=1/epc=0 exception previously seen with enable_rx_interrupt).
-///
-/// Pointing every entry at the kernel's standard trap vector (mtvec base)
-/// makes the redirect behave exactly like an mtvec-vectored trap; the
-/// kernel's PIC dispatch then reads the claim id from MEIHAP as usual.
-fn init_meivt() {
-    const DCCM_BASE: u32 = 0x5000_0000;
-    const MAX_IRQ: u32 = 32;
-    let mtvec: u32;
-    // SAFETY: reading mtvec has no side effects.
-    unsafe {
-        core::arch::asm!("csrr {}, mtvec", out(reg) mtvec);
-    }
-    let trap_vector = mtvec & !0x3;
-    for irq in 0..MAX_IRQ {
-        // SAFETY: DCCM is dedicated data RAM, unused by this system image.
-        unsafe {
-            core::ptr::write_volatile((DCCM_BASE + irq * 4) as *mut u32, trap_vector);
-        }
-    }
-    // SAFETY: MEIVT (VeeR-specific CSR 0xBC8) points the redirect table at
-    // the block initialized above.
-    unsafe {
-        core::arch::asm!("csrw 0xbc8, {}", in(reg) DCCM_BASE);
-    }
-}
-
 /// Referenced by name from system.json5; the generated wrapper calls this
 /// with the concrete arch inside an interrupt guard.
 pub fn i3c_interrupt_handler<K: kernel::Kernel>(_kernel: K) {
@@ -90,7 +56,6 @@ impl TargetInterface for Target {
         // SAFETY: single call at boot; Caliptra ROM has already initialized
         // the I3C core and we are the only owner of the peripheral (the
         // interrupt handler's handle is sequenced by RX_EVENTS, see above).
-        init_meivt();
         let mut i3c = unsafe { CaliptraI3cTarget::new() };
         i3c.enable_rx_interrupt();
         <arch_riscv::Arch as kernel::Arch>::InterruptController::enable_interrupt(I3C_IRQ);
