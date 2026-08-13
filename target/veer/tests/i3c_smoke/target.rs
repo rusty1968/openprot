@@ -3,10 +3,10 @@
 
 //! I3C smoke test.
 //!
-//! Verifies that:
-//! 1. `enable_rx_interrupt()` runs without trapping.
-//! 2. A private write sent by the test harness over TCP port 65534 is
-//!    received correctly with the expected payload [0x01, 0x02, 0x03, 0x04].
+//! Verifies that a private write sent by the test harness over TCP port
+//! 65534 is received correctly with the expected payload
+//! [0x01, 0x02, 0x03, 0x04]. Reception is pure-polling: this system image
+//! has an empty interrupt table, so no peripheral interrupt is enabled.
 
 #![no_std]
 #![no_main]
@@ -28,7 +28,6 @@ impl TargetInterface for Target {
         // SAFETY: single call at boot; Caliptra ROM has already initialized
         // the I3C core and we are the only owner of the peripheral.
         let mut i3c = unsafe { CaliptraI3cTarget::new() };
-        i3c.enable_rx_interrupt();
         pw_log::info!("I3C smoke test: waiting for private write");
 
         let mut buf = [0u8; 64];

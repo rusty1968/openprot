@@ -196,23 +196,21 @@ rust_library(
     ],
 )
 
-# Emulator host binary
+# Emulator host binary. Uses a local entry point instead of the upstream
+# main.rs so the I3C controller socket pump is always started; see
+# src/emulator_main.rs.
 rust_binary(
     name = "emulator",
-    srcs = ["@caliptra_mcu_sw//:emulator_srcs"],
+    srcs = ["src/emulator_main.rs"],
     aliases = {
         ":emulator_lib": "emulator",
     },
-    crate_root = "@caliptra_mcu_sw//:emulator/app/src/main.rs",
     edition = "2021",
     deps = [
         ":emulator_lib",
         ":mcu_testing_common",
-        "//third_party/caliptra:crate_log",
         "//third_party/caliptra/caliptra-sw:caliptra_emu_cpu",
         "@rust_caliptra_crates_host//:clap",
-        "@rust_caliptra_crates_host//:ctrlc",
-        "@rust_caliptra_crates_host//:simple_logger",
     ],
 )
 

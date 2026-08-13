@@ -159,8 +159,10 @@ fn resolve_runner_cwd(runner: &Path) -> PathBuf {
 fn i3c_smoke_host_test() {
     let runner = resolve_runner_path();
     let runner_cwd = resolve_runner_cwd(&runner);
+    // Only the firmware's own log line counts as readiness: the emulator's
+    // I3C socket opens minutes earlier (before the MCU ROM and recovery flow
+    // finish), and frames sent that early race firmware boot.
     let ready_marker = "waiting for private write";
-    let socket_marker = "Starting I3C Socket";
 
     let mut child = Command::new(&runner)
         .current_dir(runner_cwd)
@@ -197,45 +199,42 @@ fn i3c_smoke_host_test() {
     let write_successes_sender = Arc::clone(&write_successes);
     let write_failures_sender = Arc::clone(&write_failures);
     let sender_thread = thread::spawn(move || {
-        let mut keepalive: Option<TcpStream> = None;
-
         while !done_sender.load(Ordering::Relaxed) {
-            if ready_sender.load(Ordering::Relaxed) {
-                let addr = target_sender.load(Ordering::Relaxed);
-                println!("I3C HOST TRACE: readiness observed, connecting to {}:{} with addr=0x{addr:02x}", I3C_HOST, I3C_PORT);
-                connect_attempts_sender.fetch_add(1, Ordering::Relaxed);
-                if let Ok(mut stream) = connect_i3c_socket(Duration::from_secs(5)) {
-                    let mut writes_sent = 0u8;
-                    for attempt in 0..15 {
-                        match send_private_write_on_stream(&mut stream, addr, &PAYLOAD) {
-                            Ok(()) => {
-                                println!("I3C HOST TRACE: send attempt {} succeeded", attempt + 1);
-                                writes_sent += 1;
-                                write_successes_sender.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                println!("I3C HOST TRACE: send attempt {} failed: {}", attempt + 1, e);
-                                write_failures_sender.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        thread::sleep(Duration::from_millis(25));
-                    }
-                    if writes_sent > 0 {
-                        sent_sender.store(true, Ordering::Relaxed);
-                        keepalive = Some(stream);
-                        break;
-                    }
-                }
-                thread::sleep(Duration::from_millis(25));
+            if !ready_sender.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(5));
                 continue;
             }
-            thread::sleep(Duration::from_millis(5));
-        }
 
-        while !done_sender.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(10));
+            let addr = target_sender.load(Ordering::Relaxed);
+            println!("I3C HOST TRACE: readiness observed, connecting to {}:{} with addr=0x{addr:02x}", I3C_HOST, I3C_PORT);
+            connect_attempts_sender.fetch_add(1, Ordering::Relaxed);
+            match connect_i3c_socket(Duration::from_secs(5)) {
+                Ok(mut stream) => {
+                    // Keep sending until the runner exits: the firmware
+                    // terminates the emulator as soon as one frame arrives,
+                    // so exit is the natural stop condition.
+                    while !done_sender.load(Ordering::Relaxed) {
+                        match send_private_write_on_stream(&mut stream, addr, &PAYLOAD) {
+                            Ok(()) => {
+                                write_successes_sender.fetch_add(1, Ordering::Relaxed);
+                                sent_sender.store(true, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                println!("I3C HOST TRACE: send failed: {}", e);
+                                write_failures_sender.fetch_add(1, Ordering::Relaxed);
+                                // Reconnect via the outer loop.
+                                break;
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                Err(e) => {
+                    println!("I3C HOST TRACE: connect failed: {}", e);
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
         }
-        drop(keepalive);
     });
 
     let target_stderr = Arc::clone(&target_addr);
@@ -256,7 +255,7 @@ fn i3c_smoke_host_test() {
             if let Some(addr) = extract_target_addr(&line) {
                 target_stderr.store(addr, Ordering::Relaxed);
             }
-            if line.contains(ready_marker) || line.contains(socket_marker) {
+            if line.contains(ready_marker) {
                 ready_stderr.store(true, Ordering::Relaxed);
             }
         }
@@ -279,7 +278,7 @@ fn i3c_smoke_host_test() {
             target_addr.store(addr, Ordering::Relaxed);
         }
 
-        if line.contains(ready_marker) || line.contains(socket_marker) {
+        if line.contains(ready_marker) {
             ready.store(true, Ordering::Relaxed);
         }
     }
