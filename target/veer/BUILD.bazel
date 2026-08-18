@@ -93,13 +93,13 @@ rust_binary(
         "//third_party/caliptra/caliptra-mcu-sw:emulator_lib": "emulator",
     },
     edition = "2021",
+    visibility = [":__subpackages__"],
     deps = [
         "//third_party/caliptra/caliptra-mcu-sw:emulator_lib",
         "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common",
         "//third_party/caliptra/caliptra-sw:caliptra_emu_cpu",
         "@rust_caliptra_crates_host//:clap",
     ],
-    visibility = [":__subpackages__"],
 )
 
 rust_library(
