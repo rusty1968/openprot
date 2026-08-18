@@ -10,6 +10,7 @@ rust_library(
     srcs = glob([
         "src/*.rs",
         "src/**/*.rs",
+        "otp/*.rs",
     ]),
     crate_name = "openprot_hal_blocking",
     edition = "2024",
@@ -19,6 +20,7 @@ rust_library(
         "@rust_crates//:subtle",
         "@rust_crates//:zerocopy",
         "@rust_crates//:zeroize",
+        "//hal/blocking/otp:driver",
     ],
 )
 

@@ -27,6 +27,9 @@ pub mod i2c_device;
 pub mod i2c_hardware;
 /// Message Authentication Code (MAC) traits and implementations
 pub mod mac;
+/// One-time programmable memory traits and implementations
+#[path = "../otp/otp.rs"]
+pub mod otp;
 /// Reset and clocking traits for OpenPRoT HAL
 pub mod system_control;
 
