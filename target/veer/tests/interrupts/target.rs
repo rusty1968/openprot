@@ -61,8 +61,7 @@ impl TargetInterface for Target {
 
         unsafe {
             with_exposed_provenance_mut::<u32>(INT_ENABLE).write_volatile(INT_ERROR);
-            with_exposed_provenance_mut::<u32>(CONTROL)
-                .write_volatile(CONTROL_START_INVALID_OP);
+            with_exposed_provenance_mut::<u32>(CONTROL).write_volatile(CONTROL_START_INVALID_OP);
         }
 
         let mut timeout = 1_000_000;
