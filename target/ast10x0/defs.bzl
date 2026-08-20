@@ -44,6 +44,7 @@ def _flash_system_image_test_impl(ctx):
         # and attaches it as the FMC CS0 flash (if=mtd).
         providers.append(RunEnvironmentInfo(environment = {
             "AST10X0_FLASH_IMAGE": ctx.attr.flash_image,
+            "AST10X0_FLASH_MODEL": ctx.attr.flash_model,
             "AST10X0_FLASH_SIZE": str(ctx.attr.flash_size),
         }))
     return providers
@@ -77,6 +78,11 @@ flash_system_image_test = rule(
             doc = "Basename of the SPI-NOR image the qemu_runner seeds in " +
                   "$TEST_TMPDIR and attaches as FMC CS0 flash (if=mtd).",
             default = "cs0.img",
+        ),
+        "flash_model": attr.string(
+            doc = "QEMU FMC CS0 flash model (e.g. w25q64, w25q128, w25q256) " +
+                  "the runner selects via fmc-model.",
+            default = "w25q64",
         ),
         "flash_size": attr.int(
             doc = "Size in bytes of the seeded flash image.",

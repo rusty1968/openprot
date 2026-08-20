@@ -69,6 +69,13 @@ def _parse_args():
         help="Size in bytes of the --flash-image backing store (default: 8 MiB).",
     )
     parser.add_argument(
+        "--flash-model",
+        type=str,
+        default=None,
+        help="QEMU FMC CS0 flash model (e.g. w25q64, w25q128, w25q256). "
+        "Overrides AST10X0_FLASH_MODEL; defaults to w25q64.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=30,
@@ -160,9 +167,10 @@ def _main(args) -> None:
     machine = args.machine
     if flash_path:
         # ast1030-evb defaults its FMC CS0 chip to a 1 MiB w25q80bl; the FMC
-        # backend drives an 8 MiB W25Q64-class device, so model the matching
-        # chip (and size the backing image to it below).
-        machine = f"{machine},fmc-model=w25q64"
+        # backend drives a larger part, so model the matching chip (and size
+        # the backing image to it below). Default matches the 8 MiB W25Q64.
+        model = args.flash_model or os.environ.get("AST10X0_FLASH_MODEL", "w25q64")
+        machine = f"{machine},fmc-model={model}"
 
     qemu_args = [
         _QEMU_ARM,
