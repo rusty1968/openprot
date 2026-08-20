@@ -31,7 +31,7 @@ use crate::{map_smc_error, JedecId, DEFAULT_CONFIG};
 
 /// Parameters describing a monitored host flash to attach.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SpiHostFlashParams {
+pub struct SpiExternalFlashParams {
     /// SPI controller wired to the host flash bus (`Spi1` or `Spi2`).
     pub controller: SmcController,
     /// Chip select the flash sits on.
@@ -90,7 +90,7 @@ fn source_and_topology(
 }
 
 /// Driver for an external BMC/PCH host SPI flash reached through a SPI monitor.
-pub struct Ast10x0SpiHostFlashDriver {
+pub struct Ast10x0SpiExternalFlashDriver {
     spi: SpiReady,
     scu: ScuRegisters,
     config: FlashConfig,
@@ -99,7 +99,7 @@ pub struct Ast10x0SpiHostFlashDriver {
     monitor: SpiMonitorInstance,
 }
 
-impl Ast10x0SpiHostFlashDriver {
+impl Ast10x0SpiExternalFlashDriver {
     /// Attach to a monitored host flash on SPI1 or SPI2.
     ///
     /// `params.config` must share the geometry the `FlashDriver` trait constants
@@ -114,8 +114,8 @@ impl Ast10x0SpiHostFlashDriver {
     /// monitor policy for `params.monitor` must not be locked in a way that
     /// blocks the RoT internal master, and the controller pinmux must already be
     /// applied by the kernel target's pre-task init. Call at most once per bus.
-    pub unsafe fn new(params: SpiHostFlashParams) -> Result<Self, ErrorCode> {
-        let SpiHostFlashParams {
+    pub unsafe fn new(params: SpiExternalFlashParams) -> Result<Self, ErrorCode> {
+        let SpiExternalFlashParams {
             controller,
             cs,
             monitor,
@@ -172,7 +172,7 @@ impl Ast10x0SpiHostFlashDriver {
     }
 }
 
-impl FlashDriver for Ast10x0SpiHostFlashDriver {
+impl FlashDriver for Ast10x0SpiExternalFlashDriver {
     type Error = ErrorCode;
 
     /// Default erase page: one 4 KiB sector.

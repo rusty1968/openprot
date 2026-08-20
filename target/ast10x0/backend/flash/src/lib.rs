@@ -21,8 +21,8 @@ use hal_flash_driver::{FlashAddress, FlashDriver};
 use util_error::{self as error, ErrorCode};
 use util_types::{Blocking, PowerOf2Usize};
 
-mod host;
-pub use host::{Ast10x0SpiHostFlashDriver, SpiHostFlashParams};
+mod external;
+pub use external::{Ast10x0SpiExternalFlashDriver, SpiExternalFlashParams};
 
 /// Default CS0 flash device profile (W25Q64-class, 8 MiB).
 ///
