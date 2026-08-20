@@ -19,11 +19,14 @@ use hal_flash_driver::{FlashAddress, FlashDriver};
 use util_error::{self as error, ErrorCode};
 use util_types::{Blocking, PowerOf2Usize};
 
-/// CS0 flash device configuration (W25Q64-class, 8 MiB).
+/// Default CS0 flash device profile (W25Q64-class, 8 MiB).
 ///
 /// Matches the hardware-verified configuration used by
-/// //target/ast10x0/tests/smc/write.
-const CS0_CONFIG: FlashConfig = FlashConfig {
+/// //target/ast10x0/tests/smc/write. Other Winbond parts (W25Q128 16 MiB,
+/// W25Q256 32 MiB) are supported via [`Ast10x0FmcFlashDriver::with_config`];
+/// they share this part's 256 B page and 4 KiB sector geometry, and >16 MiB
+/// parts automatically use 4-byte addressing in the SMC device layer.
+const DEFAULT_CONFIG: FlashConfig = FlashConfig {
     capacity_mb: 8,
     page_size: 256,
     sector_size: 4096,
@@ -62,6 +65,7 @@ impl Blocking for NoWaitBlocking {
 /// FMC CS0 flash driver.
 pub struct Ast10x0FmcFlashDriver {
     fmc: FmcReady,
+    config: FlashConfig,
 }
 
 /// Stable alias used by the server binary for compile-time backend selection.
@@ -78,24 +82,44 @@ impl Ast10x0FmcFlashDriver {
     /// target's pre-task init; this driver never touches the shared SCU.
     /// Call at most once per process.
     pub unsafe fn new() -> Result<Self, ErrorCode> {
-        let config = SmcConfig {
+        // SAFETY: forwarded to `with_config`; the same sole-owner contract applies.
+        unsafe { Self::with_config(DEFAULT_CONFIG) }
+    }
+
+    /// Initialize the FMC for a specific device profile and return a ready driver.
+    ///
+    /// `config` must share the geometry the `FlashDriver` trait constants assume
+    /// (256 B program page, 4 KiB erase sector); profiles that differ are
+    /// rejected with `FLASH_AST10X0_DEVICE_NOT_SUPPORTED`. Only `capacity_mb`
+    /// (and clock) are expected to vary across the supported Winbond parts.
+    ///
+    /// # Safety
+    /// Same sole-ownership contract as [`Ast10x0FmcFlashDriver::new`].
+    pub unsafe fn with_config(config: FlashConfig) -> Result<Self, ErrorCode> {
+        if config.page_size as usize != Self::PROGRAM_WINDOW_SIZE
+            || config.sector_size as usize != Self::PAGE_SIZE
+        {
+            return Err(error::FLASH_AST10X0_DEVICE_NOT_SUPPORTED);
+        }
+        let smc_config = SmcConfig {
             controller_id: SmcController::Fmc,
-            cs0: Some(CS0_CONFIG),
+            cs0: Some(config),
             cs1: None,
             dma_enabled: false,
             enable_interrupts: false,
             topology: SmcTopology::BootSpi { master_idx: 0 },
         };
         // SAFETY: sole ownership of the FMC hardware block per the contract above.
-        let uninit = unsafe { FmcUninit::new(config) }.map_err(map_smc_error)?;
+        let uninit = unsafe { FmcUninit::new(smc_config) }.map_err(map_smc_error)?;
         let mut fmc = uninit.init().map_err(map_smc_error)?;
         fmc.spi_nor_read_init(ChipSelect::Cs0)
             .map_err(map_smc_error)?;
-        Ok(Self { fmc })
+        Ok(Self { fmc, config })
     }
 
     fn device(&mut self) -> Result<SpiNorFlash<'_>, ErrorCode> {
-        SpiNorFlash::from_fmc_cs(&mut self.fmc, CS0_CONFIG, ChipSelect::Cs0).map_err(map_smc_error)
+        let config = self.config;
+        SpiNorFlash::from_fmc_cs(&mut self.fmc, config, ChipSelect::Cs0).map_err(map_smc_error)
     }
 }
 
@@ -103,20 +127,20 @@ impl FlashDriver for Ast10x0FmcFlashDriver {
     type Error = ErrorCode;
 
     /// Default erase page: one 4 KiB sector.
-    const PAGE_SIZE: usize = CS0_CONFIG.sector_size as usize;
+    const PAGE_SIZE: usize = DEFAULT_CONFIG.sector_size as usize;
     /// SPI NOR program page: writes must not cross a 256-byte boundary.
-    const PROGRAM_WINDOW_SIZE: usize = CS0_CONFIG.page_size as usize;
+    const PROGRAM_WINDOW_SIZE: usize = DEFAULT_CONFIG.page_size as usize;
     const MAX_READ_SIZE: usize = 4096;
     const READ_ALIGNMENT: usize = 4;
     const PROGRAM_ALIGNMENT: usize = 1;
 
     fn size(&self) -> NonZero<usize> {
-        NonZero::new(CS0_CONFIG.capacity_mb as usize * 1024 * 1024).unwrap()
+        NonZero::new(self.config.capacity_mb as usize * 1024 * 1024).unwrap()
     }
 
     fn erasable_sizes_bitmap(&mut self) -> Result<u32, Self::Error> {
         // Only 4 KiB sector erase is implemented by the peripheral driver.
-        Ok(1u32 << CS0_CONFIG.sector_size.trailing_zeros())
+        Ok(1u32 << self.config.sector_size.trailing_zeros())
     }
 
     fn read(&mut self, start_addr: FlashAddress, buf: &mut [u8]) -> Result<(), Self::Error> {
@@ -136,7 +160,7 @@ impl FlashDriver for Ast10x0FmcFlashDriver {
         start_addr: FlashAddress,
         size: PowerOf2Usize,
     ) -> Result<(), Self::Error> {
-        if size.get() != CS0_CONFIG.sector_size as usize {
+        if size.get() != self.config.sector_size as usize {
             return Err(error::FLASH_GENERIC_ERASE_INVALID_SIZE);
         }
         // Blocks until the device's WIP bit clears; see `NoWaitBlocking`.
