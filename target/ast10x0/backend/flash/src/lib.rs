@@ -21,6 +21,9 @@ use hal_flash_driver::{FlashAddress, FlashDriver};
 use util_error::{self as error, ErrorCode};
 use util_types::{Blocking, PowerOf2Usize};
 
+mod host;
+pub use host::{Ast10x0SpiHostFlashDriver, SpiHostFlashParams};
+
 /// Default CS0 flash device profile (W25Q64-class, 8 MiB).
 ///
 /// Matches the hardware-verified configuration used by
@@ -28,7 +31,7 @@ use util_types::{Blocking, PowerOf2Usize};
 /// W25Q256 32 MiB) are supported via [`Ast10x0FmcFlashDriver::with_config`];
 /// they share this part's 256 B page and 4 KiB sector geometry, and >16 MiB
 /// parts automatically use 4-byte addressing in the SMC device layer.
-const DEFAULT_CONFIG: FlashConfig = FlashConfig {
+pub(crate) const DEFAULT_CONFIG: FlashConfig = FlashConfig {
     capacity_mb: 8,
     page_size: 256,
     sector_size: 4096,
@@ -52,7 +55,7 @@ fn expected_winbond_jedec(config: FlashConfig) -> Option<JedecId> {
     })
 }
 
-fn map_smc_error(e: SmcError) -> ErrorCode {
+pub(crate) fn map_smc_error(e: SmcError) -> ErrorCode {
     match e {
         SmcError::HardwareError => error::FLASH_AST10X0_HARDWARE_ERROR,
         SmcError::Timeout => error::FLASH_AST10X0_TIMEOUT,
