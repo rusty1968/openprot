@@ -11,6 +11,8 @@
 
 use core::num::NonZero;
 
+/// Re-exported so callers can log or verify the probed device identity.
+pub use ast10x0_peripherals::smc::JedecId;
 use ast10x0_peripherals::smc::{
     ChipSelect, FlashConfig, FmcReady, FmcUninit, SmcConfig, SmcController, SmcError, SmcTopology,
     SpiNorFlash, SpiNorFlashDevice,
@@ -33,6 +35,22 @@ const DEFAULT_CONFIG: FlashConfig = FlashConfig {
     block_size: 65536,
     spi_clock_mhz: 50,
 };
+
+/// Expected Winbond JEDEC ID for a supported capacity, or `None` when the
+/// capacity is not a known Winbond part (identity is then not enforced).
+fn expected_winbond_jedec(config: FlashConfig) -> Option<JedecId> {
+    let capacity_code = match config.capacity_mb {
+        8 => 0x17,
+        16 => 0x18,
+        32 => 0x19,
+        _ => return None,
+    };
+    Some(JedecId {
+        manufacturer: 0xEF,
+        memory_type: 0x40,
+        capacity_code,
+    })
+}
 
 fn map_smc_error(e: SmcError) -> ErrorCode {
     match e {
@@ -114,12 +132,28 @@ impl Ast10x0FmcFlashDriver {
         let mut fmc = uninit.init().map_err(map_smc_error)?;
         fmc.spi_nor_read_init(ChipSelect::Cs0)
             .map_err(map_smc_error)?;
-        Ok(Self { fmc, config })
+        let mut driver = Self { fmc, config };
+        // Verify the connected part matches the requested profile. A device
+        // reporting an all-0xFF manufacturer is treated as absent and skipped
+        // (mirrors //target/ast10x0/tests/smc/read spi2); a present part whose
+        // JEDEC ID contradicts the profile is rejected.
+        if let Some(expected) = expected_winbond_jedec(config) {
+            let actual = driver.read_jedec()?;
+            if actual.manufacturer != 0xFF && actual != expected {
+                return Err(error::FLASH_AST10X0_DEVICE_NOT_SUPPORTED);
+            }
+        }
+        Ok(driver)
     }
 
     fn device(&mut self) -> Result<SpiNorFlash<'_>, ErrorCode> {
         let config = self.config;
         SpiNorFlash::from_fmc_cs(&mut self.fmc, config, ChipSelect::Cs0).map_err(map_smc_error)
+    }
+
+    /// Read and decode the device's JEDEC ID (`READ_ID`, `0x9F`).
+    pub fn read_jedec(&mut self) -> Result<JedecId, ErrorCode> {
+        self.device()?.jedec().map_err(map_smc_error)
     }
 }
 
