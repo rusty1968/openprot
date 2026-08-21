@@ -7,6 +7,7 @@ load("//target/ast10x0:defs.bzl", "TARGET_COMPATIBLE_WITH")
 rust_library(
     name = "ast10x0_board",
     srcs = [
+        "src/bmc_reset.rs",
         "src/lib.rs",
         "src/spi_monitor.rs",
         "src/spim_wiring.rs",
@@ -21,5 +22,6 @@ rust_library(
         "//target/ast10x0/peripherals",
         "//util/error",
         "@ast1060_pac",
+        "@rust_crates//:embedded-hal",
     ],
 )

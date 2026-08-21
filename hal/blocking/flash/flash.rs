@@ -108,7 +108,10 @@ pub trait BusAccessGate {
 
     /// Returns `Ok(())` while access is permitted; `Err(..)` when the gate is
     /// closed and operations must be refused.
-    fn ensure_open(&self) -> Result<(), Self::Error>;
+    ///
+    /// Takes `&mut self` so gates may observe state through peripherals that
+    /// require mutable access (e.g. `embedded-hal` `StatefulOutputPin`).
+    fn ensure_open(&mut self) -> Result<(), Self::Error>;
 }
 
 /// A [`Flash`] wrapper that refuses bus-accessing operations unless a

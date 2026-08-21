@@ -24,8 +24,6 @@ use ast10x0_peripherals::spimonitor::{
     LockedSpiMonitor, PassthroughMode, SpiMonitor, SpiMonitorController, SpiMonitorError,
     SpiMonitorPolicy, Uninitialized,
 };
-use hal_flash::BusAccessGate;
-use util_error::{self as error, ErrorCode};
 
 /// Static wiring for one external SPI monitor path.
 ///
@@ -304,97 +302,6 @@ pub fn enable_flash_power(scu: &ScuRegisters) -> bool {
     crate::delay_us(1_000);
 
     gpio.gpio0c8().read().bits() & FLASH_POWER_MASK == FLASH_POWER_MASK
-}
-
-/// Assert or release the active-low BMC reset outputs.
-///
-/// The prot board routes BMC_SRST to SGPIOM output 8 and BMC_EXTRST to
-/// SGPIOM output 9. On assertion EXTRST is driven low first; on release SRST
-/// is driven high first.
-#[must_use]
-pub fn set_bmc_resets(asserted: bool) -> bool {
-    const BMC_SRST_MASK: u32 = 1 << 8;
-    const BMC_EXTRST_MASK: u32 = 1 << 9;
-
-    let scu = unsafe { &*device::Scu::ptr() };
-    scu.scu41c().modify(|_, w| {
-        w.enbl_sgpiomaster_ckfn_pin()
-            .set_bit()
-            .enbl_sgpiomaster_ldfn_pin()
-            .set_bit()
-            .enbl_sgpiomaster_dofn_pin()
-            .set_bit()
-            .enbl_sgpiomaster_difn_pin()
-            .set_bit()
-    });
-
-    let sgpio = unsafe { &*device::Sgpiom::ptr() };
-    sgpio.gpio554().modify(|_, w| unsafe {
-        w.enbl_of_serial_gpio()
-            .set_bit()
-            .numbers_of_serial_gpiopins()
-            .bits(16)
-            .serial_gpioclk_division()
-            .bits(24)
-    });
-
-    let output_high = !asserted;
-    let first_mask = if asserted {
-        BMC_EXTRST_MASK
-    } else {
-        BMC_SRST_MASK
-    };
-    let second_mask = if asserted {
-        BMC_SRST_MASK
-    } else {
-        BMC_EXTRST_MASK
-    };
-
-    for mask in [first_mask, second_mask] {
-        let latch = sgpio.gpio570().read().bits();
-        sgpio
-            .gpio500()
-            .write(|w| unsafe { w.bits(update_bit(latch, mask, output_high)) });
-        crate::delay_us(10_000);
-    }
-
-    let latch = sgpio.gpio570().read().bits();
-    let reset_mask = BMC_SRST_MASK | BMC_EXTRST_MASK;
-    (latch & reset_mask == reset_mask) == output_high
-}
-
-/// Report whether both BMC reset outputs are currently asserted (held low).
-///
-/// Reads back the SGPIO output latch the RoT drives via [`set_bmc_resets`], so
-/// this reflects what the RoT is holding, not an external input level.
-#[must_use]
-pub fn bmc_resets_asserted() -> bool {
-    const BMC_SRST_MASK: u32 = 1 << 8;
-    const BMC_EXTRST_MASK: u32 = 1 << 9;
-    let sgpio = unsafe { &*device::Sgpiom::ptr() };
-    let latch = sgpio.gpio570().read().bits();
-    latch & (BMC_SRST_MASK | BMC_EXTRST_MASK) == 0
-}
-
-/// External-flash access gate backed by the BMC reset outputs.
-///
-/// Reports the gate open only while the RoT holds the BMC in reset, so the
-/// external-flash server refuses operations whenever the host could be driving
-/// its own bus. The orchestrator owns asserting the reset; this gate only
-/// observes it.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BmcResetGate;
-
-impl BusAccessGate for BmcResetGate {
-    type Error = ErrorCode;
-
-    fn ensure_open(&self) -> Result<(), ErrorCode> {
-        if bmc_resets_asserted() {
-            Ok(())
-        } else {
-            Err(error::FLASH_AST10X0_GATE_CLOSED)
-        }
-    }
 }
 
 #[derive(Clone, Copy)]

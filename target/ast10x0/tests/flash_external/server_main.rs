@@ -58,7 +58,7 @@ fn entry() {
     // Refuse every bus-accessing op unless the BMC is held in reset. In this
     // image the kernel target asserts that hold; in production the orchestrator
     // owns it around its reset effects.
-    let gated = GatedFlash::new(flash, BmcResetGate);
+    let gated = GatedFlash::new(flash, BmcResetGate::prot());
     let mut server = FlashIpcServer::new(gated);
     let mut buf = [0u8; IPC_BUF_SIZE];
 

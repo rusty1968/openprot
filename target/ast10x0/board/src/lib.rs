@@ -15,15 +15,17 @@ use ast10x0_peripherals::hace::HaceDevice;
 use ast10x0_peripherals::scu::{ClockRegisterHalf, ScuRegisterHalf};
 use ast10x0_peripherals::scu::{PinctrlPin, ScuRegisters};
 
+pub mod bmc_reset;
 pub mod spi_monitor;
 pub mod spim_wiring;
 
+pub use bmc_reset::{set_bmc_resets, BmcReset, BmcResetGate, SgpioOutputPin};
 pub use spi_monitor::Ast1060SpiMonitor;
 pub use spim_wiring::{
     apply_spim_external_mux, apply_spim_master_passthrough, apply_spim_pinctrl, apply_spim_wiring,
     apply_spim_wiring_with_log, bmc_spim_csin_levels, bmc_spim_path_debug, enable_flash_power,
-    presets, release_spi_flash_resets, set_bmc_resets, spim_external_mux_state, BmcResetGate,
-    BmcSpimPathDebug, SpimWiring, SpimWiringError,
+    presets, release_spi_flash_resets, spim_external_mux_state, BmcSpimPathDebug, SpimWiring,
+    SpimWiringError,
 };
 
 pub use ast10x0_peripherals::i2c::{I2cConfig, I2cError};

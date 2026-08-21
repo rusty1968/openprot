@@ -165,6 +165,24 @@ macro_rules! gpio_macro {
                     }
                 }
 
+                impl $PXi<Output<PushPull>> {
+                    /// Obtain a handle to a pin already configured as a push-pull
+                    /// output, without touching any registers.
+                    ///
+                    /// Intended for read-only observers (e.g. a bus-access gate)
+                    /// that must inspect the output latch without re-driving the
+                    /// line, as `into_push_pull_output` would.
+                    ///
+                    /// # Safety
+                    ///
+                    /// Caller must ensure the pin is already configured as a
+                    /// push-pull output and that access is coordinated for the
+                    /// lifetime of this value.
+                    pub const unsafe fn steal() -> Self {
+                        $PXi { _mode: PhantomData }
+                    }
+                }
+
                 impl StatefulOutputPin for $PXi<Output<PushPull>> {
                     fn is_set_high(&mut self) -> Result<bool, Self::Error> {
                         let p = unsafe { &*device::Gpio::ptr() };
