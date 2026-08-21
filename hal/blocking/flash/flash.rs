@@ -96,6 +96,62 @@ pub trait FlashPageSize {
     const PAGE_SIZE: usize;
 }
 
+/// Gates access to a wrapped [`Flash`] on an external condition.
+///
+/// Implementors report whether the RoT is currently permitted to drive the
+/// external (host) flash bus — typically because the host component is held in
+/// reset. [`GatedFlash`] consults this before every bus-accessing operation.
+pub trait BusAccessGate {
+    /// Error returned when the gate is closed. Matches the wrapped flash's error
+    /// so [`GatedFlash`] can surface it without conversion.
+    type Error;
+
+    /// Returns `Ok(())` while access is permitted; `Err(..)` when the gate is
+    /// closed and operations must be refused.
+    fn ensure_open(&self) -> Result<(), Self::Error>;
+}
+
+/// A [`Flash`] wrapper that refuses bus-accessing operations unless a
+/// [`BusAccessGate`] reports the gate open.
+///
+/// The gate is re-checked on every read/erase/program, closing the window where
+/// the gate could drop mid-session. `geometry` is not gated: it returns static
+/// configuration and touches no host bus.
+pub struct GatedFlash<F, G> {
+    flash: F,
+    gate: G,
+}
+
+impl<F, G> GatedFlash<F, G> {
+    /// Wrap `flash`, admitting operations only while `gate` reports open.
+    pub fn new(flash: F, gate: G) -> Self {
+        Self { flash, gate }
+    }
+}
+
+impl<F: Flash, G: BusAccessGate<Error = F::Error>> Flash for GatedFlash<F, G> {
+    type Error = F::Error;
+
+    fn geometry(&mut self) -> Result<(NonZero<usize>, PowerOf2Usize, u32), Self::Error> {
+        self.flash.geometry()
+    }
+
+    fn read(&mut self, start_addr: FlashAddress, buf: &mut [u8]) -> Result<(), Self::Error> {
+        self.gate.ensure_open()?;
+        self.flash.read(start_addr, buf)
+    }
+
+    fn erase(&mut self, start_addr: FlashAddress, size: PowerOf2Usize) -> Result<(), Self::Error> {
+        self.gate.ensure_open()?;
+        self.flash.erase(start_addr, size)
+    }
+
+    fn program(&mut self, start_addr: FlashAddress, data: &[u8]) -> Result<(), Self::Error> {
+        self.gate.ensure_open()?;
+        self.flash.program(start_addr, data)
+    }
+}
+
 /// A blocking flash implementation that wraps a `FlashDriver`.
 ///
 /// This struct implements the high-level `Flash` trait by wrapping a low-level
