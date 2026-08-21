@@ -13,8 +13,8 @@
 use ast1060_pac as device;
 use ast10x0_peripherals::scu::{
     pinctrl::{
-        PINCTRL_GPIOL2, PINCTRL_GPIOL3, PINCTRL_SPIM1_DEFAULT, PINCTRL_SPIM2_DEFAULT,
-        PINCTRL_SPIM3_DEFAULT, PINCTRL_SPIM4_DEFAULT,
+        PINCTRL_GPIOL2, PINCTRL_GPIOL3, PINCTRL_SPI1_QUAD, PINCTRL_SPI2_QUAD, PINCTRL_SPIM1_DEFAULT,
+        PINCTRL_SPIM2_DEFAULT, PINCTRL_SPIM3_DEFAULT, PINCTRL_SPIM4_DEFAULT,
     },
     ScuError, ScuExtMuxSelect, ScuRegisters, SpiMonitorInstance, SpiMonitorPassthrough,
     SpiMonitorSource,
@@ -24,6 +24,8 @@ use ast10x0_peripherals::spimonitor::{
     LockedSpiMonitor, PassthroughMode, SpiMonitor, SpiMonitorController, SpiMonitorError,
     SpiMonitorPolicy, Uninitialized,
 };
+use hal_flash::BusAccessGate;
+use util_error::{self as error, ErrorCode};
 
 /// Static wiring for one external SPI monitor path.
 ///
@@ -110,7 +112,31 @@ pub fn apply_spim_pinctrl(scu: &ScuRegisters, instance: SpiMonitorInstance) {
     scu.apply_pinctrl_group(group);
 }
 
-/// Configure the external flash mux controls described by the board schematic.
+/// Apply the static SCU routing that lets the RoT master an external flash bus
+/// through a SPI monitor, leaving the bus in host passthrough between ops.
+///
+/// Unlike [`apply_spim_wiring`], this programs no SPIPF policy and takes no
+/// one-way lock: the monitor stays open so the flash driver can detour the RoT
+/// internal SPI master onto the bus per operation and tear it down afterward.
+/// It applies both the monitor pin group and the SPI controller's quad pins,
+/// enables passthrough, and selects the external mux. Intended for kernel
+/// pre-task init, before any process touching the routed bus starts.
+pub fn apply_spim_master_passthrough(
+    scu: &ScuRegisters,
+    instance: SpiMonitorInstance,
+    source: SpiMonitorSource,
+    ext_mux: ScuExtMuxSelect,
+) {
+    apply_spim_pinctrl(scu, instance);
+    let controller_group = match source {
+        SpiMonitorSource::Spi1 => PINCTRL_SPI1_QUAD,
+        SpiMonitorSource::Spi2 => PINCTRL_SPI2_QUAD,
+    };
+    scu.apply_pinctrl_group(controller_group);
+    scu.set_spim_passthrough(instance, SpiMonitorPassthrough::Enabled);
+    scu.set_spim_ext_mux(instance, ext_mux);
+}
+
 ///
 /// SPIM1/2 use GPIO A-D pin 12 plus SGPIOM output 0.
 /// SPIM3/4 use GPIO E-H pin 8 plus SGPIOM output 2.
@@ -335,6 +361,40 @@ pub fn set_bmc_resets(asserted: bool) -> bool {
     let latch = sgpio.gpio570().read().bits();
     let reset_mask = BMC_SRST_MASK | BMC_EXTRST_MASK;
     (latch & reset_mask == reset_mask) == output_high
+}
+
+/// Report whether both BMC reset outputs are currently asserted (held low).
+///
+/// Reads back the SGPIO output latch the RoT drives via [`set_bmc_resets`], so
+/// this reflects what the RoT is holding, not an external input level.
+#[must_use]
+pub fn bmc_resets_asserted() -> bool {
+    const BMC_SRST_MASK: u32 = 1 << 8;
+    const BMC_EXTRST_MASK: u32 = 1 << 9;
+    let sgpio = unsafe { &*device::Sgpiom::ptr() };
+    let latch = sgpio.gpio570().read().bits();
+    latch & (BMC_SRST_MASK | BMC_EXTRST_MASK) == 0
+}
+
+/// External-flash access gate backed by the BMC reset outputs.
+///
+/// Reports the gate open only while the RoT holds the BMC in reset, so the
+/// external-flash server refuses operations whenever the host could be driving
+/// its own bus. The orchestrator owns asserting the reset; this gate only
+/// observes it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BmcResetGate;
+
+impl BusAccessGate for BmcResetGate {
+    type Error = ErrorCode;
+
+    fn ensure_open(&self) -> Result<(), ErrorCode> {
+        if bmc_resets_asserted() {
+            Ok(())
+        } else {
+            Err(error::FLASH_AST10X0_GATE_CLOSED)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

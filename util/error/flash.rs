@@ -94,3 +94,7 @@ pub const FLASH_AST10X0_DMA_NOT_ENABLED: ErrorCode =
     FLASH_AST10X0.from_pw(10, Error::FailedPrecondition);
 /// A read returned fewer bytes than requested.
 pub const FLASH_AST10X0_SHORT_READ: ErrorCode = FLASH_AST10X0.from_pw(11, Error::DataLoss);
+/// The external-flash access gate is closed: the target host component is not
+/// currently held in reset, so the RoT must not drive its flash bus.
+pub const FLASH_AST10X0_GATE_CLOSED: ErrorCode =
+    FLASH_AST10X0.from_pw(12, Error::FailedPrecondition);

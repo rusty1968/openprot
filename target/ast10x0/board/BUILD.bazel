@@ -16,8 +16,10 @@ rust_library(
     target_compatible_with = TARGET_COMPATIBLE_WITH,
     visibility = ["//visibility:public"],
     deps = [
+        "//hal/blocking/flash:flash",
         "//target/ast10x0/backend/i2c:i2c_backend_ast10x0",
         "//target/ast10x0/peripherals",
+        "//util/error",
         "@ast1060_pac",
     ],
 )
