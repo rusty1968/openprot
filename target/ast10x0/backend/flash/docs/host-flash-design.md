@@ -181,7 +181,57 @@ same `FLASH_AST10X0_*` codes used by the FMC backend. Additional cases:
 | faked `WREN`/`RDSR`                  | real WREN + RDSR/WIP polling                |
 | (mux handled elsewhere in SDK)       | explicit per-op SCU internal-master routing |
 
-## 10. Limitations / future work
+## 10. Reset coordination and the host-hold contract
+
+This driver flips the SPI mux (`SCU0F0`) per operation; it does **not** assert
+host reset. Preventing two-master bus contention is therefore the caller's
+responsibility: the host must be held (in reset, or otherwise quiesced off its
+flash bus) for the duration of any access window. The per-op mux flip preempts
+the host electrically, but on its own it assumes the host tolerates losing the
+bus mid-transaction — only a host hold makes an access window safe.
+
+In OpenPRoT that hold is decided by the orchestrator state machine, which emits
+`AssertReset(ComponentId)` / `ReleaseReset(ComponentId)` effects
+(`services/orchestrator/sm/src/model.rs`). The mechanism behind those effects is
+deferred to the `Platform` driver; the state machine reasons at *component*
+granularity and knows nothing about the SPI mux. So the responsibilities split
+across three layers:
+
+```
+Orchestrator SM   ── emits ──▶ AssertReset(host)        decides the host is held
+                  ── emits ──▶ RecoverComponent{host}   decides "restore now"
+                                     │
+                              Platform driver            holds the host, then
+                                     │                   invokes flash access
+                                     ▼
+                              this driver ── per-op SCU mux ──▶ host flash
+```
+
+This is the deliberate decomposition of aspeed-zephyr's `BMCBootHold()` /
+`PCHBootHold()`, which fuse reset-assert + mux-switch + flash-reset inside one
+HAL call. OpenPRoT separates *when* (orchestrator reset effects) from *how the
+host is held* (platform driver) from *bus routing* (this driver). The safety
+that the reference gets structurally — reset always precedes bus seizure because
+they live in the same function — becomes an ordering the platform driver must
+uphold when it services the reset and recovery effects.
+
+Two open design questions follow from that split:
+
+- **Granularity mismatch.** The state machine holds the host for a whole
+  verify/recover *phase* (coarse, like the reference boot-hold window), while
+  this driver flips the mux *per op*. The per-op flips are harmless while the
+  host is held for the enclosing phase. But any host-flash access *without* a
+  preceding `AssertReset` (e.g. a runtime integrity scan while the host runs)
+  has no reset backstop and relies on mux preemption alone. Host-flash access
+  outside a hold window should be treated as unsupported until that case is
+  designed.
+- **Ordering enforcement.** Nothing type-level guarantees `AssertReset`
+  precedes flash mutation; in the reference it is structural. Here it is a
+  platform-driver convention. A candidate hardening is to hand out an
+  external-flash handle only while the target component is gated, so the type
+  system — not documentation — enforces "held before accessed."
+
+## 11. Limitations / future work
 
 Driver-level gaps between this driver and full BMC/PCH update parity are tracked
 separately in [host-flash-gaps.md](host-flash-gaps.md); the highlights:
