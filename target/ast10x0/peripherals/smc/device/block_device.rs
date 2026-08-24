@@ -37,7 +37,7 @@ impl<'a, 'b> SpiNorBlockDevice<'a, 'b> {
 
     /// Build a block facade by mapping a JEDEC ID to a known flash profile.
     pub fn from_jedec_id(flash: &'a mut SpiNorFlash<'b>, jedec: JedecId) -> Result<Self, SmcError> {
-        let cfg = cfg_from_jedec(jedec)?;
+        let cfg = FlashConfig::from_jedec(jedec)?;
         Self::from_flash(flash, cfg)
     }
 
@@ -90,19 +90,4 @@ fn cfg_capacity_bytes(cfg: FlashConfig) -> Result<usize, SmcError> {
     (cfg.capacity_mb as usize)
         .checked_mul(1024 * 1024)
         .ok_or(SmcError::InvalidCapacity)
-}
-
-fn cfg_from_jedec(jedec: JedecId) -> Result<FlashConfig, SmcError> {
-    match (jedec.manufacturer, jedec.memory_type, jedec.capacity_code) {
-        (0xEF, 0x40, 0x17) => Ok(FlashConfig::winbond_w25q64()),
-        (0xEF, 0x40, 0x18) => Ok(FlashConfig {
-            capacity_mb: 16,
-            page_size: 256,
-            sector_size: 4096,
-            block_size: 65536,
-            spi_clock_mhz: 25,
-        }),
-        (0xEF, 0x40, 0x19) => Ok(FlashConfig::winbond_w25q256()),
-        _ => Err(SmcError::DeviceNotSupported),
-    }
 }

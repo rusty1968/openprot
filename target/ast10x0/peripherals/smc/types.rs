@@ -3,6 +3,7 @@
 
 //! Type definitions and error handling
 
+use crate::smc::device::JedecId;
 use embedded_storage::nor_flash::{NorFlashError, NorFlashErrorKind};
 
 /// Terminal errors: operation failed, don't retry
@@ -178,6 +179,15 @@ impl SmcController {
     }
 }
 
+/// Standard SPI-NOR device constants.
+///
+/// Ported from aspeed-rust `spi/norflash.rs`: JEDEC manufacturer IDs and the
+/// standard NOR page/sector geometry shared by the supported parts.
+pub const SPI_NOR_MFR_ID_WINBOND: u8 = 0xEF;
+pub const SPI_NOR_MFR_ID_MXIC: u8 = 0xC2;
+pub const SPI_NOR_PAGE_SIZE: u32 = 256;
+pub const SPI_NOR_SECTOR_SIZE: u32 = 4096;
+
 /// Configuration for a single flash device
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlashConfig {
@@ -214,6 +224,39 @@ impl FlashConfig {
             block_size: 65536,
             spi_clock_mhz: 25,
         }
+    }
+
+    /// Derive a device profile from its JEDEC ID.
+    ///
+    /// Ported from aspeed-rust `NorFlashBlockDevice::from_jedec_id`
+    /// (`aspeed-rust/src/spi/norflashblockdevice.rs`): capacity is decoded
+    /// generically as `1 << capacity_code` (range-checked `0x10..=0x28`) rather
+    /// than matched against a closed part allowlist, and geometry is the
+    /// SPI-NOR standard 256 B page / 4 KiB sector for Winbond (`0xEF`) and MXIC
+    /// (`0xC2`) parts. Other manufacturers are rejected.
+    ///
+    /// `FlashConfig` tracks whole-MiB capacity, so sub-MiB parts (capacity code
+    /// below `0x14`) are rejected even though aspeed-rust's byte-granular field
+    /// would accept them.
+    pub fn from_jedec(jedec: JedecId) -> Result<Self, SmcError> {
+        match jedec.manufacturer {
+            SPI_NOR_MFR_ID_WINBOND | SPI_NOR_MFR_ID_MXIC => {}
+            _ => return Err(SmcError::DeviceNotSupported),
+        }
+        if !(0x10..=0x28).contains(&jedec.capacity_code) {
+            return Err(SmcError::InvalidCapacity);
+        }
+        let capacity_bytes: u64 = 1u64 << jedec.capacity_code;
+        if capacity_bytes % (1024 * 1024) != 0 {
+            return Err(SmcError::InvalidCapacity);
+        }
+        Ok(Self {
+            capacity_mb: (capacity_bytes / (1024 * 1024)) as u32,
+            page_size: SPI_NOR_PAGE_SIZE,
+            sector_size: SPI_NOR_SECTOR_SIZE,
+            block_size: 65536,
+            spi_clock_mhz: 25,
+        })
     }
 }
 
@@ -285,4 +328,80 @@ pub struct SmcConfig {
     pub enable_interrupts: bool,
     /// Controller topology (role and master index)
     pub topology: SmcTopology,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlashConfig, SmcError};
+    use crate::smc::device::JedecId;
+
+    #[test]
+    fn from_jedec_decodes_winbond_capacities() {
+        // W25Q64 (8 MiB), W25Q128 (16 MiB), W25Q256 (32 MiB).
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x17]))
+                .unwrap()
+                .capacity_mb,
+            8
+        );
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x18]))
+                .unwrap()
+                .capacity_mb,
+            16
+        );
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x19]))
+                .unwrap()
+                .capacity_mb,
+            32
+        );
+    }
+
+    #[test]
+    fn from_jedec_accepts_mxic_manufacturer() {
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xC2, 0x20, 0x18]))
+                .unwrap()
+                .capacity_mb,
+            16
+        );
+    }
+
+    #[test]
+    fn from_jedec_uses_standard_geometry() {
+        let cfg = FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x17])).unwrap();
+        assert_eq!(cfg.page_size, 256);
+        assert_eq!(cfg.sector_size, 4096);
+        assert_eq!(cfg.block_size, 65536);
+    }
+
+    #[test]
+    fn from_jedec_rejects_unknown_manufacturer() {
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0x20, 0x40, 0x17])),
+            Err(SmcError::DeviceNotSupported)
+        );
+    }
+
+    #[test]
+    fn from_jedec_rejects_out_of_range_capacity() {
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x29])),
+            Err(SmcError::InvalidCapacity)
+        );
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x0F])),
+            Err(SmcError::InvalidCapacity)
+        );
+    }
+
+    #[test]
+    fn from_jedec_rejects_sub_mib_capacity() {
+        // 0x13 = 2^19 = 512 KiB, not a whole MiB.
+        assert_eq!(
+            FlashConfig::from_jedec(JedecId::from_bytes([0xEF, 0x40, 0x13])),
+            Err(SmcError::InvalidCapacity)
+        );
+    }
 }
