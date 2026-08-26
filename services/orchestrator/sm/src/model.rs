@@ -215,13 +215,10 @@ pub enum Event {
     CorruptionDetected(ComponentId),
     /// This component has been restored from its configured recovery source.
     Restored(ComponentId),
-    /// The platform driver has no remaining recovery source for this component
-    /// — its configured images/slots are exhausted. Reported in place of
-    /// [`Event::Restored`], and routed through [`FailurePolicy`] rather than the
-    /// fail-closed [`Event::EffectFailed`] lockdown, so an `Isolable`/`Cascading`
-    /// component is gracefully gated while a `Required` one latches
-    /// [`State::Locked`]. Authoritative: it exhausts recovery immediately,
-    /// without consulting the retry cap.
+    /// The platform driver is out of recovery sources for this component.
+    /// Routed through [`FailurePolicy`] (gate, not the fail-closed
+    /// [`Event::EffectFailed`] lockdown). Authoritative: exhausts recovery at
+    /// once, bypassing the retry cap.
     RecoveryUnavailable(ComponentId),
     /// A required component's recovery was exhausted.
     RecoveryFailed,
