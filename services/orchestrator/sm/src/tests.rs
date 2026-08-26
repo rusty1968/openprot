@@ -1031,6 +1031,49 @@ fn required_exhaustion_reports_before_lockdown() {
     );
 }
 
+/// INV8: an isolated component is never released, however good the verdict.
+/// Gating a component does not move the cursor off it, so the in-flight
+/// `VerifyFirmware` issued before the corruption report can still be answered
+/// — and that stale pass must not undo the `AssertReset` that just held it.
+#[test]
+fn stale_verdict_never_releases_an_isolated_component() {
+    let (effects, _state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // → VerifyFirmware(C1) in flight
+            Event::CorruptionDetected(C1), // → AssertReset(C1), isolated
+            Event::VerificationPassed(C1), // the in-flight verdict, now stale
+        ],
+    );
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(!effects.contains(&Effect::ReleaseReset(C1)));
+}
+
+/// Same hole on the supervised release site: a component isolated while the
+/// walk is parked in `AwaitingReady` must not be released by the verdict for
+/// the verification that was already in flight.
+#[test]
+fn stale_verdict_never_releases_an_isolated_component_in_awaiting_ready() {
+    let (effects, _state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // → AwaitingReady(C0); VerifyFirmware(C1) in flight
+            Event::CorruptionDetected(C1), // → AssertReset(C1), isolated
+            Event::VerificationPassed(C1), // the in-flight verdict, now stale
+        ],
+    );
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(!effects.contains(&Effect::ReleaseReset(C1)));
+}
+
 /// A component that recovers within its retry budget is not degraded, so
 /// nothing is reported — reports mark components taken *out of service*, not
 /// every transient failure.

@@ -424,6 +424,20 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         }
     }
 
+    /// Whether a `VerificationPassed(id)` may release `id`. Two conditions, and
+    /// both release sites check them through here so they cannot drift apart:
+    ///
+    /// - `id` is the component currently under verification (`chain[cursor]`,
+    ///   whose `VerifyFirmware` was just emitted). A verdict for any other id is
+    ///   stale or out-of-turn (cf. INV9 for `ComponentReady`).
+    /// - `id` is not gated. Gating does not move the cursor off the component,
+    ///   so a component isolated *while its verification was in flight* is still
+    ///   `chain[cursor]` when that verdict lands — and a stale pass must not
+    ///   undo the `AssertReset` that just held it (INV8).
+    fn may_release(&self, id: ComponentId) -> bool {
+        self.chain.get(self.cursor as usize).map(|(c, _)| c) == Some(&id) && !self.is_gated(id)
+    }
+
     /// Shared `CorruptionDetected` handling, called from both `PreSupervision`
     /// (directly) and `SupervisingPlatform` (via its superstate handler).
     /// Delegates the policy interpretation to [`gate_by_policy`](Self::gate_by_policy)
@@ -498,13 +512,9 @@ impl<const N: usize, const E: usize> Rot<N, E> {
             // Cursor walk via Outcome::Handled — a self-transition would reset cursor.
             State::PreSupervision => match event {
                 Event::VerificationPassed(id) => {
-                    // Only the component currently under verification
-                    // (`chain[cursor]`, whose `VerifyFirmware` was just emitted)
-                    // may be released. A verdict for any other id is stale or
-                    // out-of-turn and is dropped, so a misordered or hostile
-                    // report cannot release an unverified component (cf. INV9
-                    // for `ComponentReady`).
-                    if self.chain.get(self.cursor as usize).map(|(c, _)| c) != Some(id) {
+                    // A misordered, stale, or hostile verdict cannot release an
+                    // unverified or already-isolated component.
+                    if !self.may_release(*id) {
                         return Outcome::Handled;
                     }
                     // The component passed its check — it has recovered, so its
@@ -596,11 +606,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     }
                 }
                 Event::VerificationPassed(id) => {
-                    // Only the component currently under verification
-                    // (`chain[cursor]`) may be released; a verdict for any other
-                    // id is stale or out-of-turn and is dropped (cf. INV9 for
-                    // `ComponentReady`).
-                    if self.chain.get(self.cursor as usize).map(|(c, _)| c) != Some(id) {
+                    // Same guard as the `PreSupervision` release site.
+                    if !self.may_release(*id) {
                         return Outcome::Handled;
                     }
                     // The component passed its check — it has recovered, so its
