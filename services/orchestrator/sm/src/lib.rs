@@ -438,23 +438,22 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         self.chain.get(self.cursor as usize).map(|(c, _)| c) == Some(&id) && !self.is_gated(id)
     }
 
-    /// Recovery is over for `failed` without success: gate per policy
-    /// (`Isolable`/`Cascading` skip and the walk continues; `Required`, or an
-    /// unknown id, reports the component that forced the halt and latches
-    /// [`State::Locked`]). Shared by the retry-cap path ([`Event::Restored`]
-    /// past `max_retry`) and the platform-signalled path
-    /// ([`Event::RecoveryUnavailable`]) so the two can never diverge about what
-    /// "recovery gave up" means.
-    fn exhaust_recovery(&mut self, ctx: &mut Sink<E>, failed: ComponentId) -> Outcome {
-        match self.gate_by_policy(ctx, failed) {
+    /// Recovery of `target` has run out of options. Gate it per policy:
+    /// `Isolable`/`Cascading` are skipped and the walk continues, while
+    /// `Required` (or an unknown id) reports the component and latches
+    /// [`State::Locked`]. Both exhaustion paths — the retry cap
+    /// ([`Event::Restored`] past `max_retry`) and the platform's
+    /// [`Event::RecoveryUnavailable`] — share this so they cannot diverge.
+    fn exhaust_recovery(&mut self, ctx: &mut Sink<E>, target: ComponentId) -> Outcome {
+        match self.gate_by_policy(ctx, target) {
             Gating::Gated => {
-                self.clear_retry(failed);
+                self.clear_retry(target);
                 Outcome::Transition(State::PreSupervision)
             }
             // The report precedes the internal `Emit`, so it is actuated before
             // the machine moves toward `Locked`.
             Gating::NotGated => {
-                ctx.emit(Effect::ReportRecoveryFailed(failed));
+                ctx.emit(Effect::ReportRecoveryFailed(target));
                 ctx.emit(Effect::Emit(Event::RecoveryFailed));
                 Outcome::Handled
             }
