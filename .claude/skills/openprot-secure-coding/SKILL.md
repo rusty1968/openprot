@@ -13,13 +13,10 @@ description: Use when writing, editing, or reviewing Rust code that touches secr
 
 ## Hardware register access
 
-Confirmed pattern across targets (ast10x0 and earlgrey both follow this — do not regress to bare
-pointer access):
+Confirmed pattern across targets — do not regress to bare pointer access:
 
 - Register blocks are wrapped in a driver struct holding a typed register-block handle
-  (ast10x0: a generated PAC `RegisterBlock` pointer, e.g. `target/ast10x0/peripherals/sgpiom/registers.rs`;
-  earlgrey: OpenTitan's `ureg::RegisterBlock<Mmio>` generic over the MMIO backend, e.g.
-  `target/earlgrey/drivers/gpio.rs`) — never a bare untyped address.
+  (a generated PAC/`ureg::RegisterBlock` type) — never a bare untyped address.
 - The struct is `!Send + !Sync` (e.g. `PhantomData<*const ()>`) when it represents exclusive/singleton
   hardware access.
 - Constructors that take a raw address/pointer are `unsafe fn new(...)` with a `// SAFETY:` doc comment
