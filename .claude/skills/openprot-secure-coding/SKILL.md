@@ -23,8 +23,7 @@ Confirmed pattern across targets — do not regress to bare pointer access:
   stating the pointer-validity and exclusive-ownership contract.
 - Field reads/writes go through the register block's typed accessors, not raw
   `core::ptr::read_volatile`/`write_volatile`. Raw volatile pointer ops are reserved for bulk MMIO
-  buffer copies with no register field to target (e.g. SMC AHB buffer transfers, PFR mailbox,
-  boot-time `entry.rs`) — not for normal register poking.
+  buffer copies with no register field to target — not for normal register poking.
 - Standard peripheral kinds (GPIO, I2C, crypto/HACE, etc.) implement the matching
   `openprot_hal_blocking::*` trait (see `hal/blocking/src/`), usually in a dedicated
   `hal_impl.rs`/`hal_slave_impl.rs` file. Target-specific capabilities without a core HAL trait yet
