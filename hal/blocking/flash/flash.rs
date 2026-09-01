@@ -88,14 +88,6 @@ impl<F: Flash> Flash for &mut F {
     }
 }
 
-/// A trait that can be used to constrain the page-size of the flash.
-///
-/// If you just need to read the page size at runtime, use `Flash::geometry()` instead.
-pub trait FlashPageSize {
-    /// The size of a flash page in bytes.
-    const PAGE_SIZE: usize;
-}
-
 /// A blocking flash implementation that wraps a `FlashDriver`.
 ///
 /// This struct implements the high-level `Flash` trait by wrapping a low-level
@@ -109,13 +101,6 @@ pub struct BlockingFlash<TDriver: FlashDriver, TBlocking: Blocking> {
     pub driver: TDriver,
     /// The blocking mechanism used to wait for operations.
     pub blocking: TBlocking,
-}
-
-impl<TDriver: FlashDriver, TBlocking: Blocking> FlashPageSize
-    for BlockingFlash<TDriver, TBlocking>
-{
-    /// The default page size.
-    const PAGE_SIZE: usize = TDriver::PAGE_SIZE;
 }
 
 impl<TDriver: FlashDriver, TBlocking: Blocking> Flash for BlockingFlash<TDriver, TBlocking> {
@@ -166,17 +151,18 @@ impl<TDriver: FlashDriver, TBlocking: Blocking> Flash for BlockingFlash<TDriver,
     /// and do not cross window boundaries. Each chunk is programmed asynchronously,
     /// and the thread blocks until it completes before starting the next chunk.
     fn program(&mut self, start_addr: FlashAddress, mut data: &[u8]) -> Result<(), Self::Error> {
+        let program_window_size = self.driver.program_window_size();
         assert!(
-            TDriver::PROGRAM_WINDOW_SIZE.count_ones() == 1,
-            "TDriver::PROGRAM_WINDOW_SIZE must be a power of 2"
+            program_window_size.count_ones() == 1,
+            "program_window_size() must be a power of 2"
         );
-        let window_mask = TDriver::PROGRAM_WINDOW_SIZE - 1;
+        let window_mask = program_window_size - 1;
         let mut addr = start_addr;
         while !data.is_empty() {
             // Calculate bytes remaining in the current program window
             let chunk = &data[..min(
                 data.len(),
-                TDriver::PROGRAM_WINDOW_SIZE - ((addr.offset() & window_mask as u32) as usize),
+                program_window_size - ((addr.offset() & window_mask as u32) as usize),
             )];
             self.driver.start_program(addr, chunk)?;
             self.blocking.wait_for_notification();
@@ -225,8 +211,6 @@ mod test {
     }
     impl FlashDriver for FakeFlashDriver {
         type Error = FakeDriverError;
-        const PAGE_SIZE: usize = 2048;
-        const PROGRAM_WINDOW_SIZE: usize = 64;
         const MAX_READ_SIZE: usize = 4096;
         const READ_ALIGNMENT: usize = 4;
         const PROGRAM_ALIGNMENT: usize = 8;
@@ -236,6 +220,12 @@ mod test {
         }
         fn size(&self) -> NonZero<usize> {
             NonZero::new(self.data.len()).unwrap()
+        }
+        fn page_size(&self) -> usize {
+            2048
+        }
+        fn program_window_size(&self) -> usize {
+            64
         }
         fn read(&mut self, start_addr: FlashAddress, buf: &mut [u8]) -> Result<(), Self::Error> {
             let start_addr = start_addr.offset() as usize;
@@ -263,15 +253,15 @@ mod test {
             data: &[u8],
         ) -> Result<(), Self::Error> {
             let start_addr = start_addr.offset() as usize;
+            let program_window_size = self.program_window_size();
             assert!(start_addr.checked_add(data.len()).unwrap() <= self.data.len());
             assert!(
-                data.len() <= Self::PROGRAM_WINDOW_SIZE,
+                data.len() <= program_window_size,
                 "Program window violation"
             );
             let end_addr = start_addr.wrapping_add(data.len());
             assert!(
-                start_addr / Self::PROGRAM_WINDOW_SIZE
-                    == (end_addr - 1) / Self::PROGRAM_WINDOW_SIZE,
+                start_addr / program_window_size == (end_addr - 1) / program_window_size,
                 "Program window violation"
             );
             for (dest, src) in self.data[start_addr..end_addr].iter_mut().zip(data) {
