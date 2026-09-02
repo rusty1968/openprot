@@ -32,6 +32,7 @@ pub const MCI_BASE: usize = MCU_MEMORY_MAP.mci_offset as usize;
 
 const PIC_BASE: usize = MCU_MEMORY_MAP.pic_offset as usize;
 const DCCM_BASE: usize = MCU_MEMORY_MAP.dccm_offset as usize;
+const DCCM_SIZE: usize = MCU_MEMORY_MAP.dccm_size as usize;
 
 pub struct KernelConfig;
 
@@ -70,9 +71,12 @@ impl VeerPicConfigInterface for VeerPicConfig {
     const PIC_BASE_ADDRESS: usize = PIC_BASE;
     const MAX_IRQS: u32 = 256;
     // The VeeR core requires the external-interrupt redirect table to live
-    // in DCCM; this image does not otherwise use DCCM. 256 IRQs * 4 bytes
-    // fits well within the 16KiB DCCM.
-    const MEIVT_BASE_ADDRESS: usize = DCCM_BASE;
+    // in DCCM. The start of DCCM overlaps the ROM-dedicated RAM that the boot
+    // ROM/runtime uses as scratch, so the table must sit at the top of the
+    // window to avoid being clobbered: the final 1KiB (256 IRQs * 4 bytes),
+    // matching the reference firmware which links it at
+    // ORIGIN(dccm) + LENGTH(dccm) - 1024.
+    const MEIVT_BASE_ADDRESS: usize = DCCM_BASE + DCCM_SIZE - 1024;
 }
 
 pub struct TimerConfig;
