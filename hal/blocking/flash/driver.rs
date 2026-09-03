@@ -23,13 +23,6 @@ pub trait FlashDriver {
     /// The error type returned by driver operations.
     type Error;
 
-    /// The default page size in bytes.
-    const PAGE_SIZE: usize;
-
-    /// The maximum size of a single program operation (write window).
-    /// Program operations cannot span across boundaries aligned to this size.
-    const PROGRAM_WINDOW_SIZE: usize;
-
     /// The maximum size of a single read operation.
     const MAX_READ_SIZE: usize;
 
@@ -41,6 +34,13 @@ pub trait FlashDriver {
 
     /// Returns the total size of the flash in bytes.
     fn size(&self) -> NonZero<usize>;
+
+    /// Page size in bytes.
+    fn page_size(&self) -> usize;
+
+    /// The maximum size of a single program operation (write window).
+    /// Program operations cannot span across boundaries aligned to this size.
+    fn program_window_size(&self) -> usize;
 
     /// Returns a bitmap of supported erase block sizes.
     ///
