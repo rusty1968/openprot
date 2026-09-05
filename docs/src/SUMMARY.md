@@ -32,6 +32,8 @@
 * [Design](./design/README.md)
   * [Pigweed Integration Overview](./design/pigweed-overview.md)
   * [pw_kernel IPC](./design/pw-kernel-ipc.md)
+  * [RISC-V Traps vs Context Switches](./design/riscv-trap-vs-context-switch.md)
+  * [RISC-V Interrupt-Context Switch Gap](./design/riscv-interrupt-context-switch.md)
   * [Orchestrator](./design/orchestrator/orchestrator-overview.md)
     * [Verification Model](./design/orchestrator/orchestrator-model.md)
     * [State Machine](./design/orchestrator/orchestrator-machine.md)
