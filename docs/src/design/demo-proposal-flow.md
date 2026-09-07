@@ -1,47 +1,171 @@
-Propsal:
-Build a small Update Agent leverage pldm-lib/pldm-common to run ontop of OpenBMC on AST2700.
-Use OpenProt as Firmware Device to execute extern staging flow listed below.  
-Update agent will send GetFirmParameters for Inventory and ActivatePendingComponentImage to signal to OpenProt to begin this flow.
+# OCP Global Demo Proposal
 
+Status: Draft
+
+## Proposal
+
+Build a small Update Agent leveraging pldm-lib/pldm-common to run on top of
+OpenBMC on AST2700. Use OpenPRoT as the Firmware Device to execute the external
+staging flow listed below.
+
+The Update Agent will send `GetFirmwareParameters` for inventory, and
+`ActivatePendingComponentImage` to signal OpenPRoT to begin this flow.
+
+"External staging" means the BMC places the candidate image into the staging
+area itself, out of band of the PLDM Type 5 component image transfer. The flow
+therefore begins at activation rather than at `RequestUpdate`, and
+`ActivatePendingComponentImage` is the command that hands the staged image to
+OpenPRoT.
+
+## Layout assumptions
+
+The flow below assumes the following. These need confirming before the diagram
+can be treated as settled — see [Open questions](#open-questions).
+
+*   The BMC firmware flash on `fwspi` is dual-bank: slots `"A"` and `"B"`, with
+    one active at a time. `"A"` is the active slot when the flow starts.
+*   The staging area is a third region on that same `fwspi` flash, which is why
+    OpenPRoT must claim mastership before it can verify or copy the candidate.
+*   OpenPRoT controls BMC power and reset, and can arbitrate mastership of
+    `fwspi`.
+
+## Flow
+
+The message flow for a successful update. Verification and boot supervision can
+both fail; rather than nest those branches here, every outcome is drawn
+separately in [Outcomes](#outcomes) below.
+
+```mermaid
 sequenceDiagram
     autonumber
-    participant BMC as BMC
-    participant OpenProt as OpenProt
+    participant BMC as BMC (Update Agent)
+    participant OpenPRoT as OpenPRoT (Firmware Device)
     participant fwspi as BMC SPI bus (fwspi)
 
-    BMC->>OpenProt: GetFirmwareParameters
-    OpenProt-->>BMC: FirmwareParameters
+    Note over BMC,fwspi: External staging, out of band of the PLDM T5 transfer
+    BMC->>fwspi: Write candidate image into staging area
 
-    opt Optional query
-        BMC->>OpenProt: QueryDeviceIdentifiers
-        OpenProt-->>BMC: Descriptors
-    end
+    BMC->>OpenPRoT: QueryDeviceIdentifiers
+    OpenPRoT-->>BMC: Descriptors
+    BMC->>OpenPRoT: GetFirmwareParameters
+    OpenPRoT-->>BMC: FirmwareParameters
+    BMC->>OpenPRoT: ActivatePendingComponentImage(component identifier)
+    OpenPRoT-->>BMC: EstimatedTimeForActivation
 
-    BMC->>OpenProt: ActivatePendingComponentImage(AST2070 Component Identifier)
-    OpenProt-->>BMC: EstimatedTimeForActivation
+    OpenPRoT-->>BMC: Notify BMC to shut down
+    Note over BMC,OpenPRoT: Grace period T_shutdown, then power is pulled
 
-    Note over OpenProt,BMC: OpenProt disables access by BMC (notify BMC to shutdown, then pull power)
+    OpenPRoT->>fwspi: Claim mastership
+    OpenPRoT->>fwspi: Verify candidate in staging area
+    OpenPRoT->>fwspi: Copy candidate into slot "B"
+    OpenPRoT->>fwspi: Re-hash slot "B"
+    OpenPRoT->>OpenPRoT: Mark "B" as trial slot
+    OpenPRoT->>fwspi: Return mastership
 
-    OpenProt->>fwspi: Claim mastership
-    OpenProt->>OpenProt: Verify BMC image in staging area
+    OpenPRoT-->>BMC: Restore power, release from reset
+    BMC->>BMC: Boot slot "B"
+    BMC-->>OpenPRoT: Boot-complete signal (GPIO checkpoint)
+    OpenPRoT->>OpenPRoT: Commit "B" as the active slot
+    OpenPRoT->>fwspi: Reclaim mastership, erase staging area, release
 
-    alt Image good
-        OpenProt->>OpenProt: Copy staging image to "B" partition
-        OpenProt->>OpenProt: Verify good copy of "B"
-        OpenProt->>OpenProt: Erase staging area
-        OpenProt->>OpenProt: Mark "B" partition as active
-    else Image bad
-        OpenProt-->>BMC: Activation failed (image invalid)
-        Note over BMC,OpenProt: Abort update and restore previous state
-    end
+    BMC->>OpenPRoT: GetStatus
+    OpenPRoT-->>BMC: Update complete
+```
 
-    OpenProt->>fwspi: Return mastership
-    OpenProt-->>BMC: Re-enable access and allow BMC to boot
-    BMC->>BMC: Boot
+## Outcomes
 
-    alt BMC boot completes
-        Note over BMC,OpenProt: Good update completed
-        Note over OpenProt: Update inactive "A" to match "B" (requires mastership again)
-    else Boot fails
-        Note over BMC,OpenProt: Recovery required
-    end
+The candidate's lifecycle, and the three states the platform can come to rest
+in. Each terminal state names what the BMC is running, what happened to the
+staging area, and what the Update Agent reads back from `GetStatus`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Staged : BMC writes the candidate into the staging area
+
+    Staged --> Verified : signature and anti-rollback checks pass
+    Staged --> Rejected : verification fails
+
+    Verified --> Trial : copied into "B", integrity checked, marked trial
+
+    Trial --> Committed : boot-complete asserted within T_boot
+    Trial --> RolledBack : T_boot expires, or the boot reports failure
+
+    Rejected --> [*] : running "A", both slots untouched, GetStatus reports the rejection
+    RolledBack --> [*] : running "A", staging kept for retry, GetStatus reports the failure
+    Committed --> [*] : running "B", "A" kept as known-good, staging erased
+
+    note right of Rejected
+        An update outcome, not a recovery event.
+        The device keeps running its current image.
+    end note
+```
+
+## Notes on the flow
+
+*   **Failures are read back, never pushed.** BMC power is already down by the
+    time the candidate is verified, so OpenPRoT cannot report a bad image to the
+    BMC at that moment. Every outcome is instead reported through `GetStatus`
+    once the BMC is running again, which is how
+    [Firmware Update](../specification/services/fwupdate.md) already describes
+    the Update Agent learning that activation finished.
+
+*   **Rejection is not recovery.** A candidate that fails verification is
+    discarded and the device keeps running its current image, matching
+    `UpdateRejected` → `DiscardStaged` → `Ready` and INV4 in the
+    [Orchestrator State Machine](./orchestrator/orchestrator-machine.md).
+    `Rejected` and `RolledBack` are distinct terminal states and neither is a
+    completed update.
+
+*   **Trial before commit.** `"B"` is marked as a trial slot and only committed
+    once a good boot is observed. If nothing is committed, `"A"` is still active
+    and the fallback is automatic. This is the `set_trial` → `release` →
+    `supervise_boot` → `commit` shape documented on the `BootControl`
+    capability in `services/orchestrator/capabilities/src/boot_control.rs`.
+
+*   **Staging is erased last.** Erasing only after a committed boot keeps the
+    transferred image available for a retry and leaves no window in which a
+    power loss costs a re-transfer over PLDM. The cost is that the erase needs
+    a second mastership claim while the BMC is running.
+
+*   **Two distinct verifications.** The check on the candidate is an
+    authenticity check — signature plus anti-rollback. The check after the
+    copy into `"B"` is an integrity check that the write landed correctly.
+    They are not the same operation.
+
+*   **Boot success is a signalled checkpoint, not an assumption.** The
+    boot-complete indication is a GPIO the orchestrator reads
+    (`services/orchestrator/hal-adapters/src/gpio_boot_monitor.rs`), judged
+    against a checkpoint window. A BMC that hangs is distinguished from one that
+    reports a failure by the verdict's cause — `TimedOut` versus
+    `DeviceRetriable` / `DeviceFatal` in
+    `services/orchestrator/capabilities/src/boot_watch.rs`.
+
+### Timeouts
+
+| Timeout | Purpose | Backing mechanism |
+|---|---|---|
+| `T_shutdown` | Grace period between the shutdown request and pulling power | Value still to be decided |
+| `EstimatedTimeForActivation` | Tells the Update Agent how long activation may take | PLDM T5 activation response |
+| `T_boot` | Checkpoint window for the trial boot | `WalkVerdict::Waiting { deadline_millis }`, `FailureCause::TimedOut` |
+| Commit window | Bounds how long a slot may stay activated but not committed | `TimerManager::arm_commit` / `Expired::Commit` in `services/orchestrator/timer` |
+
+## Open questions
+
+1.  **`T_shutdown`** — what grace period does the BMC get between the shutdown
+    notification and OpenPRoT pulling power, and what happens if it is still
+    running when the period expires?
+2.  **Commit policy for `"A"`** — the flow keeps `"A"` as the known-good image
+    indefinitely. If `"A"` is ever to be resynced to match `"B"`, what triggers
+    it: a number of successful boots, an explicit Update Agent command, or a
+    manual step? Note that resyncing costs another mastership claim and BMC
+    power cycle, and gives up the rollback image.
+3.  **Staging area location** — confirm the staging area is a region of the
+    same `fwspi` flash rather than storage private to OpenPRoT. This determines
+    whether the mastership claims above are needed at all.
+4.  **`ActivatePendingComponentImage` availability** — the command is not
+    listed in the Type 5 command set in
+    [PLDM](../specification/middleware/pldm.md), and it is not implemented in
+    the pinned `pldm-common`, whose firmware-update command enum carries the
+    DSP0267 1.2 commands plus the 1.3 downstream-device commands. Confirm
+    whether the demo adds the command upstream or falls back to
+    `ActivateFirmware`, and update the PLDM specification page to match.
