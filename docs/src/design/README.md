@@ -17,3 +17,6 @@ of the project.
     machine (`services/orchestrator/sm`). Covers the two-tier firmware
     verification model (`ComponentAttrs`, eRoT gate, iRoT gate), the
     verification boundary, and the full state/transition table.
+-   [**OCP Global Demo Proposal**](./demo-proposal-flow.md): Proposed external
+    staging flow for the OCP Global demo — a BMC-side PLDM Update Agent driving
+    OpenPRoT as the Firmware Device to activate a staged BMC image on AST2700.

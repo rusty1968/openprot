@@ -36,3 +36,4 @@
     * [Verification Model](./design/orchestrator/orchestrator-model.md)
     * [State Machine](./design/orchestrator/orchestrator-machine.md)
     * [Platform Architecture](./design/orchestrator/orchestrator-platform.md)
+  * [OCP Global Demo Proposal](./design/demo-proposal-flow.md)
