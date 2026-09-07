@@ -24,8 +24,14 @@ can be treated as settled — see [Open questions](#open-questions).
 
 *   The BMC firmware flash on `fwspi` is dual-bank: slots `"A"` and `"B"`, with
     one active at a time. `"A"` is the active slot when the flow starts.
-*   The staging area is a third region on that same `fwspi` flash, which is why
-    OpenPRoT must claim mastership before it can verify or copy the candidate.
+*   The staging area is a region of the BMC flash rather than storage private
+    to OpenPRoT, which is why OpenPRoT must claim mastership before it can
+    verify or copy the candidate. Aspeed's PFR firmware for this silicon places
+    staging in BMC flash the same way, and goes further: it carves a separate
+    staging region per updatable component — 64 MiB for the BMC, 1 MiB for the
+    RoT's own image, 4 MiB for the CPLD — each holding a *signed capsule*
+    rather than a bare image. See its `ast2700_dual_flash_amd` board
+    configuration.
 *   OpenPRoT controls BMC power and reset, and can arbitrate mastership of
     `fwspi`.
 
@@ -172,9 +178,15 @@ stateDiagram-v2
     it: a number of successful boots, an explicit Update Agent command, or a
     manual step? Note that resyncing costs another mastership claim and BMC
     power cycle, and gives up the rollback image.
-3.  **Staging area location** — confirm the staging area is a region of the
-    same `fwspi` flash rather than storage private to OpenPRoT. This determines
-    whether the mastership claims above are needed at all.
+3.  **Staging area layout** — staging living in BMC flash is settled by
+    precedent, but three things are not. Does the demo carve one staging region
+    per component as Aspeed's PFR does, or a single region? Is the staged unit
+    a signed capsule or a bare image, since that decides what the verification
+    step actually parses? And how does either shape sit with the flash
+    topologies in [Use Cases](../specification/use_cases/README.md), which
+    describe dual-flash-side-by-side as two parts with one partition each and
+    direct-connect as one double-sized part — neither of which names a staging
+    region at all?
 4.  **What commands the staging write** — is the trigger for step 1 in scope
     for the demo, and what drives it: Redfish on the BMC, a fleet-management
     system, or a manual step on stage? Related: OpenPRoT is not told that
