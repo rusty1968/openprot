@@ -44,6 +44,7 @@ sequenceDiagram
 
     Note over BMC,fwspi: External staging, out of band of the PLDM T5 transfer
     BMC->>fwspi: Write candidate image into staging area
+    Note left of BMC: Gap: nothing in this flow asks for step 1.<br/>The commanding actor is unmodelled — see Open questions
 
     BMC->>OpenPRoT: QueryDeviceIdentifiers
     OpenPRoT-->>BMC: Descriptors
@@ -127,6 +128,18 @@ stateDiagram-v2
     power loss costs a re-transfer over PLDM. The cost is that the erase needs
     a second mastership claim while the BMC is running.
 
+*   **Nothing in this flow commands step 1.** The diagram has three
+    participants and none of them asks the BMC to stage an image. In a
+    deployment the instruction comes from a fourth actor above the BMC — an
+    operator or fleet-management system — and the Update Agent is the process
+    that receives it, writes the candidate, and then speaks PLDM to OpenPRoT.
+    That actor is worth naming because the update it asks for takes down the
+    machine it is talking to: from `ActivatePendingComponentImage` until power
+    is restored there is no management path to the BMC, and
+    `EstimatedTimeForActivation` is only an estimate of how long that lasts.
+    Whatever drives the flow has to expect the endpoint to disappear and
+    return, and has to remember across that gap that an update was in flight.
+
 *   **Two distinct verifications.** The check on the candidate is an
     authenticity check — signature plus anti-rollback. The check after the
     copy into `"B"` is an integrity check that the write landed correctly.
@@ -162,7 +175,17 @@ stateDiagram-v2
 3.  **Staging area location** — confirm the staging area is a region of the
     same `fwspi` flash rather than storage private to OpenPRoT. This determines
     whether the mastership claims above are needed at all.
-4.  **`ActivatePendingComponentImage` availability** — the command is not
+4.  **What commands the staging write** — is the trigger for step 1 in scope
+    for the demo, and what drives it: Redfish on the BMC, a fleet-management
+    system, or a manual step on stage? Related: OpenPRoT is not told that
+    staging happened and cannot distinguish a fresh candidate from one left
+    over by a rolled-back attempt, since the rollback path deliberately keeps
+    staging intact. Signature and anti-rollback checks still gate what runs, so
+    nothing untrusted or downgraded gets in, but re-applying an identical
+    version that was already tried is not caught. Passing the expected version
+    or digest in the activation request would close it, if it is worth closing.
+
+5.  **`ActivatePendingComponentImage` availability** — the command is not
     listed in the Type 5 command set in
     [PLDM](../specification/middleware/pldm.md), and it is not implemented in
     the pinned `pldm-common`, whose firmware-update command enum carries the
