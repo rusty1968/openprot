@@ -1,0 +1,17 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+# Host end-to-end: PldmLink (real marshalling) -> LoopbackTransport ->
+# notify_server::dispatch. No kernel, no QEMU.
+rust_test(
+    name = "notify_loopback_test",
+    srcs = ["loopback.rs"],
+    edition = "2024",
+    deps = [
+        "//services/pldm/notify-api:notify_api",
+        "//services/pldm/notify-client:notify_client",
+        "//services/pldm/notify-server:notify_server",
+    ],
+)

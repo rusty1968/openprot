@@ -1,0 +1,28 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Host-buildable: pure `dispatch` + `LoopbackTransport`. No kernel/IPC dep —
+# that is what makes the protocol path host-testable. The Pigweed wait/respond
+# loop lives in //services/pldm/notify-server-runtime (Phase 2, kernel-tagged).
+rust_library(
+    name = "notify_server",
+    srcs = [
+        "src/lib.rs",
+        "src/loopback.rs",
+    ],
+    edition = "2024",
+    deps = [
+        "//services/pldm/notify-api:notify_api",
+        "@rust_crates//:zerocopy",
+    ],
+)
+
+# Host dispatch tests, no kernel/QEMU.
+rust_test(
+    name = "notify_server_test",
+    crate = ":notify_server",
+)

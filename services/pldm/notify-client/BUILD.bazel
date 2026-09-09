@@ -1,0 +1,19 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Host-buildable: generic over notify_api::Transport, no kernel/IPC dependency.
+# The IPC transport lives in //services/pldm/notify-client-ipc (Phase 2,
+# kernel-tagged). Exercised by //services/pldm/notify-tests.
+rust_library(
+    name = "notify_client",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    deps = [
+        "//services/pldm/notify-api:notify_api",
+        "@rust_crates//:zerocopy",
+    ],
+)
