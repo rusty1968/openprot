@@ -17,7 +17,7 @@
 // buildable, this file should be replaced by a thin wrapper that calls
 // `mcu_builder::rom_ld_script()` directly.
 
-use mcu_config_emulator::EMULATOR_MEMORY_MAP;
+use caliptra_mcu_config_emulator::EMULATOR_MEMORY_MAP;
 
 const ROM_LD_TEMPLATE: &str = r#"
 /* Licensed under the Apache-2.0 license. */

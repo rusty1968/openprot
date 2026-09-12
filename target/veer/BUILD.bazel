@@ -59,7 +59,11 @@ config_setting(
 constraint_value(
     name = "target_veer",
     constraint_setting = "@pigweed//pw_kernel/target:target",
-    visibility = [":__subpackages__"],
+    visibility = [
+        ":__subpackages__",
+        "//drivers:__subpackages__",
+        "//services:__subpackages__",
+    ],
 )
 
 rust_library(
@@ -91,6 +95,7 @@ rust_binary(
     srcs = ["caliptra_emulator_main.rs"],
     aliases = {
         "//third_party/caliptra/caliptra-mcu-sw:emulator_lib": "emulator",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common": "mcu_testing_common",
     },
     edition = "2021",
     visibility = [":__subpackages__"],

@@ -1,0 +1,29 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+# Host-buildable: pure `dispatch` over any HAL OTP device. No kernel/IPC dep —
+# that is what makes the protocol + policy path host-testable. The Pigweed
+# wait/respond loop belongs in a separate kernel-tagged server-runtime crate.
+rust_library(
+    name = "otp_server",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//hal/blocking/otp:driver",
+        "//services/otp/api:otp_api",
+        "@rust_crates//:zerocopy",
+    ],
+)
+
+# Host dispatch/policy tests, no kernel/QEMU.
+rust_test(
+    name = "otp_server_test",
+    crate = ":otp_server",
+    rustc_flags = [
+        "-C",
+        "debug-assertions",
+    ],
+)

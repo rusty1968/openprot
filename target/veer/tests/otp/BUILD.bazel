@@ -1,0 +1,65 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@pigweed//pw_kernel/tooling:system_image.bzl", "system_image")
+load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")
+load("@pigweed//pw_kernel/tooling:target_linker_script.bzl", "target_linker_script")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//target/veer:defs.bzl", "TARGET_COMPATIBLE_WITH")
+load("//target/veer/tooling:caliptra_runner.bzl", "caliptra_test")
+
+system_image(
+    name = "otp_test_image",
+    kernel = ":target",
+    platform = "//target/veer",
+)
+
+target_linker_script(
+    name = "linker_script",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    template = "//target/veer:linker_script_template",
+)
+
+caliptra_test(
+    name = "emulator_test",
+    interface = "emulator",
+    tags = ["emulator"],
+    target = ":otp_test_image",
+)
+
+filegroup(
+    name = "system_config",
+    srcs = ["system.json5"],
+)
+
+target_codegen(
+    name = "codegen",
+    arch = "@pigweed//pw_kernel/arch/riscv:arch_riscv",
+    system_config = ":system_config",
+)
+
+rust_binary(
+    name = "target",
+    srcs = [
+        "target.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        ":codegen",
+        ":linker_script",
+        "//hal/blocking/otp:driver",
+        "//services/otp/api:otp_api",
+        "//services/otp/backend:otp_backend",
+        "//services/otp/server:otp_server",
+        "//target/veer:entry",
+        "//target/veer/peripehrals:peripherals",
+        "//target/veer/registers",
+        "@pigweed//pw_kernel/kernel",
+        "@pigweed//pw_kernel/subsys/console:console_backend",
+        "@pigweed//pw_kernel/target:target_common",
+        "@pigweed//pw_log/rust:pw_log",
+        "@rust_crates//:zerocopy",
+    ],
+)

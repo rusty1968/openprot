@@ -39,7 +39,7 @@ config_setting(
         "cfg-if",
         "log",
         "memoffset",
-        "registers-generated",
+        "registers_generated",
         "serde",
         "serde_derive",
         "smlang",

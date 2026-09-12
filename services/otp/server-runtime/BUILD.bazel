@@ -1,0 +1,26 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//target/veer:defs.bzl", "TARGET_COMPATIBLE_WITH")
+
+# The single kernel-tagged OTP server crate: wraps otp_server::dispatch in the
+# Pigweed WaitGroup loop and anchors each request's CallerId to its channel.
+# Generic over the HAL backend and board traits, so all policy stays host-tested
+# in otp_server; only the IPC plumbing lives here.
+rust_library(
+    name = "otp_server_runtime",
+    srcs = ["src/lib.rs"],
+    crate_name = "otp_server_runtime",
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//hal/blocking/otp:driver",
+        "//services/otp/api:otp_api",
+        "//services/otp/server:otp_server",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+    ],
+)

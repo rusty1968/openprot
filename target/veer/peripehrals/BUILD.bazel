@@ -1,0 +1,25 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# VeeR (Caliptra Subsystem) peripheral drivers.
+rust_library(
+    name = "peripherals",
+    srcs = [
+        "lib.rs",
+        "otp/controller.rs",
+        "otp/mod.rs",
+        "otp/types.rs",
+    ],
+    crate_name = "veer_peripherals",
+    crate_root = "lib.rs",
+    edition = "2024",
+    deps = [
+        "//hal/blocking/otp:driver",
+        "//target/veer/registers",
+        "//third_party/caliptra:crate_tock-registers",
+    ],
+)

@@ -1,0 +1,33 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+# Caliptra SS backend for the OTP service: region-keyed byte adapter over the
+# DAI driver plus the SoC board policy (auth, SVN encoding, fuse geometry).
+# Host-buildable so the mapping and policy are host-testable.
+rust_library(
+    name = "otp_backend",
+    srcs = [
+        "src/backend.rs",
+        "src/board.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "otp_backend",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//hal/blocking/otp:driver",
+        "//services/otp/api:otp_api",
+        "//services/otp/server:otp_server",
+        "//target/veer/peripehrals:peripherals",
+        "//target/veer/registers",
+    ],
+)
+
+# Host tests for the region map and board policy (no kernel/QEMU/MMIO).
+rust_test(
+    name = "otp_backend_test",
+    crate = ":otp_backend",
+)
