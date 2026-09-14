@@ -22,6 +22,12 @@ _LOG.setLevel(logging.INFO)
 # VCK190 FPGA board used by the "fpga" interface.
 FPGA_HOST = "VCK190_FPGA_HOST"
 
+# Timeout (seconds) for the remote fpga run. The VeeR core's exit()
+# implementation writes the PASS/FAIL sentinel and then spins forever (there's
+# no way for it to fully halt itself back to the host), so this bounds how
+# long we wait on a stuck or unreachable board rather than hanging forever.
+_FPGA_RUN_TIMEOUT_SECONDS = 300
+
 
 def scan_output_for_result(lines):
     """Scan detokenized output lines for a PASS/FAIL sentinel.
@@ -202,16 +208,42 @@ def load_and_run(
             remote_bin,
         ]
         _LOG.info("Invoking fpga runner: %s", cmd)
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_FPGA_RUN_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            _LOG.fatal(
+                "fpga runner timed out after %s seconds; stdout so far: %s; "
+                "stderr so far: %s",
+                _FPGA_RUN_TIMEOUT_SECONDS,
+                e.stdout,
+                e.stderr,
+            )
+            sys.exit(1)
+
         if proc.stderr:
             _LOG.info("fpga runner stderr: %s", proc.stderr)
 
-        # Reuse the same Detokenizer mechanism the emulator's tokenized
-        # console path uses (see _detokenizer() above), rather than
-        # introducing a second detokenization code path.
-        detokenizer = detokenize.Detokenizer(elf)
-        text = detokenizer.detokenize_text(proc.stdout)
-        result = scan_output_for_result(text.splitlines())
+        if proc.returncode != 0:
+            _LOG.fatal(
+                "ssh/remote command failed with exit code %d: %s",
+                proc.returncode,
+                proc.stderr,
+            )
+            sys.exit(1)
+
+        # This target's kernel config pins its log backend to
+        # log_backend_basic (a plain-text logger; see target/veer/BUILD.bazel's
+        # platform rule), so the board's console output is never tokenized and
+        # there is nothing to detokenize here, unlike the emulator's tokenized
+        # console path (see _detokenizer() above).
+        print(proc.stdout)
+        result = scan_output_for_result(proc.stdout.splitlines())
         if result is None:
             _LOG.fatal(
                 "Device produced no PASS/FAIL sentinel; fpga runner stderr: %s",
