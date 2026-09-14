@@ -17,6 +17,21 @@ from pw_tokenizer import detokenize
 _LOG = logging.getLogger(__name__)
 _LOG.setLevel(logging.INFO)
 
+
+def scan_output_for_result(lines):
+    """Scan detokenized output lines for a PASS/FAIL sentinel.
+
+    Returns 0 on a line containing "PASS", 1 on a line containing "FAIL",
+    or None if no sentinel has appeared yet.
+    """
+    for line in lines:
+        if "PASS" in line:
+            return 0
+        if "FAIL" in line:
+            return 1
+    return None
+
+
 try:
 
     import caliptra.emulator_cptra_rom  # type: ignore
