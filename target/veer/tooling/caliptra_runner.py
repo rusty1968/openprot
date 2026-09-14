@@ -181,16 +181,12 @@ def load_and_run(
     elif interface == "fpga":
         host = os.environ.get(FPGA_HOST)
         if not host:
-            _LOG.fatal(
-                "%s is not set; cannot reach the VCK190 board", FPGA_HOST
-            )
+            _LOG.fatal("%s is not set; cannot reach the VCK190 board", FPGA_HOST)
             sys.exit(1)
 
         remote_bin = f"/tmp/{Path(image).name}"
         try:
-            subprocess.run(
-                ["scp", str(image), f"{host}:{remote_bin}"], check=True
-            )
+            subprocess.run(["scp", str(image), f"{host}:{remote_bin}"], check=True)
         except subprocess.CalledProcessError as e:
             _LOG.fatal("Failed to copy %s to %s: %s", image, host, e)
             sys.exit(1)
