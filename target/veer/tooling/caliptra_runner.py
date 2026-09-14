@@ -181,7 +181,13 @@ def load_and_run(
             sys.exit(1)
 
         remote_bin = f"/tmp/{Path(image).name}"
-        subprocess.run(["scp", str(image), f"{host}:{remote_bin}"], check=True)
+        try:
+            subprocess.run(
+                ["scp", str(image), f"{host}:{remote_bin}"], check=True
+            )
+        except subprocess.CalledProcessError as e:
+            _LOG.fatal("Failed to copy %s to %s: %s", image, host, e)
+            sys.exit(1)
 
         # Loads the image into the MCU ROM backdoor SRAM, deasserts
         # cptra_ss_rst_b, and streams the debug FIFO back over stdout.
@@ -197,6 +203,8 @@ def load_and_run(
         ]
         _LOG.info("Invoking fpga runner: %s", cmd)
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.stderr:
+            _LOG.info("fpga runner stderr: %s", proc.stderr)
 
         # Reuse the same Detokenizer mechanism the emulator's tokenized
         # console path uses (see _detokenizer() above), rather than
@@ -205,7 +213,10 @@ def load_and_run(
         text = detokenizer.detokenize_text(proc.stdout)
         result = scan_output_for_result(text.splitlines())
         if result is None:
-            _LOG.fatal("Device produced no PASS/FAIL sentinel")
+            _LOG.fatal(
+                "Device produced no PASS/FAIL sentinel; fpga runner stderr: %s",
+                proc.stderr,
+            )
             sys.exit(1)
         sys.exit(result)
     else:
