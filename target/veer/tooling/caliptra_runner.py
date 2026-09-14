@@ -4,6 +4,7 @@
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,10 @@ from pw_tokenizer import detokenize
 
 _LOG = logging.getLogger(__name__)
 _LOG.setLevel(logging.INFO)
+
+# Environment variable naming the SSH host (user@host or host alias) for the
+# VCK190 FPGA board used by the "fpga" interface.
+FPGA_HOST = "VCK190_FPGA_HOST"
 
 
 def scan_output_for_result(lines):
@@ -131,6 +136,7 @@ def load_and_run(
     interface: str,
     manifest: str,
     vendor_pk_hash: str,
+    elf: Path | None = None,
 ) -> list[str]:
     """Prepare arguments to load an image into a board and spawn a console."""
     if interface == "emulator":
@@ -166,6 +172,42 @@ def load_and_run(
         if vendor_pk_hash and str(vendor_pk_hash) != "None":
             cmd.append(f"--vendor-pk-hash={vendor_pk_hash}")
         return cmd
+    elif interface == "fpga":
+        host = os.environ.get(FPGA_HOST)
+        if not host:
+            _LOG.fatal(
+                "%s is not set; cannot reach the VCK190 board", FPGA_HOST
+            )
+            sys.exit(1)
+
+        remote_bin = f"/tmp/{Path(image).name}"
+        subprocess.run(["scp", str(image), f"{host}:{remote_bin}"], check=True)
+
+        # Loads the image into the MCU ROM backdoor SRAM, deasserts
+        # cptra_ss_rst_b, and streams the debug FIFO back over stdout.
+        # See hw/fpga/README.md's "JTAG debug" section and
+        # hw/fpga/kernel-modules/mcu_rom_backdoor.c for the mechanism.
+        cmd = [
+            "ssh",
+            host,
+            "sudo",
+            "caliptra-mcu-sw/hw/fpga/launch_openocd.sh",
+            "load-and-run",
+            remote_bin,
+        ]
+        _LOG.info("Invoking fpga runner: %s", cmd)
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+        # Reuse the same Detokenizer mechanism the emulator's tokenized
+        # console path uses (see _detokenizer() above), rather than
+        # introducing a second detokenization code path.
+        detokenizer = detokenize.Detokenizer(elf)
+        text = detokenizer.detokenize_text(proc.stdout)
+        result = scan_output_for_result(text.splitlines())
+        if result is None:
+            _LOG.fatal("Device produced no PASS/FAIL sentinel")
+            sys.exit(1)
+        sys.exit(result)
     else:
         raise Exception("unknown mechanism", mechanism)
 
@@ -215,6 +257,7 @@ def _main(args) -> int:
         args.interface,
         args.manifest,
         args.vendor_pk_hash,
+        elf=args.elf,
     )
     # TODO(cfrantz): add support for the tokenized console.
     return_code = simple_console(cmd)
