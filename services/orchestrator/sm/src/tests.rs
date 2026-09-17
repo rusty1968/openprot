@@ -2433,7 +2433,7 @@ fn random_chain(rng: &mut SplitMix64) -> heapless::Vec<(ComponentId, ComponentAt
 /// Build one random event over the given id palette. Id-less events ignore it.
 fn random_event(rng: &mut SplitMix64, ids: &[ComponentId]) -> Event {
     let id = ids[rng.below(ids.len() as u32) as usize];
-    match rng.below(15) {
+    match rng.below(16) {
         0 => Event::VerificationPassed(id),
         1 => Event::VerificationFailed(id),
         2 => Event::ComponentReady(id),
@@ -2448,6 +2448,7 @@ fn random_event(rng: &mut SplitMix64, ids: &[ComponentId]) -> Event {
         11 => Event::UpdateRejected,
         12 => Event::RecoveryFailed,
         13 => Event::CommitTimeout,
+        14 => Event::RecoveryUnavailable(id),
         _ => Event::EffectFailed,
     }
 }
