@@ -32,8 +32,17 @@ pub struct CheckpointWalk<R, G: 'static> {
 }
 
 enum Phase {
+    /// Not currently walking: either never armed, or the walk already
+    /// reached a terminal verdict (`Complete`/`Failed`). The two cases need
+    /// no distinction — both mean "no further work until the next `arm`" —
+    /// so `poll` treats them identically (`Waiting { u64::MAX }`).
     Idle,
+    /// `arm` was called but no `poll` has run yet, so there is no `now_millis`
+    /// to compute the first checkpoint's deadline from. `arm` has no clock of
+    /// its own (see [`BootWatch::arm`]); the first `poll` after this resolves
+    /// the deadline and moves to `Walking`.
     Armed,
+    /// Waiting on `checkpoints[cursor]`, due by `deadline_millis`.
     Walking { cursor: usize, deadline_millis: u64 },
 }
 
@@ -52,11 +61,6 @@ impl<R, G> CheckpointWalk<R, G> {
             checkpoints,
             phase: Phase::Idle,
         }
-    }
-
-    /// Mutable access to the reader.
-    pub fn reader_mut(&mut self) -> &mut R {
-        &mut self.reader
     }
 }
 
@@ -83,7 +87,7 @@ impl<R: EvidenceReader<G>, G> BootWatch for CheckpointWalk<R, G> {
             _ => {
                 return WalkVerdict::Waiting {
                     deadline_millis: u64::MAX,
-                }
+                };
             }
         };
 
@@ -142,6 +146,7 @@ impl<R: EvidenceReader<G>, G> BootWatch for CheckpointWalk<R, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::Cell;
     use core::time::Duration;
 
     const BL1: BootCheckpoint<u8> = BootCheckpoint::new("bl1", 1, Duration::from_millis(100));
@@ -149,21 +154,43 @@ mod tests {
     const CHECKPOINTS: &[BootCheckpoint<u8>] = &[BL1, KERNEL];
 
     // A progress-register reader: signal N is Booted once progress >= N.
-    // Mirrors the SocReader archetype in the evidence tests.
-    struct ProgressReader {
+    // Mirrors the ProgressReader archetype in the evidence tests.
+    //
+    // State lives in a `Cell` the test owns and borrows into the reader,
+    // rather than behind a `CheckpointWalk::reader_mut()` escape hatch: the
+    // walk never exposes its reader, so tests drive the simulated device the
+    // same way a real caller would have to — through a handle they set up
+    // themselves before construction, not by reaching back into the walk.
+    #[derive(Clone, Copy, Default)]
+    struct ReaderState {
         level: u8,
         fault: Option<BootStatus>,
         fail_read: bool,
     }
 
-    impl ProgressReader {
-        fn new() -> Self {
-            Self {
-                level: 0,
-                fault: None,
-                fail_read: false,
-            }
-        }
+    fn set_level(state: &Cell<ReaderState>, level: u8) {
+        state.set(ReaderState {
+            level,
+            ..state.get()
+        });
+    }
+
+    fn set_fault(state: &Cell<ReaderState>, fault: Option<BootStatus>) {
+        state.set(ReaderState {
+            fault,
+            ..state.get()
+        });
+    }
+
+    fn set_fail_read(state: &Cell<ReaderState>, fail_read: bool) {
+        state.set(ReaderState {
+            fail_read,
+            ..state.get()
+        });
+    }
+
+    struct ProgressReader<'a> {
+        state: &'a Cell<ReaderState>,
     }
 
     #[derive(Debug)]
@@ -177,17 +204,18 @@ mod tests {
 
     impl core::error::Error for ReadFault {}
 
-    impl EvidenceReader<u8> for ProgressReader {
+    impl<'a> EvidenceReader<u8> for ProgressReader<'a> {
         type Error = ReadFault;
 
         fn read(&mut self, signal: &u8) -> Result<BootStatus, ReadFault> {
-            if self.fail_read {
+            let s = self.state.get();
+            if s.fail_read {
                 return Err(ReadFault);
             }
-            if let Some(fault) = self.fault {
+            if let Some(fault) = s.fault {
                 return Ok(fault);
             }
-            Ok(if self.level >= *signal {
+            Ok(if s.level >= *signal {
                 BootStatus::Booted
             } else {
                 BootStatus::Booting
@@ -195,16 +223,17 @@ mod tests {
         }
     }
 
-    fn walk() -> CheckpointWalk<ProgressReader, u8> {
-        CheckpointWalk::new(ProgressReader::new(), CHECKPOINTS)
+    fn walk(state: &Cell<ReaderState>) -> CheckpointWalk<ProgressReader<'_>, u8> {
+        CheckpointWalk::new(ProgressReader { state }, CHECKPOINTS)
     }
 
     // ── Happy path ──────────────────────────────────────────────────────
 
     #[test]
     fn two_checkpoint_walk_completes_when_both_pass() {
-        let mut w = walk();
-        w.reader_mut().level = 2;
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 2);
+        let mut w = walk(&state);
         w.arm();
 
         let v = w.poll(0);
@@ -225,8 +254,9 @@ mod tests {
         let one = &[BL1] as &[_];
         // leak to get 'static
         let one: &'static [BootCheckpoint<u8>] = Box::leak(one.to_vec().into_boxed_slice());
-        let mut w = CheckpointWalk::new(ProgressReader::new(), one);
-        w.reader_mut().level = 1;
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 1);
+        let mut w = CheckpointWalk::new(ProgressReader { state: &state }, one);
         w.arm();
 
         assert_eq!(w.poll(0), WalkVerdict::Complete);
@@ -234,7 +264,8 @@ mod tests {
 
     #[test]
     fn progress_between_polls_advances_the_walk() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        let mut w = walk(&state);
         w.arm();
 
         let v = w.poll(0);
@@ -245,7 +276,7 @@ mod tests {
             }
         );
 
-        w.reader_mut().level = 1;
+        set_level(&state, 1);
         let v = w.poll(50);
         assert_eq!(
             v,
@@ -255,7 +286,7 @@ mod tests {
             "bl1 passed at t=50, kernel deadline = 50 + 200"
         );
 
-        w.reader_mut().level = 2;
+        set_level(&state, 2);
         let v = w.poll(100);
         assert_eq!(v, WalkVerdict::Complete);
     }
@@ -264,7 +295,8 @@ mod tests {
 
     #[test]
     fn first_checkpoint_times_out_when_device_is_silent() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        let mut w = walk(&state);
         w.arm();
 
         let v = w.poll(0);
@@ -287,10 +319,11 @@ mod tests {
 
     #[test]
     fn second_checkpoint_times_out_after_first_passes() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 1);
+        let mut w = walk(&state);
         w.arm();
 
-        w.reader_mut().level = 1;
         let v = w.poll(0);
         assert_eq!(
             v,
@@ -313,9 +346,10 @@ mod tests {
 
     #[test]
     fn retriable_failure_ends_the_walk_early() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        set_fault(&state, Some(BootStatus::FailedRetriable));
+        let mut w = walk(&state);
         w.arm();
-        w.reader_mut().fault = Some(BootStatus::FailedRetriable);
 
         let v = w.poll(0);
         assert_eq!(
@@ -329,9 +363,10 @@ mod tests {
 
     #[test]
     fn fatal_failure_ends_the_walk_early() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        set_fault(&state, Some(BootStatus::FailedFatal));
+        let mut w = walk(&state);
         w.arm();
-        w.reader_mut().fault = Some(BootStatus::FailedFatal);
 
         let v = w.poll(0);
         assert_eq!(
@@ -347,9 +382,10 @@ mod tests {
 
     #[test]
     fn read_error_treated_as_silence() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        set_fail_read(&state, true);
+        let mut w = walk(&state);
         w.arm();
-        w.reader_mut().fail_read = true;
 
         let v = w.poll(0);
         assert_eq!(
@@ -361,8 +397,8 @@ mod tests {
         );
 
         // Clear the fault and advance: the walk continues.
-        w.reader_mut().fail_read = false;
-        w.reader_mut().level = 2;
+        set_fail_read(&state, false);
+        set_level(&state, 2);
         let v = w.poll(10);
         assert_eq!(
             v,
@@ -377,8 +413,9 @@ mod tests {
 
     #[test]
     fn arm_rewinds_to_the_first_checkpoint() {
-        let mut w = walk();
-        w.reader_mut().level = 2;
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 2);
+        let mut w = walk(&state);
         w.arm();
         assert_eq!(
             w.poll(0),
@@ -389,7 +426,7 @@ mod tests {
         assert_eq!(w.poll(0), WalkVerdict::Complete);
 
         // Re-arm: back to checkpoint 0.
-        w.reader_mut().level = 0;
+        set_level(&state, 0);
         w.arm();
         let v = w.poll(1000);
         assert_eq!(
@@ -403,13 +440,14 @@ mod tests {
 
     #[test]
     fn arm_mid_walk_restarts_from_the_beginning() {
-        let mut w = walk();
-        w.reader_mut().level = 1;
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 1);
+        let mut w = walk(&state);
         w.arm();
         w.poll(0); // passes bl1, now at kernel
 
         w.arm(); // restart
-        w.reader_mut().level = 0;
+        set_level(&state, 0);
         let v = w.poll(500);
         assert_eq!(
             v,
@@ -424,7 +462,8 @@ mod tests {
 
     #[test]
     fn unarmed_walk_waits_indefinitely() {
-        let w = walk();
+        let state = Cell::new(ReaderState::default());
+        let w = walk(&state);
         // Deliberately not calling arm().
         let mut w = w;
         assert_eq!(
@@ -437,7 +476,8 @@ mod tests {
 
     #[test]
     fn idle_after_terminal_waits_indefinitely() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        let mut w = walk(&state);
         w.arm();
         w.poll(0); // Armed -> Walking, deadline = 100
         let v = w.poll(100); // now >= deadline -> TimedOut
@@ -455,7 +495,8 @@ mod tests {
 
     #[test]
     fn deadline_is_relative_to_first_poll_not_arm() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        let mut w = walk(&state);
         w.arm();
         // First poll at t=1000: deadline should be 1000 + 100, not 0 + 100.
         let v = w.poll(1000);
@@ -469,8 +510,9 @@ mod tests {
 
     #[test]
     fn next_checkpoint_deadline_is_relative_to_the_passing_poll() {
-        let mut w = walk();
-        w.reader_mut().level = 1;
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 1);
+        let mut w = walk(&state);
         w.arm();
 
         // bl1 passes at t=50, kernel deadline = 50 + 200.
@@ -487,11 +529,12 @@ mod tests {
 
     #[test]
     fn booted_at_expiry_is_still_timeout() {
-        let mut w = walk();
+        let state = Cell::new(ReaderState::default());
+        let mut w = walk(&state);
         w.arm();
         w.poll(0); // Armed -> Walking, deadline = 100
 
-        w.reader_mut().level = 1;
+        set_level(&state, 1);
         let v = w.poll(100); // device ready, but window already lapsed
         assert_eq!(
             v,
@@ -507,12 +550,13 @@ mod tests {
 
     #[test]
     fn device_fault_at_second_checkpoint_names_it() {
-        let mut w = walk();
-        w.reader_mut().level = 1;
+        let state = Cell::new(ReaderState::default());
+        set_level(&state, 1);
+        let mut w = walk(&state);
         w.arm();
         w.poll(0); // bl1 passes, now at kernel
 
-        w.reader_mut().fault = Some(BootStatus::FailedFatal);
+        set_fault(&state, Some(BootStatus::FailedFatal));
         let v = w.poll(10);
         assert_eq!(
             v,
@@ -529,6 +573,7 @@ mod tests {
     #[should_panic(expected = "checkpoint list must not be empty")]
     fn empty_checkpoints_panic_at_construction() {
         let empty: &'static [BootCheckpoint<u8>] = &[];
-        CheckpointWalk::new(ProgressReader::new(), empty);
+        let state = Cell::new(ReaderState::default());
+        CheckpointWalk::new(ProgressReader { state: &state }, empty);
     }
 }
