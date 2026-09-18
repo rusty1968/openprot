@@ -66,7 +66,7 @@ pub use boot_watch::{BootWatch, FailureCause, WalkVerdict};
 pub use evidence::{BootStatus, EvidenceReader};
 pub use incremental_verifier::{IncrementalVerifier, PollOutcome, VerifySession};
 pub use lockdown_latch::LockdownLatch;
-pub use recovery::Recovery;
+pub use recovery::{Recovery, RestoreOutcome};
 pub use svn_floor::{Svn, SvnFloor};
 pub use trial_boot::TrialBoot;
 pub use updatable::{PayloadReadError, PayloadSource, StageProgress, Updatable, UpdateError};

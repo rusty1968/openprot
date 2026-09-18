@@ -14,25 +14,35 @@
 ///
 /// # Contract
 ///
-/// - **`Ok` means the mechanism completed, not that the image is good.**
-///   Judging the restored image belongs to the verifier on the re-walk; a
-///   restore must not forge a verdict by checking it here.
-/// - **Errors are actuation faults only** (source unreachable, write
-///   failed). The orchestrator treats them fail-closed.
+/// - **`Ok(Restored)` means the mechanism completed, not that the image is
+///   good.** Judging the restored image belongs to the verifier on the
+///   re-walk; a restore must not forge a verdict by checking it here.
+/// - **`Ok(SourcesExhausted)` means this device has no source left for
+///   `attempt`** — not a fault, a report. The core's retry cap and a board's
+///   source count are independent; when the board runs out first, the
+///   orchestrator gates the component by its failure policy
+///   (`Isolable`/`Cascading` skip, `Required` locks) instead of assuming the
+///   mechanism is broken.
+/// - **`Err` is an actuation fault only** (source unreachable, write
+///   failed). The orchestrator treats it fail-closed, unconditionally —
+///   never route a merely-exhausted device through `Err`, or a
+///   `Isolable`/`Cascading` component locks the whole platform down over
+///   nothing worse than running out of images.
 /// - **Repeatable.** Each recovery attempt calls `restore` again with the
 ///   next `attempt`; a partial earlier restore must not stop a later call
 ///   from producing a complete image.
 /// - **The caller counts the attempts.** `attempt` comes from the core's own
 ///   retry counter, the same value its retry cap is measured against, so an
 ///   implementor that keeps a count of its own would drift: it never sees
-///   which attempt succeeded. Running out of sources is an actuation error
-///   like any other.
+///   which attempt succeeded.
 pub trait Recovery {
     /// The error type of this device's restore mechanism.
     ///
     /// Bounded by [`core::error::Error`] so the orchestrator gets `Display`
     /// and a `source()` cause chain, not just a `Debug` dump. Error
-    /// categories are implementation-defined.
+    /// categories are implementation-defined. Reserved for actuation
+    /// faults — see [`RestoreOutcome::SourcesExhausted`] for running out of
+    /// sources.
     type Error: core::error::Error;
 
     /// Rewrites the device's active image from the recovery source.
@@ -40,8 +50,20 @@ pub trait Recovery {
     /// `attempt` is this device's consecutive-recovery count, `0` on the
     /// first try of a recovery cycle. Implementors that hold more
     /// than one source pick per attempt (slot A on `0`, slot B on `1`,
-    /// golden on `2`); implementors with a single source ignore it.
-    fn restore(&mut self, attempt: u8) -> Result<(), Self::Error>;
+    /// golden on `2`); implementors with a single source ignore it and
+    /// always answer `Restored`, letting the core's own retry cap be the
+    /// only limit.
+    fn restore(&mut self, attempt: u8) -> Result<RestoreOutcome, Self::Error>;
+}
+
+/// The verdict of one [`Recovery::restore`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The mechanism completed; the image is unjudged until the re-walk.
+    Restored,
+    /// No source left for this `attempt`. Not a fault: the orchestrator
+    /// gates the component by its failure policy rather than fail closed.
+    SourcesExhausted,
 }
 
 #[cfg(test)]
@@ -57,6 +79,8 @@ mod tests {
         /// Attempt number the source faults on, so a test can make one
         /// restore fail and the next one succeed.
         fail_on: Option<u8>,
+        /// Attempts `>=` this have no source left. `None` means unlimited.
+        sources: Option<u8>,
     }
 
     impl MockRecovery {
@@ -65,6 +89,7 @@ mod tests {
                 attempts: [0; 4],
                 restores: 0,
                 fail_on: None,
+                sources: None,
             }
         }
 
@@ -73,6 +98,16 @@ mod tests {
                 attempts: [0; 4],
                 restores: 0,
                 fail_on: Some(attempt),
+                sources: None,
+            }
+        }
+
+        fn with_sources(count: u8) -> Self {
+            MockRecovery {
+                attempts: [0; 4],
+                restores: 0,
+                fail_on: None,
+                sources: Some(count),
             }
         }
     }
@@ -91,20 +126,23 @@ mod tests {
     impl Recovery for MockRecovery {
         type Error = MockFault;
 
-        fn restore(&mut self, attempt: u8) -> Result<(), MockFault> {
+        fn restore(&mut self, attempt: u8) -> Result<RestoreOutcome, MockFault> {
             if self.fail_on == Some(attempt) {
                 return Err(MockFault);
             }
+            if self.sources.is_some_and(|sources| attempt >= sources) {
+                return Ok(RestoreOutcome::SourcesExhausted);
+            }
             self.attempts[self.restores] = attempt;
             self.restores += 1;
-            Ok(())
+            Ok(RestoreOutcome::Restored)
         }
     }
 
     /// The orchestrator's shape: run the mechanism, judge nothing here.
     /// `attempt` rides in from `Effect::RecoverComponent`, never from a
     /// count the device keeps.
-    fn recover<R: Recovery>(dev: &mut R, attempt: u8) -> Result<(), R::Error> {
+    fn recover<R: Recovery>(dev: &mut R, attempt: u8) -> Result<RestoreOutcome, R::Error> {
         dev.restore(attempt)
     }
 
@@ -112,8 +150,8 @@ mod tests {
     fn contract_is_implementable_without_the_hal() {
         let mut dev = MockRecovery::healthy();
 
-        recover(&mut dev, 0).expect("restore failed");
-        recover(&mut dev, 1).expect("repeated restore failed");
+        assert_eq!(recover(&mut dev, 0), Ok(RestoreOutcome::Restored));
+        assert_eq!(recover(&mut dev, 1), Ok(RestoreOutcome::Restored));
 
         assert_eq!(dev.restores, 2);
     }
@@ -139,6 +177,19 @@ mod tests {
         recover(&mut dev, 1).expect("the next attempt must still restore");
 
         assert_eq!(dev.restores, 1);
+    }
+
+    // Running out of sources answers `Ok`, not `Err`: it is a report the
+    // orchestrator gates by failure policy, not a fault it fails closed on.
+    #[test]
+    fn sources_exhausted_is_not_an_error() {
+        let mut dev = MockRecovery::with_sources(2);
+
+        assert_eq!(recover(&mut dev, 0), Ok(RestoreOutcome::Restored));
+        assert_eq!(recover(&mut dev, 1), Ok(RestoreOutcome::Restored));
+        assert_eq!(recover(&mut dev, 2), Ok(RestoreOutcome::SourcesExhausted));
+
+        assert_eq!(dev.restores, 2, "no source consumed on the exhausted attempt");
     }
 
     #[test]
