@@ -18,9 +18,9 @@
 
 use app_initiator::handle;
 use pw_status::{Error, Result};
+use userspace::entry;
 use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
-use userspace::entry;
 use util_ipc::{AsyncTransaction, IpcHandle, IpcInitiator};
 
 static SEND_BUF: [u8; 1] = [0x10];
