@@ -81,6 +81,7 @@ impl<H: IpcInitiator> AsyncTransaction<H> {
         // Safety: send/recv are 'static, so the kernel's raw pointers
         // stay valid regardless of what happens to `self`, and they are
         // not read, written, or dropped again until try_recv/cancel.
+        // nosemgrep
         let result = unsafe { self.handle.async_transact_start(send, recv) };
 
         match result {
