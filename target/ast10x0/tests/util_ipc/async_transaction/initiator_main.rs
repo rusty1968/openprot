@@ -73,8 +73,7 @@ fn test_async_roundtrip() -> Result<()> {
     txn.start(&SEND_BUF, unsafe { recv_buf() })
         .map_err(|e| e.error)?;
 
-    let raw_handle = txn.handle().handle;
-    syscall::object_wait(raw_handle, Signals::READABLE, Instant::MAX)?;
+    syscall::object_wait(txn.as_raw(), Signals::READABLE, Instant::MAX)?;
 
     let completion = txn.try_recv()?;
     if completion.len != 1 || completion.recv[0] != 0x11 {
