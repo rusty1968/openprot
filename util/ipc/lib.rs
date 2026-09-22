@@ -71,6 +71,11 @@ pub trait IpcHandler {
 }
 
 /// Transparent wrapper around a raw IPC handle.
+///
+/// `set_peer_user_signal` (defined in the target-only impl) is an inherent
+/// method here rather than on `IpcInitiator`/`IpcHandler`, since it's usable
+/// from either channel role and duplicating it onto both traits would just
+/// mean two copies of the same forwarding call to keep in sync.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct IpcHandle {
