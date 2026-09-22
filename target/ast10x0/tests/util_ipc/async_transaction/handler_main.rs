@@ -11,9 +11,9 @@
 
 use app_handler::handle;
 use pw_status::Error;
+use userspace::entry;
 use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
-use userspace::entry;
 use util_ipc::{IpcHandle, IpcHandler};
 
 #[entry]
