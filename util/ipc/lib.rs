@@ -17,6 +17,29 @@ pub trait IpcChannel {
         BufSend: AsSyscallBuffer + ?Sized,
         BufRecv: AsSyscallBuffer + ?Sized;
 
+    /// Starts a transaction and returns immediately; poll readiness via
+    /// `object_wait`/`wait_group_add` on this channel's handle
+    /// (`Signals::READABLE`), then call `async_transact_complete` or
+    /// `async_cancel`. Fails with `Error::Unavailable` if a transaction
+    /// (blocking or async) is already pending on this channel.
+    ///
+    /// # Safety
+    /// `send_data`/`recv_data` are borrowed by the kernel until the
+    /// transaction is completed or cancelled — they must stay valid and
+    /// unmutated until then.
+    unsafe fn async_transact_start<BufSend, BufRecv>(
+        &self,
+        send_data: &BufSend,
+        recv_data: &mut BufRecv,
+    ) -> Result<()>
+    where
+        BufSend: AsSyscallBuffer + ?Sized,
+        BufRecv: AsSyscallBuffer + ?Sized;
+
+    fn async_transact_complete(&self) -> Result<usize>;
+
+    fn async_cancel(&self) -> Result<()>;
+
     fn read<Buf>(&self, offset: usize, buffer: &mut Buf) -> Result<usize>
     where
         Buf: AsSyscallBuffer + ?Sized;
