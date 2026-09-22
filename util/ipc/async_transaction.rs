@@ -160,3 +160,10 @@ pub struct StartError {
     pub error: Error,
     pub buffers: Buffers,
 }
+
+impl From<StartError> for Error {
+    /// Drops the reclaimed buffers; use `StartError` directly to reuse them.
+    fn from(e: StartError) -> Self {
+        e.error
+    }
+}

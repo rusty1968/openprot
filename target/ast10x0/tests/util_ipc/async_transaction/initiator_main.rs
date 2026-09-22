@@ -50,8 +50,7 @@ fn test_blocking_transact() -> Result<()> {
 fn test_async_cancel() -> Result<()> {
     let mut txn = AsyncTransaction::new(IpcHandle::new(handle::IPC));
     // Safety: no other AsyncTransaction is live right now.
-    txn.start(&SEND_BUF, unsafe { recv_buf() })
-        .map_err(|e| e.error)?;
+    txn.start(&SEND_BUF, unsafe { recv_buf() })?;
 
     txn.cancel()?;
     if txn.is_pending() {
@@ -61,8 +60,7 @@ fn test_async_cancel() -> Result<()> {
 
     // Verify the channel is free again.
     // Safety: the previous transaction was cancelled above.
-    txn.start(&SEND_BUF, unsafe { recv_buf() })
-        .map_err(|e| e.error)?;
+    txn.start(&SEND_BUF, unsafe { recv_buf() })?;
     txn.cancel()?;
     Ok(())
 }
@@ -70,8 +68,7 @@ fn test_async_cancel() -> Result<()> {
 fn test_async_roundtrip() -> Result<()> {
     let mut txn = AsyncTransaction::new(IpcHandle::new(handle::IPC));
     // Safety: no other AsyncTransaction is live right now.
-    txn.start(&SEND_BUF, unsafe { recv_buf() })
-        .map_err(|e| e.error)?;
+    txn.start(&SEND_BUF, unsafe { recv_buf() })?;
 
     syscall::object_wait(txn.as_raw(), Signals::READABLE, Instant::MAX)?;
 
