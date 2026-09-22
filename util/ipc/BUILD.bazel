@@ -19,7 +19,7 @@ rust_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
-        "@pigweed//pw_status/rust:pw_status",
         "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_status/rust:pw_status",
     ],
 )
