@@ -45,9 +45,10 @@ impl<H: IpcInitiator> AsyncTransaction<H> {
         }
     }
 
-    /// The wrapped initiator, e.g. to register it with a WaitGroup.
-    pub fn handle(&self) -> &H {
-        &self.handle
+    /// The raw channel handle, e.g. to register with a WaitGroup or pass to
+    /// `object_wait`.
+    pub fn as_raw(&self) -> u32 {
+        self.handle.as_raw()
     }
 
     /// Whether a transaction is in flight.

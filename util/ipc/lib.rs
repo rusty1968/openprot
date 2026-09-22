@@ -52,6 +52,10 @@ pub trait IpcInitiator {
     fn async_transact_complete(&self) -> Result<usize>;
 
     fn async_cancel(&self) -> Result<()>;
+
+    /// The raw channel handle, e.g. to register with a WaitGroup or pass to
+    /// `object_wait`.
+    fn as_raw(&self) -> u32;
 }
 
 /// Operations available on the handler side of a channel (a

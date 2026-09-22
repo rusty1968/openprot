@@ -62,6 +62,10 @@ impl IpcInitiator for IpcHandle {
     fn async_cancel(&self) -> pw_status::Result<()> {
         userspace::syscall::channel_async_cancel(self.handle)
     }
+
+    fn as_raw(&self) -> u32 {
+        self.handle
+    }
 }
 
 impl IpcHandler for IpcHandle {
