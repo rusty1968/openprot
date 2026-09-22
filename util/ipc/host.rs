@@ -101,6 +101,26 @@ impl IpcChannel for IpcHandle {
         panic!("IpcHandle cannot be used on host");
     }
 
+    unsafe fn async_transact_start<BufSend, BufRecv>(
+        &self,
+        _send_data: &BufSend,
+        _recv_data: &mut BufRecv,
+    ) -> pw_status::Result<()>
+    where
+        BufSend: AsSyscallBuffer + ?Sized,
+        BufRecv: AsSyscallBuffer + ?Sized,
+    {
+        panic!("IpcHandle cannot be used on host");
+    }
+
+    fn async_transact_complete(&self) -> pw_status::Result<usize> {
+        panic!("IpcHandle cannot be used on host");
+    }
+
+    fn async_cancel(&self) -> pw_status::Result<()> {
+        panic!("IpcHandle cannot be used on host");
+    }
+
     fn read<Buf>(&self, _offset: usize, _buffer: &mut Buf) -> pw_status::Result<usize>
     where
         Buf: AsSyscallBuffer + ?Sized,
