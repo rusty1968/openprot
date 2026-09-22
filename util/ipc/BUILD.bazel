@@ -6,21 +6,20 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 rust_library(
     name = "ipc",
     srcs = [
-        "host.rs",
+        "async_transaction.rs",
         "lib.rs",
         "target.rs",
     ],
     crate_name = "util_ipc",
     edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = select({
+        "@platforms//os:none": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         "@pigweed//pw_status/rust:pw_status",
-    ] + select({
-        "@platforms//os:none": [
-            "@pigweed//pw_kernel/userspace",
-        ],
-        "//conditions:default": [
-            "@pigweed//pw_time/rust:pw_time",
-        ],
-    }),
+        "@pigweed//pw_kernel/userspace",
+    ],
 )

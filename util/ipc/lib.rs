@@ -1,12 +1,22 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
+//! IPC abstraction over Pigweed kernel channels.
+//!
+//! `IpcInitiator` and `IpcHandler` split the two channel roles the kernel
+//! itself distinguishes (`ChannelInitiatorObject` vs `ChannelHandlerObject`),
+//! so a type only has to implement the operations its role can actually
+//! serve. `AsyncTransaction` is a safe layer on top of `IpcInitiator`'s
+//! unsafe async trio, tracking the one-transaction-per-channel invariant
+//! locally instead of leaving it to the caller.
+
 #![no_std]
 
 use pw_status::Result;
 
-/// Trait wrapping basic IPC operations on a channel.
-pub trait IpcChannel {
+/// Blocking and async operations available on the initiator side of a
+/// channel (a `ChannelInitiatorObject` in the kernel).
+pub trait IpcInitiator {
     fn transact<BufSend, BufRecv>(
         &self,
         send_data: &BufSend,
@@ -24,9 +34,12 @@ pub trait IpcChannel {
     /// (blocking or async) is already pending on this channel.
     ///
     /// # Safety
-    /// `send_data`/`recv_data` are borrowed by the kernel until the
-    /// transaction is completed or cancelled — they must stay valid and
-    /// unmutated until then.
+    /// The kernel holds raw pointers into `send_data`/`recv_data` (and
+    /// writes the response into `recv_data`) until the transaction is
+    /// completed or cancelled — callers must not read or write either
+    /// buffer, or let them be dropped or moved, until then. `recv_data`
+    /// must be large enough to hold the response; a response that
+    /// overflows it is a kernel error, not truncated silently.
     unsafe fn async_transact_start<BufSend, BufRecv>(
         &self,
         send_data: &BufSend,
@@ -39,7 +52,11 @@ pub trait IpcChannel {
     fn async_transact_complete(&self) -> Result<usize>;
 
     fn async_cancel(&self) -> Result<()>;
+}
 
+/// Operations available on the handler side of a channel (a
+/// `ChannelHandlerObject` in the kernel).
+pub trait IpcHandler {
     fn read<Buf>(&self, offset: usize, buffer: &mut Buf) -> Result<usize>
     where
         Buf: AsSyscallBuffer + ?Sized;
@@ -47,9 +64,6 @@ pub trait IpcChannel {
     fn respond<Buf>(&self, buffer: &Buf) -> Result<()>
     where
         Buf: AsSyscallBuffer + ?Sized;
-
-    /// Set (set=true) or clear (set=false) Signals::USER on the paired peer.
-    fn set_peer_user_signal(&self, set: bool) -> Result<()>;
 }
 
 /// Transparent wrapper around a raw IPC handle.
@@ -65,12 +79,8 @@ impl IpcHandle {
     }
 }
 
-#[cfg(target_os = "none")]
+mod async_transaction;
 mod target;
-#[cfg(target_os = "none")]
-pub use target::{AsSyscallBuffer, Instant};
 
-#[cfg(not(target_os = "none"))]
-mod host;
-#[cfg(not(target_os = "none"))]
-pub use host::{AsSyscallBuffer, Instant};
+pub use async_transaction::{AsyncTransaction, Buffers, Completion, StartError};
+pub use target::{AsSyscallBuffer, Instant};

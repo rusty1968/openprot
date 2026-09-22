@@ -1,12 +1,23 @@
 // Licensed under the Apache-2.0 license
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{IpcChannel, IpcHandle};
+use super::{IpcHandle, IpcHandler, IpcInitiator};
 
 pub use userspace::buffer::AsSyscallBuffer;
 pub use userspace::time::Instant;
 
-impl IpcChannel for IpcHandle {
+impl IpcHandle {
+    /// Set (set=true) or clear (set=false) Signals::USER on the paired peer.
+    ///
+    /// Available on both channel roles, so it lives on the concrete
+    /// handle rather than being duplicated onto `IpcInitiator` and
+    /// `IpcHandler`.
+    pub fn set_peer_user_signal(&self, set: bool) -> pw_status::Result<()> {
+        userspace::syscall::object_set_peer_user_signal(self.handle, set)
+    }
+}
+
+impl IpcInitiator for IpcHandle {
     fn transact<BufSend, BufRecv>(
         &self,
         send_data: &BufSend,
@@ -51,7 +62,9 @@ impl IpcChannel for IpcHandle {
     fn async_cancel(&self) -> pw_status::Result<()> {
         userspace::syscall::channel_async_cancel(self.handle)
     }
+}
 
+impl IpcHandler for IpcHandle {
     fn read<Buf>(&self, offset: usize, buffer: &mut Buf) -> pw_status::Result<usize>
     where
         Buf: AsSyscallBuffer + ?Sized,
@@ -64,9 +77,5 @@ impl IpcChannel for IpcHandle {
         Buf: AsSyscallBuffer + ?Sized,
     {
         userspace::syscall::channel_respond(self.handle, buffer)
-    }
-
-    fn set_peer_user_signal(&self, set: bool) -> pw_status::Result<()> {
-        userspace::syscall::object_set_peer_user_signal(self.handle, set)
     }
 }
