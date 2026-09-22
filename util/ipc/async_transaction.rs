@@ -74,8 +74,7 @@ impl<H: IpcInitiator> AsyncTransaction<H> {
         if self.inflight.is_some() {
             return Err(StartError {
                 error: Error::FailedPrecondition,
-                send,
-                recv,
+                buffers: Buffers { send, recv },
             });
         }
 
@@ -89,7 +88,10 @@ impl<H: IpcInitiator> AsyncTransaction<H> {
                 self.inflight = Some(Buffers { send, recv });
                 Ok(())
             }
-            Err(error) => Err(StartError { error, send, recv }),
+            Err(error) => Err(StartError {
+                error,
+                buffers: Buffers { send, recv },
+            }),
         }
     }
 
@@ -112,8 +114,8 @@ impl<H: IpcInitiator> AsyncTransaction<H> {
         }
 
         let len = self.handle.async_transact_complete()?;
-        let Buffers { send, recv } = self.inflight.take().unwrap();
-        Ok(Completion { len, send, recv })
+        let buffers = self.inflight.take().unwrap();
+        Ok(Completion { len, buffers })
     }
 
     /// Cancel a pending transaction and reclaim the buffers.
@@ -145,19 +147,16 @@ impl<H: IpcInitiator> Drop for AsyncTransaction<H> {
 /// Successful completion of an async transaction.
 #[derive(Debug)]
 pub struct Completion {
-    /// Number of response bytes written into `recv`.
+    /// Number of response bytes written into `buffers.recv`.
     pub len: usize,
-    /// The send buffer, returned for reuse.
-    pub send: &'static [u8],
-    /// The receive buffer, returned for reuse. `recv[..len]` holds the
-    /// response payload.
-    pub recv: &'static mut [u8],
+    /// The buffers, returned for reuse. `recv[..len]` holds the response
+    /// payload.
+    pub buffers: Buffers,
 }
 
 /// Error from `start()`, carrying the buffers back so they are not lost.
 #[derive(Debug)]
 pub struct StartError {
     pub error: Error,
-    pub send: &'static [u8],
-    pub recv: &'static mut [u8],
+    pub buffers: Buffers,
 }

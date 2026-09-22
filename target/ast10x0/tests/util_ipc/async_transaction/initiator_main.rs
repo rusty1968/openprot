@@ -76,7 +76,7 @@ fn test_async_roundtrip() -> Result<()> {
     syscall::object_wait(txn.as_raw(), Signals::READABLE, Instant::MAX)?;
 
     let completion = txn.try_recv()?;
-    if completion.len != 1 || completion.recv[0] != 0x11 {
+    if completion.len != 1 || completion.buffers.recv[0] != 0x11 {
         pw_log::error!("async roundtrip: unexpected response");
         return Err(Error::Internal);
     }

@@ -8,10 +8,6 @@ pub use userspace::time::Instant;
 
 impl IpcHandle {
     /// Set (set=true) or clear (set=false) Signals::USER on the paired peer.
-    ///
-    /// Available on both channel roles, so it lives on the concrete
-    /// handle rather than being duplicated onto `IpcInitiator` and
-    /// `IpcHandler`.
     pub fn set_peer_user_signal(&self, set: bool) -> pw_status::Result<()> {
         userspace::syscall::object_set_peer_user_signal(self.handle, set)
     }
