@@ -76,6 +76,11 @@ pub trait IpcHandler {
 /// method here rather than on `IpcInitiator`/`IpcHandler`, since it's usable
 /// from either channel role and duplicating it onto both traits would just
 /// mean two copies of the same forwarding call to keep in sync.
+///
+/// One transaction per channel is a kernel rule, not something this type
+/// enforces: wrapping the same handle in two `AsyncTransaction`s just gets
+/// you `Unavailable` on the second `start`, with the buffers handed back —
+/// not anything unsound.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct IpcHandle {
@@ -83,6 +88,8 @@ pub struct IpcHandle {
 }
 
 impl IpcHandle {
+    /// Wraps a raw channel handle. Trusts the caller to pass one the kernel
+    /// actually gave out.
     pub const fn new(handle: u32) -> Self {
         Self { handle }
     }

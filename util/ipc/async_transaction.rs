@@ -125,15 +125,18 @@ impl<H: IpcInitiator> AsyncTransaction<H> {
     /// discarded.
     ///
     /// Returns `Err(Error::FailedPrecondition)` if no transaction is
-    /// pending. Propagates unexpected kernel errors with the buffers
-    /// still held (use `cancel()` again or drop the struct).
+    /// pending. The buffers come back even if the cancel syscall errors: the
+    /// kernel clears its transaction slot on every path, so it no longer
+    /// holds pointers into them.
     pub fn cancel(&mut self) -> Result<Buffers> {
-        if self.inflight.is_none() {
+        let Some(buffers) = self.inflight.take() else {
             return Err(Error::FailedPrecondition);
-        }
+        };
 
-        self.handle.async_cancel()?;
-        Ok(self.inflight.take().unwrap())
+        // Only failure for a started transaction is Unavailable, meaning the
+        // transaction was already dropped. The buffers are free either way.
+        let _ = self.handle.async_cancel();
+        Ok(buffers)
     }
 }
 
