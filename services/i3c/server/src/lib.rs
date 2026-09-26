@@ -89,12 +89,20 @@ impl<T: I3cTarget> Server<T> {
     /// latched but unread frame.
     pub fn latch_inbound(&mut self) -> Result<bool, T::Error> {
         match self.target.read_frame(&mut self.rx)? {
-            Some(n) => {
+            // A zero-length descriptor is not a real frame. The RX-descriptor
+            // interrupt can fire with no payload (seen on the emulator around
+            // the controller's write/private-read command traffic), and
+            // `read_frame` then reports `Some(0)`. Latching it would raise a
+            // spurious wake and, worse, overwrite a real frame still waiting in
+            // the single-frame latch for the client to read — dropping a valid
+            // inbound message. A zero-length inbound is never a valid MCTP
+            // frame, so treat it as "nothing arrived".
+            Some(n) if n > 0 => {
                 self.rx_len = n.min(MAX_PAYLOAD);
                 self.rx_ready = true;
                 Ok(true)
             }
-            None => Ok(false),
+            _ => Ok(false),
         }
     }
 }
