@@ -13,8 +13,13 @@
 
 MEMORY
 {
-  /* Internal SRAM */
-  RAM(rw) : ORIGIN = 0x40000000, LENGTH = 0x60000
+  /* Internal SRAM is 0x80000 (emulator --sram-size, see
+   * target/veer/tooling/caliptra_runner.py). The kernel boot stack sits at
+   * ORIGIN+LENGTH, so LENGTH must clear the multi-process app RAM regions
+   * (assigned upward from the kernel RAM region by target_codegen; here they end
+   * at 0x4006c000) yet stay strictly *inside* SRAM: a top at the exclusive end
+   * 0x40080000 is one past the last valid word and trips region/PMP checks. */
+  RAM(rw) : ORIGIN = 0x40000000, LENGTH = 0x78000
 
   /* Each memory region above has an associated .*.unused_space section that
    * overlays the unused space at the end of the memory segment. These segments
