@@ -22,7 +22,7 @@ local_path_override(
 
 git_override(
     module_name = "pigweed",
-    commit = "294d431a761dc44fe07710c15d5ac1603f7ef7bf",
+    commit = "f9b83b60c9fa3dc7d0127e687fef170147cd2d3e",
     patch_args = ["-p1"],
     patches = [],
     remote = "https://pigweed.googlesource.com/pigweed/pigweed",
