@@ -84,6 +84,10 @@
         },
         {
           name: "pldm_fd",
+          // App RAM is assigned upward from the kernel RAM region: i3c_server at
+          // 0x40048000, then mctp_server, then pldm_fd ending at 0x4006c000 with
+          // these sizes. That must stay below the kernel boot stack, which the
+          // veer linker template puts at the top of SRAM (0x40080000).
           ram_size_bytes: 0x10000,
           objects: [
             {

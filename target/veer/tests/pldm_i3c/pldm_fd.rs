@@ -20,9 +20,7 @@
 use core::cell::{Cell, RefCell};
 
 use openprot_mctp_client_ipc::IpcMctpClient;
-use openprot_pldm_service::firmware_device::{
-    FdEvent, FdEventSink, FirmwareDevice, RunTerminusResult, FD_MAX_MSG,
-};
+use openprot_pldm_service::firmware_device::{FirmwareDevice, RunTerminusResult, FD_MAX_MSG};
 use openprot_pldm_service::{MctpPldmTransport, PldmServiceError};
 use pldm_common::message::firmware_update::apply_complete::ApplyResult;
 use pldm_common::message::firmware_update::get_fw_params::FirmwareParameters;
@@ -37,6 +35,8 @@ use pldm_interface::firmware_device::fd_ops::{ComponentOperation, FdOps, FdOpsEr
 use userspace::process_entry;
 use userspace::syscall;
 
+/// This FD's own MCTP EID; must match the mctp_server's `OWN_EID` underneath it.
+const FD_EID: u8 = 8;
 /// Update Agent EID this FD serves (the host).
 const UA_EID: u8 = 0x0a;
 /// Small firmware image so a full download is a handful of single-fragment
@@ -46,29 +46,13 @@ const IMAGE_SIZE: usize = 512;
 /// response fits one MCTP fragment (4 i3c + 4 MCTP + 1 type + PLDM hdr + data +
 /// PEC must stay under the 250-byte i3c frame / 241-byte MTU).
 const FD_XFER_CAP: usize = 180;
-/// Idle responder poll timeout (ms); 0 would block indefinitely.
-const IDLE_TIMEOUT_MILLIS: u32 = 100;
+/// How long the responder waits for a UA command while idle. Large, like the
+/// AST10x0 reference FD: `run_terminus` is called once and blocks here between
+/// commands, rather than being re-entered in a tight poll loop (that churn of
+/// timed-out recvs is what crashed the earlier version).
+const IDLE_TIMEOUT_MILLIS: u32 = 15_000;
 /// Bound each FD-initiated request's wait for the UA response.
-const REQUESTER_TIMEOUT_MILLIS: u32 = 2000;
-/// Steps to keep running after the stop event so the last response is read
-/// before the process exits (a small grace against the staging/exit race).
-const GRACE_STEPS: u32 = 20;
-
-/// Stops the FD loop once the update lifecycle reaches its (Phase A) endpoint.
-///
-/// Phase A drives only `RequestUpdate`, so `UpdateRequested` is the endpoint.
-/// (Phase B/C will move the stop to after activation.)
-struct StopOnUpdateRequested<'a> {
-    done: &'a Cell<bool>,
-}
-
-impl FdEventSink for StopOnUpdateRequested<'_> {
-    fn notify(&mut self, event: FdEvent) {
-        if matches!(event, FdEvent::UpdateRequested) {
-            self.done.set(true);
-        }
-    }
-}
+const REQUESTER_TIMEOUT_MILLIS: u32 = 5_000;
 
 struct MockFdOps {
     component_accepted: Cell<bool>,
@@ -201,6 +185,14 @@ fn entry() {
     let responder_transport = MctpPldmTransport::new(IpcMctpClient::new(handle::MCTP));
     let requester_transport = MctpPldmTransport::new(IpcMctpClient::new(handle::MCTP));
 
+    // Set this FD's MCTP EID before init, as the AST10x0 reference FD does.
+    if responder_transport.stack().set_eid(FD_EID).is_err() {
+        pw_log::error!("pldm fd: set_eid failed");
+        let _ = syscall::debug_shutdown(Err(pw_status::Error::Internal));
+        #[expect(clippy::empty_loop)]
+        loop {}
+    }
+
     let mut fd = FirmwareDevice::init(
         &fd_ops,
         &PLDM_PROTOCOL_CAPABILITIES,
@@ -211,43 +203,41 @@ fn entry() {
     pw_log::info!("pldm fd: waiting for update agent");
 
     let mut buf = [0u8; FD_MAX_MSG];
-    let done = Cell::new(false);
-    let mut sink = StopOnUpdateRequested { done: &done };
 
-    // `run_until` returns `StoppedByError(Mctp(timeout))` on every idle poll
-    // timeout (respond_once maps a listener recv-timeout to that), so it is not
-    // a fatal error while idle — it means "no command this window." Loop over
-    // it, keeping the listener re-armed, until we accept a RequestUpdate; then
-    // stay a short grace so the host reads the response, and exit 0.
-    let mut grace = GRACE_STEPS;
-    loop {
-        match fd.run_until(
-            UA_EID,
-            &mut buf,
-            IDLE_TIMEOUT_MILLIS,
-            REQUESTER_TIMEOUT_MILLIS,
-            &mut sink,
-            || true,
-        ) {
-            RunTerminusResult::StoppedByError(PldmServiceError::Mctp(e)) if e.is_timeout() => {}
-            RunTerminusResult::StoppedByError(_) => {
-                pw_log::error!("pldm fd: run_until stopped by error");
-                let _ = syscall::debug_shutdown(Err(pw_status::Error::Internal));
-                #[expect(clippy::empty_loop)]
-                loop {}
-            }
-            RunTerminusResult::Completed => {}
+    // Drive the whole update in a single `run_terminus`, exactly like the
+    // AST10x0 reference FD (target/ast10x0/tests/pldm/firmware_update/fd_main.rs):
+    // it services UA->FD commands and autonomously issues the FD-initiated
+    // download/verify/apply requests from this one thread, blocking on the
+    // responder for up to `IDLE_TIMEOUT_MILLIS` between commands. It returns
+    // `Completed` when the device goes back to Idle (after ActivateFirmware) or
+    // a `Mctp` timeout when the UA stops talking. Phase B's host UA stops after
+    // ApplyComplete without sending ActivateFirmware, so the terminal idle
+    // timeout is expected; success here is "the image was applied".
+    match fd.run_terminus(
+        UA_EID,
+        &mut buf,
+        IDLE_TIMEOUT_MILLIS,
+        REQUESTER_TIMEOUT_MILLIS,
+        &mut (),
+    ) {
+        RunTerminusResult::Completed => {
+            pw_log::info!("pldm fd: run_terminus completed");
         }
-        if done.get() {
-            if grace == 0 {
-                break;
-            }
-            grace -= 1;
+        RunTerminusResult::StoppedByError(PldmServiceError::Mctp(e)) if e.is_timeout() => {
+            pw_log::info!("pldm fd: idle timeout (no further UA command)");
+        }
+        RunTerminusResult::StoppedByError(_) => {
+            pw_log::error!("pldm fd: run_terminus stopped on error");
         }
     }
 
-    pw_log::info!("pldm fd: update requested, exiting");
-    let _ = syscall::debug_shutdown(Ok(()));
+    if fd_ops.applied.get() {
+        pw_log::info!("pldm fd: update applied, exiting");
+        let _ = syscall::debug_shutdown(Ok(()));
+    } else {
+        pw_log::error!("pldm fd: update did not complete");
+        let _ = syscall::debug_shutdown(Err(pw_status::Error::Internal));
+    }
     #[expect(clippy::empty_loop)]
     loop {}
 }
