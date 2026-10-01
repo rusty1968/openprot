@@ -307,7 +307,7 @@ fn pldm_throughput_host_test() {
             continue;
         };
         let fd_iid = hdr.instance_id();
-        let mut resp = [0u8; 1024];
+        let mut resp = [0u8; 2048];
         let resp_len = match FwUpdateCmd::try_from(hdr.cmd_code()) {
             Ok(FwUpdateCmd::RequestFirmwareData) => {
                 let fw =

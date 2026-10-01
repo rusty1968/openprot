@@ -45,18 +45,18 @@ const UA_EID: u8 = 0x0a;
 /// long enough for a stable throughput number, matching how caliptra-mcu-sw
 /// measures its PLDM transfer speed.
 const IMAGE_SIZE: usize = 4096;
-/// Per-chunk transfer cap, bigger than one single-fragment MTU (241 B): each
-/// `RequestFirmwareData` response spans ~3 inbound MCTP fragments, which the N=4
-/// inbound ring queues and the FD's MCTP stack reassembles — fewer, bigger
-/// download round-trips.
+/// Per-chunk transfer cap, well past the single-fragment MTU (241 B): each
+/// `RequestFirmwareData` response spans ~5 inbound MCTP fragments, which the
+/// inbound ring (`RX_RING = 6`) queues and the FD's MCTP stack reassembles into
+/// a ~965 B message (within the 1023 B MCTP ceiling) — fewer, bigger download
+/// round-trips.
 ///
-/// 512 is the ceiling: `pldm-common`'s `RequestFirmwareDataResponse::encode`
-/// rejects a payload larger than its `MAX_TRANSFER_SIZE = 512` constant
-/// (`FD_XFER_CAP = 700` fails with `BufferTooShort`). Going bigger — the way to
-/// close the rest of the gap to upstream's ~1300 B/s — needs that constant
-/// raised in the pldm-common dependency; the transport/ring already handle 4
-/// fragments (see target/veer/tests/i3c_throughput).
-const FD_XFER_CAP: usize = 512;
+/// This needs two things raised together, which this branch does: the
+/// `pldm-common` `MAX_TRANSFER_SIZE` cap (512 → 960, via the MODULE.bazel
+/// crate patch — it was a hardcoded placeholder; caliptra-mcu-sw derives the
+/// same ~1019 B from the MCTP message size) and the i3c server's `RX_RING`
+/// (4 → 6, so the 5-fragment burst fits).
+const FD_XFER_CAP: usize = 960;
 /// How long the responder waits for a UA command while idle. Large, like the
 /// AST10x0 reference FD: `run_terminus` is called once and blocks here between
 /// commands, rather than being re-entered in a tight poll loop (that churn of

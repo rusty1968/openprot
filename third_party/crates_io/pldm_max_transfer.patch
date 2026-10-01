@@ -1,0 +1,11 @@
+--- a/src/message/firmware_update/request_fw_data.rs
++++ b/src/message/firmware_update/request_fw_data.rs
+@@ -19,7 +19,7 @@ use crate::protocol::firmware_update::FwUpdateCmd;
+ use crate::protocol::firmware_update::FwUpdateCmd;
+ use zerocopy::{FromBytes, Immutable, IntoBytes};
+
+-pub const MAX_TRANSFER_SIZE: usize = 512; // Define an appropriate size
++pub const MAX_TRANSFER_SIZE: usize = 960; // raised from 512 for larger PLDM download chunks (throughput)
+
+ #[derive(Debug, Clone, FromBytes, IntoBytes, Immutable, PartialEq)]
+ #[repr(C, packed)]
