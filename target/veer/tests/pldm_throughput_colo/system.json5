@@ -1,0 +1,70 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// Colocated variant of pldm_throughput: the i3c_server and mctp_server processes
+// are MERGED into one (`mctp_i3c_colo`), removing the mctp<->i3c IPC boundary.
+// The PLDM FirmwareDevice stays a separate, isolated process over `mctp`.
+// Compare the UA-side download throughput against pldm_throughput to see the
+// boundary's effect on the full PLDM flow.
+{
+  arch: {
+    type: "riscv",
+  },
+  kernel: {
+    flash_start_address: 0x40000000,
+    flash_size_bytes: 0x18000,
+    ram_start_address: 0x40040000,
+    ram_size_bytes: 0x8000,
+  },
+  apps: [
+    {
+      name: "pldm_throughput_colo",
+      flash_size_bytes: 0x28000,
+      processes: [
+        {
+          name: "mctp_i3c_colo",
+          ram_size_bytes: 0x10000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            {
+              name: "i3c_irq",
+              type: "interrupt",
+              irqs: [{ name: "i3c", number: 2 }],
+            },
+            { name: "mctp", type: "channel_handler" },
+            {
+              type: "thread",
+              name: "mctp_i3c_colo_thread",
+              kernel_stack_size_bytes: 4096,
+            },
+          ],
+          memory_mappings: [
+            {
+              name: "i3c_regs",
+              type: "device",
+              start_address: 0x20004000,
+              size_bytes: 0x1000,
+            },
+          ],
+        },
+        {
+          name: "pldm_fd",
+          ram_size_bytes: 0x10000,
+          objects: [
+            {
+              name: "mctp",
+              type: "channel_initiator",
+              handler_process: "mctp_i3c_colo",
+              handler_object_name: "mctp",
+            },
+            {
+              type: "thread",
+              name: "pldm_fd_thread",
+              kernel_stack_size_bytes: 4096,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+}
