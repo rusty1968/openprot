@@ -1,4 +1,12 @@
-# pw_kernel: channel IPC corrupts a process context under sustained load (veer / RISC-V)
+# Caliptra MCU emulator: channel IPC corrupts a process context under sustained load (veer / RISC-V)
+
+> **Status: RESOLVED by upreving caliptra-mcu-sw to `a8b5eb8c`** (branch
+> `uprev-caliptra-mcu-sw`). On that rev `channel_stress` runs all 10,000
+> transactions and passes; the crash below reproduced only on the *old* Caliptra
+> MCU emulator. The bug was in the emulator's VeeR model, not pw_kernel: the same
+> test passed 200k transactions on `qemu_virt_riscv32` (no Caliptra emulator).
+> This test is retained as a **regression guard**. The report below documents the
+> original failure on the old emulator.
 
 ## Summary
 
