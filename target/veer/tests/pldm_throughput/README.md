@@ -33,7 +33,7 @@ Passing tests capture output, so surface the number with `--nocapture`:
 bazel test //target/veer/tests/pldm_throughput:pldm_throughput_test \
     --test_output=all --test_arg=--nocapture --nocache_test_results --jobs=2 \
     2>&1 | grep -E 'PLDM_THROUGHPUT'
-# PLDM_THROUGHPUT: 4096 bytes in 8.624 s (475.0 B/s, 0.5 KB/s)
+# PLDM_THROUGHPUT: 4096 bytes in 4.520 s (906.2 B/s, 0.9 KB/s)
 ```
 
 `--jobs=2` throttles the RAM-heavy image build; the test is tagged `emulator` and
@@ -42,20 +42,26 @@ skip it and it never runs in parallel.
 
 ## Reference result and comparison
 
-| | caliptra-mcu-sw UA (commit `78e0c7b6`) | this test (baseline) |
+| | caliptra-mcu-sw UA (commit `78e0c7b6`) | this test |
 |---|---|---|
 | metric | UA wall-clock, download B/s | UA wall-clock, download B/s |
-| result | 1100 → 1300 B/s | **475 B/s** (4096 B image) |
+| result | 1100 → 1300 B/s | **906 B/s** (4096 B image) |
 
-Ours is ~2.5–3× slower at the same measurement, for two known, actionable
-reasons:
+The test runs with the throughput levers **applied** — `FD_XFER_CAP = 460`
+(multi-fragment chunks) and a 1 ms download poll — reaching **906 B/s**, up from a
+**475 B/s** single-fragment/50 ms-poll baseline (a 1.9× gain, close to upstream's
+regime). What moved it, in order of impact:
 
-1. **Host poll cadence** — the UA download loop (`read_fd_request`) sleeps 50 ms
-   per poll. Upstream's speedup cut its UA-side alarm sleep to one tick; our 50 ms
-   is the analogous bottleneck.
-2. **Single-fragment 180 B chunks** — a 4096 B image is 23 round-trips. The
-   multi-fragment lever (see [`../i3c_throughput`](../i3c_throughput), which
-   showed 835→2043 B/s as messages grew) would cut that round-trip count.
+1. **Multi-fragment chunks (dominant).** Raising `FD_XFER_CAP` from 180 B
+   (single-fragment) to 460 B makes each `RequestFirmwareData` span ~2 inbound
+   MCTP fragments, cutting a 4096 B download from ~23 round-trips to ~9. This is
+   the same lever [`../i3c_throughput`](../i3c_throughput) quantifies on the raw
+   transport. The reliable ceiling today is ~2 fragments; `FD_XFER_CAP = 700`
+   (3 fragments) fails, so bigger chunks need the transfer-size negotiation / the
+   3-fragment path looked at first.
+2. **Download poll cadence (marginal).** Dropping `read_fd_request`'s poll from
+   50 ms to 1 ms gave only ~4% — the per-chunk cost is firmware/transport round
+   trips, not host polling — so the round-trip *count* (lever 1) is what matters.
 
 ## Related tests
 

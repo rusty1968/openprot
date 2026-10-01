@@ -90,12 +90,46 @@ fn ua_to_fd_frame(pldm: &[u8]) -> Vec<u8> {
     mctp_frame(pldm, 0xC8)
 }
 
-/// A UA *response* to an FD-initiated request (RequestFirmwareData / *Complete):
-/// SOM|EOM, TO=0, echoing the tag the FD owns for that transaction. Sending
-/// these with TO=1 makes the FD's stack route them to its responder (awaiting UA
-/// commands) instead of its requester (awaiting this reply), stalling download.
-fn fd_response_frame(pldm: &[u8], tag: u8) -> Vec<u8> {
-    mctp_frame(pldm, 0xC0 | (tag & 0x07))
+/// The i3c frames for a UA *response* to an FD-initiated request
+/// (RequestFirmwareData / *Complete), TO=0 and echoing the tag the FD owns for
+/// that transaction. (TO=1 would route to the FD's responder instead of its
+/// requester, stalling the download.)
+///
+/// A response larger than one fragment is split into <=240-byte MCTP packets
+/// with SOM/EOM/sequence flags; the FD's MCTP stack reassembles them. This is
+/// what lets `FD_XFER_CAP` exceed the single-fragment MTU — bigger chunks, fewer
+/// download round-trips. Small responses yield a single frame. Keep the message
+/// within the inbound ring depth (4 fragments ~= 960 B).
+fn fd_response_frames(pldm: &[u8], tag: u8) -> Vec<Vec<u8>> {
+    const FRAG_PAYLOAD: usize = 240; // <= 241 MTU with PEC
+    let mut body = Vec::with_capacity(1 + pldm.len());
+    body.push(PLDM_MSG_TYPE);
+    body.extend_from_slice(pldm);
+
+    let chunks: Vec<&[u8]> = body.chunks(FRAG_PAYLOAD).collect();
+    let n = chunks.len();
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let som = if i == 0 { 0x80 } else { 0 };
+            let eom = if i == n - 1 { 0x40 } else { 0 };
+            let seq = ((i as u8) & 0x03) << 4;
+            let flags = som | eom | seq | (tag & 0x07); // TO=0
+            let mut mctp = vec![0x01, FD_EID, UA_EID, flags];
+            mctp.extend_from_slice(chunk);
+            let byte_count = (1 + mctp.len()) as u8;
+            let mut frame = vec![
+                I3C_TARGET_ADDR << 1,
+                0x0f,
+                byte_count,
+                (I3C_CTRL_ADDR << 1) | 1,
+            ];
+            frame.extend_from_slice(&mctp);
+            frame.push(crc8_smbus(&frame));
+            frame
+        })
+        .collect()
 }
 
 /// The MCTP flags byte of an FD frame (index 7: [i3c 4][ver dest src flags]).
@@ -153,7 +187,12 @@ fn command(stream: &mut std::net::TcpStream, runner: &Runner, pldm: &[u8], cmd: 
 /// Returns the PLDM payload and the MCTP tag the FD owns, so the reply can echo
 /// it (with TO=0) and be routed back to the FD's requester.
 fn read_fd_request(stream: &mut std::net::TcpStream, runner: &Runner) -> Option<(Vec<u8>, u8)> {
-    for _ in 0..100 {
+    // Tight poll (1 ms, not 50 ms): this only *reads* the FD's staged request —
+    // it never resends — so polling fast cannot re-trigger the FD or livelock
+    // it (that hazard lives in `command()`'s resend path, used only for the
+    // setup commands). Draining the request sooner is the main download-speed
+    // lever; the iteration budget keeps the same ~5 s wall ceiling.
+    for _ in 0..5000 {
         if runner.exited() {
             return None;
         }
@@ -165,7 +204,7 @@ fn read_fd_request(stream: &mut std::net::TcpStream, runner: &Runner) -> Option<
         {
             return Some((pldm.to_vec(), tag));
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(1));
     }
     None
 }
@@ -268,7 +307,7 @@ fn pldm_throughput_host_test() {
             continue;
         };
         let fd_iid = hdr.instance_id();
-        let mut resp = [0u8; 256];
+        let mut resp = [0u8; 1024];
         let resp_len = match FwUpdateCmd::try_from(hdr.cmd_code()) {
             Ok(FwUpdateCmd::RequestFirmwareData) => {
                 let fw =
@@ -310,11 +349,9 @@ fn pldm_throughput_host_test() {
             }
             _ => continue,
         };
-        let _ = send_private_write_raw_on_stream(
-            &mut stream,
-            I3C_TARGET_ADDR,
-            &fd_response_frame(&resp[..resp_len], tag),
-        );
+        for frame in fd_response_frames(&resp[..resp_len], tag) {
+            let _ = send_private_write_raw_on_stream(&mut stream, I3C_TARGET_ADDR, &frame);
+        }
         if applied {
             break;
         }
