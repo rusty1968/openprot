@@ -33,7 +33,7 @@ Passing tests capture output, so surface the number with `--nocapture`:
 bazel test //target/veer/tests/pldm_throughput:pldm_throughput_test \
     --test_output=all --test_arg=--nocapture --nocache_test_results --jobs=2 \
     2>&1 | grep -E 'PLDM_THROUGHPUT'
-# PLDM_THROUGHPUT: 4096 bytes in 4.520 s (906.2 B/s, 0.9 KB/s)
+# PLDM_THROUGHPUT: 4096 bytes in 4.396 s (931.7 B/s, 0.9 KB/s)
 ```
 
 `--jobs=2` throttles the RAM-heavy image build; the test is tagged `emulator` and
@@ -45,21 +45,25 @@ skip it and it never runs in parallel.
 | | caliptra-mcu-sw UA (commit `78e0c7b6`) | this test |
 |---|---|---|
 | metric | UA wall-clock, download B/s | UA wall-clock, download B/s |
-| result | 1100 → 1300 B/s | **906 B/s** (4096 B image) |
+| result | 1100 → 1300 B/s | **932 B/s** (4096 B image) |
 
-The test runs with the throughput levers **applied** — `FD_XFER_CAP = 460`
-(multi-fragment chunks) and a 1 ms download poll — reaching **906 B/s**, up from a
-**475 B/s** single-fragment/50 ms-poll baseline (a 1.9× gain, close to upstream's
-regime). What moved it, in order of impact:
+The test runs with the throughput levers **applied** — `FD_XFER_CAP = 512`
+(multi-fragment chunks) and a 1 ms download poll — reaching **932 B/s** (5/5
+reliable), up from a **475 B/s** single-fragment/50 ms-poll baseline (a ~2× gain,
+within ~15–30% of upstream). What moved it, in order of impact:
 
 1. **Multi-fragment chunks (dominant).** Raising `FD_XFER_CAP` from 180 B
-   (single-fragment) to 460 B makes each `RequestFirmwareData` span ~2 inbound
-   MCTP fragments, cutting a 4096 B download from ~23 round-trips to ~9. This is
+   (single-fragment) to 512 B makes each `RequestFirmwareData` span ~3 inbound
+   MCTP fragments, cutting a 4096 B download from ~23 round-trips to ~8. This is
    the same lever [`../i3c_throughput`](../i3c_throughput) quantifies on the raw
-   transport. The reliable ceiling today is ~2 fragments; `FD_XFER_CAP = 700`
-   (3 fragments) fails, so bigger chunks need the transfer-size negotiation / the
-   3-fragment path looked at first.
-2. **Download poll cadence (marginal).** Dropping `read_fd_request`'s poll from
+   transport.
+2. **The ceiling is the dependency, not the transport.** `FD_XFER_CAP = 512` is
+   the max: `pldm-common`'s `RequestFirmwareDataResponse::encode` rejects a
+   payload over its `MAX_TRANSFER_SIZE = 512` constant (`700` fails with
+   `BufferTooShort`). The ring/transport already carry 4 fragments, so **closing
+   the rest of the gap to upstream's ~1300 B/s means raising that constant in the
+   pldm-common dependency** (OpenPRoT/pldm-lib), then larger chunks follow.
+3. **Download poll cadence (marginal).** Dropping `read_fd_request`'s poll from
    50 ms to 1 ms gave only ~4% — the per-chunk cost is firmware/transport round
    trips, not host polling — so the round-trip *count* (lever 1) is what matters.
 

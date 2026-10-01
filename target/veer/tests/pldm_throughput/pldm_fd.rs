@@ -45,12 +45,18 @@ const UA_EID: u8 = 0x0a;
 /// long enough for a stable throughput number, matching how caliptra-mcu-sw
 /// measures its PLDM transfer speed.
 const IMAGE_SIZE: usize = 4096;
-/// Per-chunk transfer cap, deliberately bigger than one single-fragment MTU
-/// (241 B): each `RequestFirmwareData` response spans ~2 inbound MCTP fragments,
-/// which the N=4 inbound ring queues and the FD's MCTP stack reassembles — fewer,
-/// bigger download round-trips. Kept within the ring depth (<= 4 fragments) and
-/// FD_MAX_MSG (1024).
-const FD_XFER_CAP: usize = 460;
+/// Per-chunk transfer cap, bigger than one single-fragment MTU (241 B): each
+/// `RequestFirmwareData` response spans ~3 inbound MCTP fragments, which the N=4
+/// inbound ring queues and the FD's MCTP stack reassembles — fewer, bigger
+/// download round-trips.
+///
+/// 512 is the ceiling: `pldm-common`'s `RequestFirmwareDataResponse::encode`
+/// rejects a payload larger than its `MAX_TRANSFER_SIZE = 512` constant
+/// (`FD_XFER_CAP = 700` fails with `BufferTooShort`). Going bigger — the way to
+/// close the rest of the gap to upstream's ~1300 B/s — needs that constant
+/// raised in the pldm-common dependency; the transport/ring already handle 4
+/// fragments (see target/veer/tests/i3c_throughput).
+const FD_XFER_CAP: usize = 512;
 /// How long the responder waits for a UA command while idle. Large, like the
 /// AST10x0 reference FD: `run_terminus` is called once and blocks here between
 /// commands, rather than being re-entered in a tight poll loop (that churn of
