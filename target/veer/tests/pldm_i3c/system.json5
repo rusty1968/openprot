@@ -1,0 +1,109 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// VeeR on-target test for PLDM over MCTP over I3C.
+//
+// One app, three processes — the mctp_i3c topology with the echo app replaced
+// by a PLDM Firmware Device:
+//
+//   i3c_server  -- owns the I3C peripheral and PIC IRQ 2, runs the reactor.
+//   mctp_server -- MCTP router over I3cSender/MctpI3cReceiver (i3c client),
+//                  serving MCTP app clients on channel handler "mctp".
+//   pldm_fd     -- runs FirmwareDevice::run_terminus (openprot-pldm-service)
+//                  with responder+requester MctpClients over "mctp"; the host
+//                  plays the Update Agent.
+//
+// pldm_fd gets more flash/ram than the echo app: pldm-lib is large, and the FD
+// carries a 1 KB message buffer plus the mock image.
+{
+  arch: {
+    type: "riscv",
+  },
+  kernel: {
+    flash_start_address: 0x40000000,
+    // Kernel code+data must fit here: with pldm-lib in the image the kernel's
+    // BSS runs to ~0x400114fc, so 0x10000 overflowed into the app code region
+    // at flash_start+flash_size and boot-time BSS-zeroing wiped the apps'
+    // _start. 0x18000 clears it; total flash (this + app) must still end by
+    // ram_start (0x40040000).
+    flash_size_bytes: 0x18000,
+    ram_start_address: 0x40040000,
+    ram_size_bytes: 0x8000,
+  },
+  apps: [
+    {
+      name: "pldm_i3c",
+      // Total FLASH (kernel 0x18000 + this) must end before kernel ram_start
+      // (0x40040000): 0x18000 + 0x28000 = 0x40000. App code is only ~25 KB.
+      flash_size_bytes: 0x28000,
+      processes: [
+        {
+          name: "i3c_server",
+          ram_size_bytes: 0x4000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            {
+              name: "i3c_irq",
+              type: "interrupt",
+              irqs: [{ name: "i3c", number: 2 }],
+            },
+            { name: "channel", type: "channel_handler" },
+            {
+              type: "thread",
+              name: "i3c_server_thread",
+              kernel_stack_size_bytes: 2048,
+            },
+          ],
+          memory_mappings: [
+            {
+              name: "i3c_regs",
+              type: "device",
+              start_address: 0x20004000,
+              size_bytes: 0x1000,
+            },
+          ],
+        },
+        {
+          name: "mctp_server",
+          ram_size_bytes: 0x10000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            { name: "mctp", type: "channel_handler" },
+            {
+              name: "i3c",
+              type: "channel_initiator",
+              handler_process: "i3c_server",
+              handler_object_name: "channel",
+            },
+            {
+              type: "thread",
+              name: "mctp_server_thread",
+              kernel_stack_size_bytes: 4096,
+            },
+          ],
+        },
+        {
+          name: "pldm_fd",
+          // App RAM is assigned upward from the kernel RAM region: i3c_server at
+          // 0x40048000, then mctp_server, then pldm_fd ending at 0x4006c000 with
+          // these sizes. That must stay below the kernel boot stack, which the
+          // veer linker template puts at the top of SRAM (0x40080000).
+          ram_size_bytes: 0x10000,
+          objects: [
+            {
+              name: "mctp",
+              type: "channel_initiator",
+              handler_process: "mctp_server",
+              handler_object_name: "mctp",
+            },
+            {
+              type: "thread",
+              name: "pldm_fd_thread",
+              kernel_stack_size_bytes: 4096,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+}

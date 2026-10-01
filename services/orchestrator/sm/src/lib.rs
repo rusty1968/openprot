@@ -4,9 +4,9 @@
 //! `openprot_orchestrator_sm` — the eRoT boot-sequence state machine.
 //!
 //! This is the pure decision core: it describes side effects as [`Effect`]
-//! values rather than performing them; the surrounding OpenPRoT shell carries
-//! them out via a [`Platform`] impl. No concrete hardware appears here — the
-//! machine is generic over an opaque [`ComponentId`].
+//! values rather than performing them; the surrounding OpenPRoT platform
+//! driver carries them out via a [`Platform`] impl. No concrete hardware
+//! appears here — the machine is generic over an opaque [`ComponentId`].
 //!
 //! Three invariants define the boundary:
 //!   1. **Effects flow through [`Sink`]** — fresh per event, drained afterward.
@@ -27,21 +27,20 @@ pub use model::*;
 // deployment. The board owns `N` (chain length), `E` (effect-buffer size) and
 // max_retry.
 
-/// Upper bound on how many events one settle can queue: the triggering outside
-/// event, at most one `Emit` follow-up (`RecoveryFailed`, emitted at most once
-/// before latching), and at most one injected `EffectFailed` (de-duplicated in
-/// `dispatch_with` — it is idempotent and terminal, so a second is never
-/// queued). Three total; `PENDING_CAP` keeps headroom above that so the pushes
-/// in `dispatch_with` can never overflow.
+/// Upper bound on events queued at once inside `dispatch_with`. The queue
+/// pops as it settles, so this bounds *in-flight* events, not a run's total
+/// length: one batch can queue at most one `Emit` follow-up plus one returned
+/// event per external effect. Executors that return an event for many effects
+/// of one batch can overflow this; overflow is fail-closed (see
+/// `dispatch_with`), never silent loss.
 const PENDING_CAP: usize = 8;
 
-/// Compile-time floor tying the queue capacity to that worst case, mirroring
-/// `Rot::EFFECT_CAP_OK` for the effect buffer. Evaluated at build time (an
-/// anonymous `const`), so an under-sized `PENDING_CAP` fails to compile rather
-/// than risking a runtime overflow.
+/// Compile-time floor: room for an `Emit` follow-up, a returned event, and
+/// the injected `EffectFailed`. Evaluated at build time (an anonymous
+/// `const`), so an under-sized `PENDING_CAP` fails to compile.
 const _: () = assert!(
     PENDING_CAP >= 3,
-    "PENDING_CAP must hold one outside event + one Emit follow-up + one EffectFailed",
+    "PENDING_CAP must hold an Emit follow-up + a returned event + EffectFailed",
 );
 
 /// Result of dispatching one event to a state (or its superstate).
@@ -152,7 +151,7 @@ struct ComponentStatus {
     retry: u8,
     /// Set while this component has been released from reset but has not yet
     /// reported its boot-progress signal ([`Event::ComponentReady`] for an
-    /// `Active` component, [`Event::Booted`] for a `Passive` one). The shell
+    /// `Active` component, [`Event::Booted`] for a `Passive` one). The platform driver
     /// arms a per-component watchdog on release; this bit is what a later
     /// [`Event::Timeout`] consults to tell a real boot failure from a stale or
     /// spurious timeout. Orthogonal to `lifecycle`: a gated component owes no
@@ -187,6 +186,22 @@ impl Default for ComponentStatus {
 /// default. `E` must be at least `2 * N + 2` (enforced in [`Rot::new`]).
 pub struct Rot<const N: usize, const E: usize> {
     chain: heapless::Vec<(ComponentId, ComponentAttrs), N>,
+    /// Index into `chain` of the component currently under verification, or the
+    /// past-the-end sentinel `chain.len()` once the walk is done. Only
+    /// `chain[cursor]` can be released: a `VerificationPassed` for any other id
+    /// is stale or out of turn and is dropped.
+    ///
+    /// While the walk runs (`PreSupervision` and `AwaitingReady`) the cursor
+    /// never points at a gated component. Gating the component under
+    /// verification therefore has to move the cursor past it, which
+    /// [`handle_corruption_advancing`](Self::handle_corruption_advancing) does:
+    /// a verdict already in flight then fails the `chain[cursor]` check and is
+    /// dropped instead of releasing a component the cascade just isolated.
+    /// `property_isolation_is_sticky_under_random_sequences` guards this.
+    ///
+    /// `Recovering` is the exception: `VerificationFailed` leaves the cursor on
+    /// the failed component and a corruption report can gate it there. Entry to
+    /// `PreSupervision` re-walks from 0, which restores the invariant.
     cursor: u8,
     /// One record per chain component (parallel to `chain` by index). Each
     /// [`ComponentStatus`] holds the component's service `lifecycle` (`Isolated`
@@ -316,7 +331,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     }
 
     /// Record that `id` has been released and now owes a boot-progress signal.
-    /// Paired with the `ReleaseReset` emitted at each release site: the shell
+    /// Paired with the `ReleaseReset` emitted at each release site: the platform driver
     /// arms its per-component boot watchdog there, and this arms ours. Also
     /// marks the component *live* (`released`), which a later re-entry to
     /// [`State::PreSupervision`] uses to quiesce it before re-verifying.
@@ -425,18 +440,72 @@ impl<const N: usize, const E: usize> Rot<N, E> {
         }
     }
 
-    /// Shared `CorruptionDetected` handling, called from both `PreSupervision`
-    /// (directly) and `SupervisingPlatform` (via its superstate handler).
-    /// Delegates the policy interpretation to [`gate_by_policy`](Self::gate_by_policy)
-    /// so this path and the recovery-exhaustion path can never diverge:
+    /// Recovery is over for `failed` without success: gate per policy
+    /// (`Isolable`/`Cascading` skip; `Required` reports + latches `Locked`).
+    /// Shared by the retry-cap path (`Restored`, count exhausted) and the
+    /// platform's `RecoveryUnavailable` path, so the two can never diverge.
+    fn exhaust_recovery(&mut self, ctx: &mut Sink<E>, failed: ComponentId) -> Outcome {
+        match self.gate_by_policy(ctx, failed) {
+            Gating::Gated => {
+                self.clear_retry(failed);
+                Outcome::Transition(State::PreSupervision)
+            }
+            // `Required`, or an unknown/missing id: report the component that
+            // forced the halt, then lock down. The report precedes the
+            // internal `Emit`, so it is actuated before the machine moves
+            // toward `Locked`.
+            Gating::NotGated => {
+                ctx.emit(Effect::ReportRecoveryFailed(failed));
+                ctx.emit(Effect::Emit(Event::RecoveryFailed));
+                Outcome::Handled
+            }
+        }
+    }
+
+    /// Shared `CorruptionDetected` handling. Delegates the policy interpretation
+    /// to [`gate_by_policy`](Self::gate_by_policy) so this path and the
+    /// recovery-exhaustion path can never diverge:
     /// `Isolable`/`Cascading` → gate the component (single or cascade) and stay
     /// put, so a later re-walk skips it instead of silently re-releasing one we
     /// already found corrupt; `Required` → recover first (the halt-on-exhaustion
     /// decision happens later in `Recovering`).
     fn handle_corruption(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome {
+        // Already isolated: it is held in reset and was reported. Recovering
+        // it restores a component the re-walk skips, and on exhaustion a
+        // `Required` one locks the platform down over a cascade that was
+        // already contained.
+        if self.is_gated(id) {
+            return Outcome::Handled;
+        }
         match self.gate_by_policy(ctx, id) {
             Gating::Gated => Outcome::Handled,
             Gating::NotGated => Outcome::Transition(State::Recovering(id)),
+        }
+    }
+
+    /// `CorruptionDetected` for `PreSupervision` and `AwaitingReady`, the two
+    /// states that release off `chain[cursor]`. Gates by policy, then keeps the
+    /// `cursor` invariant by moving it past the component under verification
+    /// when the cascade gated it. A `Required` corruption gates nothing and
+    /// returns `Transition(Recovering)` unchanged.
+    ///
+    /// Not called from `handle_supervising`: `Recovering`'s cursor is stale
+    /// (`VerificationFailed` left it on the failed component), so advancing
+    /// there would verify mid-recovery or reach `Ready` instead of re-walking.
+    fn handle_corruption_advancing(&mut self, id: ComponentId, ctx: &mut Sink<E>) -> Outcome {
+        let outcome = self.handle_corruption(id, ctx);
+        let cursor_gated = self
+            .chain
+            .get(self.cursor as usize)
+            .is_some_and(|(c, _)| self.is_gated(*c));
+        if !matches!(outcome, Outcome::Handled) || !cursor_gated {
+            return outcome;
+        }
+        let next_idx = (self.cursor as usize).saturating_add(1);
+        if self.advance_to_next_ungated(ctx, next_idx) {
+            Outcome::Handled
+        } else {
+            Outcome::Transition(State::Ready)
         }
     }
 
@@ -445,26 +514,31 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// each newly gated component, including `root` itself — every isolated
     /// device is reported, not just the one that failed.
     fn cascade_hold(&mut self, ctx: &mut Sink<E>, root: ComponentId) {
-        // BFS over the growing isolation front. `frontier` holds the components
-        // gated so far whose dependents still need visiting; `statuses` records
-        // the durable `Isolated` mark for each.
+        // BFS over the components gated so far. `frontier` is also the visited
+        // set: a component already on it is never queued again, so the walk
+        // visits each component once and terminates even on a dependency
+        // cycle.
+        //
+        // Traversal must not skip a component that is already gated. Its own
+        // dependents may still be running, and they are only reachable through
+        // it, so stopping there would leave a component whose dependency is
+        // isolated out of reset. `gate_one` is idempotent, so re-visiting a
+        // gated component emits nothing and only continues the walk.
         let mut frontier: heapless::Vec<ComponentId, N> = heapless::Vec::new();
-        if self.gate_one(ctx, root) {
-            let _ = frontier.push(root);
-        }
+        self.gate_one(ctx, root);
+        let _ = frontier.push(root);
         let mut i = 0;
         while let Some(&holder) = frontier.get(i) {
             i += 1;
-            let mut newly_gated: heapless::Vec<ComponentId, N> = heapless::Vec::new();
+            let mut dependents: heapless::Vec<ComponentId, N> = heapless::Vec::new();
             for &(id, attrs) in self.chain.iter() {
-                if attrs.depends_on == Some(holder) && !self.is_gated(id) {
-                    let _ = newly_gated.push(id);
+                if attrs.depends_on == Some(holder) && !frontier.contains(&id) {
+                    let _ = dependents.push(id);
                 }
             }
-            for id in newly_gated {
-                if self.gate_one(ctx, id) {
-                    let _ = frontier.push(id);
-                }
+            for id in dependents {
+                self.gate_one(ctx, id);
+                let _ = frontier.push(id);
             }
         }
     }
@@ -529,6 +603,12 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     }
                 }
                 Event::VerificationFailed(id) => {
+                    // A verdict from before the gating, for a component the
+                    // cascade has since isolated: recovering it re-walks the
+                    // chain for a device that stays held.
+                    if self.is_gated(*id) {
+                        return Outcome::Handled;
+                    }
                     // Recovery is attempted first for every failure, regardless
                     // of the component's recovery-failure policy (CSA: recover
                     // first, classify only once retries are exhausted).
@@ -542,7 +622,7 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 // exists in the first place. `AttestationChallenge` is left
                 // unhandled here (falls through to `Outcome::Super` and is
                 // discarded) — that's a separate question.
-                Event::CorruptionDetected(id) => self.handle_corruption(*id, ctx),
+                Event::CorruptionDetected(id) => self.handle_corruption_advancing(*id, ctx),
                 // Boot-progress liveness for a passive component released
                 // speculatively earlier in this same walk. Clear its watchdog
                 // even though `PreSupervision` is unsupervised — acting on a
@@ -554,17 +634,39 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     self.clear_awaiting_boot(*id);
                     Outcome::Handled
                 }
-                // Device-agnostic boot-progress watchdog. A passive component
-                // released speculatively can miss its window while the walk is
-                // still in `PreSupervision`; treat that as a boot failure and
-                // recover it, exactly as the supervised states do. A timeout for
-                // a component not awaiting boot (e.g. still under verification)
-                // is spurious and dropped.
+                // Timeout always recovers: silence says nothing about the
+                // image, so a fresh attempt is never futile. Stale ids
+                // (component not awaiting boot) are dropped.
                 Event::Timeout(id) => {
                     if self.is_awaiting_boot(*id) {
                         Outcome::Transition(State::Recovering(*id))
                     } else {
                         Outcome::Handled
+                    }
+                }
+                // A device-reported boot failure. DeviceFatal means the
+                // device itself declared the image unrecoverable by retry,
+                // so Isolable/Cascading components are gated immediately
+                // (no recovery budget burned); Required still recovers
+                // because a different recovery source could help.
+                // Non-fatal kinds recover unconditionally, like Timeout.
+                Event::BootFailed {
+                    id,
+                    checkpoint,
+                    kind,
+                } => {
+                    if !self.is_awaiting_boot(*id) {
+                        return Outcome::Handled;
+                    }
+                    ctx.emit(Effect::ReportBootFailed {
+                        id: *id,
+                        checkpoint,
+                        kind: *kind,
+                    });
+                    if *kind == BootFailureKind::DeviceFatal {
+                        self.handle_corruption_advancing(*id, ctx)
+                    } else {
+                        Outcome::Transition(State::Recovering(*id))
                     }
                 }
                 Event::EffectFailed => Outcome::Transition(State::Locked),
@@ -621,14 +723,38 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     }
                 }
                 Event::VerificationFailed(id) => {
+                    // Same in-flight verdict as above: an isolated component
+                    // does not enter recovery.
+                    if self.is_gated(*id) {
+                        return Outcome::Handled;
+                    }
                     // Recovery is attempted first for every failure, regardless
                     // of the component's recovery-failure policy.
                     Outcome::Transition(State::Recovering(*id))
                 }
-                // `Timeout` is intentionally not handled here: it falls through
-                // to `handle_supervising`, which runs the device-agnostic
-                // boot-progress watchdog uniformly across every supervised state
-                // (an `AwaitingReady` timeout is no longer special-cased).
+                // Releases off `chain[cursor]` too, so the cursor must move
+                // off a component the cascade gated. `Handled` keeps `awaiting`.
+                Event::CorruptionDetected(id) => self.handle_corruption_advancing(*id, ctx),
+                // DeviceFatal: the device declared the image unrecoverable.
+                // Gate Isolable/Cascading immediately (cursor-advancing),
+                // recover Required. Non-fatal kinds and Timeout fall through
+                // to handle_supervising below.
+                Event::BootFailed {
+                    id,
+                    kind: BootFailureKind::DeviceFatal,
+                    checkpoint,
+                } if self.is_awaiting_boot(*id) => {
+                    ctx.emit(Effect::ReportBootFailed {
+                        id: *id,
+                        checkpoint,
+                        kind: BootFailureKind::DeviceFatal,
+                    });
+                    self.handle_corruption_advancing(*id, ctx)
+                }
+                // `Timeout` and non-fatal `BootFailed` fall through to
+                // `handle_supervising`, which runs the device-agnostic
+                // boot-progress watchdog uniformly across every supervised
+                // state.
                 _ => Outcome::Super,
             },
 
@@ -708,26 +834,20 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                     if attempts < self.max_retry {
                         Outcome::Transition(State::PreSupervision)
                     } else {
-                        // Retries exhausted: gate via the same `gate_by_policy`
-                        // the runtime-corruption path uses, so the two can never
-                        // disagree. Gated → continue the walk; NotGated
-                        // (Required/unknown) → lock down.
-                        match self.gate_by_policy(ctx, failed) {
-                            Gating::Gated => {
-                                self.clear_retry(failed);
-                                Outcome::Transition(State::PreSupervision)
-                            }
-                            // `Required`, or an unknown/missing id: report the
-                            // component that forced the halt, then lock down.
-                            // The report precedes the internal `Emit`, so it is
-                            // actuated before the machine moves toward `Locked`.
-                            Gating::NotGated => {
-                                ctx.emit(Effect::ReportRecoveryFailed(failed));
-                                ctx.emit(Effect::Emit(Event::RecoveryFailed));
-                                Outcome::Handled
-                            }
-                        }
+                        // Retries exhausted: gate via the same shared arm the
+                        // platform's `RecoveryUnavailable` path uses, so the
+                        // two can never disagree.
+                        self.exhaust_recovery(ctx, failed)
                     }
+                }
+                Event::RecoveryUnavailable(id) => {
+                    if *id != failed {
+                        return Outcome::Handled; // same guard as Restored
+                    }
+                    // Authoritative: the platform is out of sources, so the
+                    // machine does not wait for the retry count to run out
+                    // (does not call `bump_retry`).
+                    self.exhaust_recovery(ctx, failed)
                 }
                 Event::RecoveryFailed => Outcome::Transition(State::Locked),
                 _ => Outcome::Super,
@@ -754,10 +874,11 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     /// supervisor, is discarded).
     ///
     /// The corruption guarantee, however, *does* hold in `PreSupervision`: that
-    /// state handles [`Event::CorruptionDetected`] directly (via
-    /// [`handle_corruption`](Self::handle_corruption)) rather than through this
-    /// handler, since routing it here would also pull in the attestation
-    /// behavior above. CSA defines no mechanism guaranteeing a corruption report
+    /// state handles [`Event::CorruptionDetected`] in its own arm, via
+    /// [`handle_corruption_advancing`](Self::handle_corruption_advancing), since
+    /// routing it here would also pull in the attestation behavior above.
+    /// `AwaitingReady` does the same; the cursor rationale is on the helper.
+    /// CSA defines no mechanism guaranteeing a corruption report
     /// arrives for an already-released component's *live, executing* state (its
     /// only at-rest mechanism — background NVM integrity polling — is explicitly
     /// scoped to "at rest"/"between boots", not an in-progress boot's chain
@@ -771,6 +892,8 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 ctx.emit(Effect::SignAttestation);
                 Outcome::Handled
             }
+            // Reached from `Ready` and `Recovering` only: `PreSupervision`,
+            // `AwaitingReady` and `Updating` handle this in their own arms.
             Event::CorruptionDetected(id) => self.handle_corruption(*id, ctx),
             // Boot-progress signals arriving after the walk left `PreSupervision`
             // / `AwaitingReady` (e.g. once the machine is already `Ready`): clear
@@ -780,16 +903,35 @@ impl<const N: usize, const E: usize> Rot<N, E> {
                 self.clear_awaiting_boot(*id);
                 Outcome::Handled
             }
-            // Device-agnostic boot-progress watchdog across every supervised
-            // state: a released component that never reported in before its
-            // window closed is recovered like any other boot failure. A timeout
-            // for a component not awaiting boot (already reported, gated, or
-            // never released) is stale/spurious and dropped.
+            // Timeout always recovers: silence is ambiguous, so retrying
+            // is never futile. Stale ids (already booted) are dropped.
             Event::Timeout(id) => {
                 if self.is_awaiting_boot(*id) {
                     Outcome::Transition(State::Recovering(*id))
                 } else {
                     Outcome::Handled
+                }
+            }
+            // Same DeviceFatal split as PreSupervision/AwaitingReady, but
+            // non-advancing: Ready/Recovering/Updating are not walking the
+            // chain, so the cursor is not the walk position.
+            Event::BootFailed {
+                id,
+                checkpoint,
+                kind,
+            } => {
+                if !self.is_awaiting_boot(*id) {
+                    return Outcome::Handled;
+                }
+                ctx.emit(Effect::ReportBootFailed {
+                    id: *id,
+                    checkpoint,
+                    kind: *kind,
+                });
+                if *kind == BootFailureKind::DeviceFatal {
+                    self.handle_corruption(*id, ctx)
+                } else {
+                    Outcome::Transition(State::Recovering(*id))
                 }
             }
             // A new update cannot start from any supervised state except
@@ -878,13 +1020,13 @@ impl<const N: usize, const E: usize> Rot<N, E> {
     }
 }
 
-/// Signals that the shell could not carry out an [`Effect`]. The machine does
-/// not need the shell's error detail — **every** actuation failure is treated
-/// the same, fail-closed: the driver injects [`Event::EffectFailed`] and the
+/// Signals that the platform driver could not carry out an [`Effect`]. The machine does
+/// not need the driver's error detail — **every** actuation failure is treated
+/// the same, fail-closed: the orchestrator injects [`Event::EffectFailed`] and the
 /// machine latches to [`State::Locked`]. This blanket policy is deliberate and
 /// is what lets the failure signal stay a payload-less marker; a future design
 /// that needs per-effect recovery must add a *new*, descriptive event rather
-/// than widen this type. The shell logs the specifics on its side.
+/// than widen this type. The driver logs the specifics on its side.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct EffectError;
 
@@ -892,10 +1034,28 @@ pub struct EffectError;
 /// [`EffectError`] if it could not be performed. Never called with
 /// [`Effect::Emit`] — the orchestrator consumes those internally.
 ///
+/// `Ok(Some(event))` feeds back what the effect produced without blocking
+/// (e.g. a verification verdict from an in-process check); the orchestrator
+/// queues it and settles it in the same dispatch run. At most one event per
+/// effect. Immediate results belong here, not in a driver-side queue,
+/// so the orchestrator sees them in the order they were produced.
+/// `execute` must return without blocking:
+/// results that require I/O or arrive later (boot progress, timer expiry,
+/// a verdict from a remote crypto service) are delivered as their own
+/// outside events via `dispatch`.
+///
+/// Failure stays on the error channel, never in a returned event: `Err` is
+/// checked between effects, so a failed actuation aborts the rest of the
+/// batch — a feedback event cannot do that.
+///
 /// Contract the state machine relies on:
 /// - **Honest, complete feedback.** The core's correctness rests entirely on
-///   the event stream the shell feeds back; dropping, reordering, or
+///   the event stream the driver feeds back; dropping, reordering, or
 ///   synthesizing events silently breaks the state machine's invariants.
+/// - **Returned events quiesce.** Every returned event reports a result the
+///   reducer consumes (its retry budgets bound re-verification cycles). An
+///   executor that manufactures an event for every effect keeps one dispatch
+///   run alive indefinitely.
 /// - **`AssertReset` holds, it does not pulse.** A reset must keep the component
 ///   quiesced and non-executing until its matching `ReleaseReset`. The core's
 ///   at-rest verification guarantee depends on this: it re-asserts reset on
@@ -905,10 +1065,20 @@ pub struct EffectError;
 ///   component resume before verification and void that guarantee.
 /// - **A failed [`Effect::LatchLockdown`] is a hard fault.** Lockdown is the top
 ///   of the escalation ladder — the core has nothing stronger to emit and
-///   will *believe* it is `Locked`. The shell must treat that failure as
+///   will *believe* it is `Locked`. The driver must treat that failure as
 ///   terminal (halt/reset), not a recoverable error.
+/// - **[`Effect::RecoverComponent`] reports its verdict as an event, not an
+///   `execute` error.** On success the driver feeds back
+///   [`Event::Restored`]; when its configured recovery sources for that
+///   component are exhausted, it feeds back [`Event::RecoveryUnavailable`]
+///   instead — never [`EffectError`]. `EffectError` from a `RecoverComponent`
+///   call is reserved for a genuine actuation fault (e.g. a bus error during
+///   the image swap), which fails closed to [`State::Locked`] unconditionally.
+///   Reporting "out of images" that way would lock the whole platform down
+///   even for an `Isolable`/`Cascading` component, instead of letting it be
+///   gated per [`FailurePolicy`] like the count-driven exhaustion path.
 pub trait Platform {
-    fn execute(&mut self, effect: Effect) -> Result<(), EffectError>;
+    fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError>;
 }
 
 /// A handle for a caller's own event loop. Owns the machine's storage
@@ -990,61 +1160,77 @@ impl<const N: usize, const E: usize> Orchestrator<N, E> {
         }
     }
 
-    /// Handle one event all the way through — including any [`Effect::Emit`]
-    /// follow-ups — calling `on_effect` for each external effect in order.
+    /// Handle one event all the way through — every [`Effect::Emit`]
+    /// follow-up and every event the executors return — calling `on_effect`
+    /// for each external effect in order. One call runs to quiescence.
     ///
-    /// If `on_effect` reports an [`EffectError`], the driver injects an
-    /// [`Event::EffectFailed`] into the same run, so a failed actuation is
-    /// handled fail-closed (the machine latches to [`State::Locked`]) rather
-    /// than silently ignored.
+    /// If `on_effect` reports an [`EffectError`], the orchestrator injects an
+    /// [`Event::EffectFailed`] at the *front* of the queue, so a failed
+    /// actuation is handled fail-closed: the latch settles next, and feedback
+    /// still queued behind it drains into [`State::Locked`] (discarded)
+    /// instead of actuating hardware after a failure. A pending-queue
+    /// overflow is handled the same way: losing a returned event would break
+    /// the honest-feedback contract, so the run latches instead.
     pub fn dispatch_with(
         &mut self,
         event: Event,
-        mut on_effect: impl FnMut(Effect) -> Result<(), EffectError>,
+        mut on_effect: impl FnMut(Effect) -> Result<Option<Event>, EffectError>,
     ) {
-        let mut pending: heapless::Vec<Event, PENDING_CAP> = heapless::Vec::new();
+        // Fail-closed latch: `EffectFailed` goes to the *front*, so it settles
+        // next and everything still queued drains into `Locked` (discarded)
+        // instead of actuating hardware after a failure. Prefer evicting the
+        // newest queued event over losing the latch itself.
+        fn latch(pending: &mut heapless::Deque<Event, PENDING_CAP>) {
+            if pending.is_full() {
+                pending.pop_back();
+            }
+            // Dead Err arm: the eviction above guarantees room.
+            let _ = pending.push_front(Event::EffectFailed);
+        }
+
+        let mut pending: heapless::Deque<Event, PENDING_CAP> = heapless::Deque::new();
         // Dead Err arm: `pending` is empty and `PENDING_CAP >= 3` (asserted at
         // build time), so the first push always fits.
-        let _ = pending.push(event);
+        let _ = pending.push_back(event);
+        // `EffectFailed` is injected at most once: it is idempotent and
+        // terminal (drives to `Locked`, which discards everything after). The
+        // only external effect executed after it settles is `Locked`'s own
+        // entry, whose failure must not inject again.
+        let mut failed = false;
 
-        let mut i = 0;
-        while i < pending.len() {
-            let ev = pending[i];
-            i += 1;
-
+        while let Some(ev) = pending.pop_front() {
             let mut buf = Sink::<E>::new();
             self.step(&ev, &mut buf);
 
             for &effect in buf.effects() {
-                match effect {
-                    Effect::Emit(internal) => {
-                        // Dead Err arm: the state machine emits at most one `Emit`
-                        // (`RecoveryFailed`) per settle, well within PENDING_CAP.
-                        let _ = pending.push(internal);
-                    }
-                    external => {
-                        if on_effect(external).is_err() {
-                            // Fail-closed AND fail-fast: abandon the rest of this
-                            // batch so no effect ordered after the failed one hits
-                            // hardware. `step` has already advanced the state as if
-                            // the whole batch applied, so actuating `k+1..` would
-                            // carry out effects for a transition we are about to
-                            // override by latching to `Locked`.
-                            //
-                            // Inject `EffectFailed` once: it is idempotent and
-                            // terminal (drives to `Locked`, which discards
-                            // everything after), so a second injection would be a
-                            // no-op. De-duping against this append-only queue —
-                            // which still holds the first `EffectFailed` as its own
-                            // marker — caps the queue at the worst case
-                            // `PENDING_CAP` is sized for. Dead Err arm: that bound
-                            // is below PENDING_CAP.
-                            if !pending.contains(&Event::EffectFailed) {
-                                let _ = pending.push(Event::EffectFailed);
+                let follow_up = match effect {
+                    // Internal: handle next, never forwarded to the platform.
+                    Effect::Emit(internal) => Some(internal),
+                    external => match on_effect(external) {
+                        Ok(follow_up) => follow_up,
+                        Err(_) => {
+                            // Fail-closed AND fail-fast: abandon the rest of
+                            // this batch. `step` has already advanced the
+                            // state as if the whole batch applied, and the
+                            // latch overrides that transition, so nothing
+                            // ordered after the failure may hit hardware.
+                            if !failed {
+                                failed = true;
+                                latch(&mut pending);
                             }
                             break;
                         }
-                    }
+                    },
+                };
+                if let Some(next) = follow_up
+                    && pending.push_back(next).is_err()
+                    && !failed
+                {
+                    // Queue full: `next` would be lost, breaking the
+                    // honest-feedback contract. Fail closed instead.
+                    failed = true;
+                    latch(&mut pending);
+                    break;
                 }
             }
         }

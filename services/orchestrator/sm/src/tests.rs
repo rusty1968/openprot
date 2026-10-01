@@ -48,9 +48,9 @@ impl Recorder {
 }
 
 impl Platform for Recorder {
-    fn execute(&mut self, effect: Effect) -> Result<(), EffectError> {
+    fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
         self.recorded.push(effect);
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -359,7 +359,7 @@ fn retry_count_resets_after_successful_recovery() {
     ] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
     assert_eq!(orch.state(), State::Ready);
@@ -372,7 +372,7 @@ fn retry_count_resets_after_successful_recovery() {
     ] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
     assert_eq!(orch.state(), State::Ready);
@@ -407,7 +407,7 @@ fn retry_budget_is_per_component() {
     ] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
 
@@ -432,7 +432,7 @@ fn custom_retry_cap_latches_sooner() {
     ] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
     assert_eq!(orch.state(), State::Locked);
@@ -457,7 +457,7 @@ fn custom_capacity_walks_full_chain() {
     ] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
     assert_eq!(orch.state(), State::Ready);
@@ -565,6 +565,175 @@ fn timeout_stale_id_ignored() {
     );
     assert_eq!(state, State::AwaitingReady(Some(C0)));
     assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
+}
+
+/// A retriable `BootFailed` for the awaited component enters recovery,
+/// same as `Timeout`.
+#[test]
+fn boot_failed_retriable_enters_recovering() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::BootFailed {
+                id: C0,
+                checkpoint: "heartbeat",
+                kind: BootFailureKind::DeviceRetriable,
+            },
+        ],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
+    assert!(effects.contains(&Effect::ReportBootFailed {
+        id: C0,
+        checkpoint: "heartbeat",
+        kind: BootFailureKind::DeviceRetriable,
+    }));
+}
+
+/// A fatal `BootFailed` for an `Isolable` component gates it immediately
+/// with no recovery attempt.
+#[test]
+fn boot_failed_fatal_isolable_gates_without_recovery() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_isolable()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::BootFailed {
+                id: C0,
+                checkpoint: "bl1",
+                kind: BootFailureKind::DeviceFatal,
+            },
+        ],
+    );
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
+    assert!(effects.contains(&Effect::AssertReset(C0)));
+    assert!(effects.contains(&Effect::ReportIsolated(C0)));
+    assert!(effects.contains(&Effect::ReportBootFailed {
+        id: C0,
+        checkpoint: "bl1",
+        kind: BootFailureKind::DeviceFatal,
+    }));
+}
+
+/// A fatal `BootFailed` for a `Required` component still enters recovery
+/// (the device said "this image is bad" but a different recovery source
+/// could help).
+#[test]
+fn boot_failed_fatal_required_still_recovers() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::BootFailed {
+                id: C0,
+                checkpoint: "bl1",
+                kind: BootFailureKind::DeviceFatal,
+            },
+        ],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
+}
+
+/// A `BootFailed` for a component not awaiting boot is stale and dropped.
+#[test]
+fn boot_failed_stale_id_ignored() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::BootFailed {
+                id: C1,
+                checkpoint: "self-test",
+                kind: BootFailureKind::DeviceFatal,
+            },
+        ],
+    );
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
+}
+
+/// A fatal `BootFailed` in `PreSupervision` for a speculatively released
+/// passive isolable component gates it and advances the cursor past it,
+/// same as `CorruptionDetected`.
+#[test]
+fn boot_failed_fatal_in_pre_supervision_gates_passive() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_isolable()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::BootFailed {
+                id: C0,
+                checkpoint: "self-test",
+                kind: BootFailureKind::DeviceFatal,
+            },
+            Event::VerificationPassed(C1),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::AssertReset(C0)));
+    assert!(effects.contains(&Effect::ReportIsolated(C0)));
+    assert!(effects.contains(&Effect::ReportBootFailed {
+        id: C0,
+        checkpoint: "self-test",
+        kind: BootFailureKind::DeviceFatal,
+    }));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
+}
+
+/// A fatal `BootFailed` in `Ready` for a passive isolable component that
+/// was released speculatively and still owes a boot signal: gates it
+/// without recovery and stays `Ready`.
+#[test]
+fn boot_failed_fatal_in_ready_gates_passive() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_isolable()),
+            (C1, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationPassed(C1),
+            // Both released; machine is Ready with C0/C1 still awaiting boot.
+            Event::BootFailed {
+                id: C0,
+                checkpoint: "pcie-link",
+                kind: BootFailureKind::DeviceFatal,
+            },
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::AssertReset(C0)));
+    assert!(effects.contains(&Effect::ReportIsolated(C0)));
+    assert!(effects.contains(&Effect::ReportBootFailed {
+        id: C0,
+        checkpoint: "pcie-link",
+        kind: BootFailureKind::DeviceFatal,
+    }));
+    assert!(!effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
 /// An out-of-chain id in a `VerificationFailed` report is dropped: the core
@@ -979,6 +1148,363 @@ fn cascading_runtime_corruption_cascades_transitively() {
     assert!(!effects.contains(&Effect::LatchLockdown));
 }
 
+/// A cascade that fires mid-walk gates components the cursor has not reached
+/// yet, and the walk then skips them: corruption of C1 arrives while the walk
+/// is still verifying C0, so C1 -> C2 -> C3 are all gated before their turn.
+/// No `ReadFirmware` is ever emitted for them, and the walk reaches the end of
+/// the chain and goes to `Ready`. The post-walk cascade tests cannot cover this:
+/// there the cursor is already past every component when the cascade fires.
+#[test]
+fn mid_walk_cascade_skips_unreached_dependents() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+            (C3, ComponentAttrs::passive_required().with_depends_on(C2)),
+        ]),
+        &[
+            BOOT,                          // walk starts at C0
+            Event::CorruptionDetected(C1), // cascade C1 -> C2 -> C3, cursor still on C0
+            Event::VerificationPassed(C0), // advance: nothing ungated is left
+        ],
+    );
+    // The rest of the chain is gated, so the walk is done.
+    assert_eq!(state, State::Ready);
+    // The whole two-hop chain is isolated and reported, though the walk never
+    // reached any of it.
+    for id in [C1, C2, C3] {
+        assert!(effects.contains(&Effect::AssertReset(id)));
+        assert!(effects.contains(&Effect::ReportIsolated(id)));
+    }
+    // Verification is never requested for a gated component, at any depth.
+    for id in [C1, C2, C3] {
+        assert!(!effects.contains(&Effect::ReadFirmware(id)));
+        assert!(!effects.contains(&Effect::VerifyFirmware(id)));
+        assert!(!effects.contains(&Effect::ReleaseReset(id)));
+    }
+    // C0 is untouched by the cascade: it verifies and is released as usual.
+    assert!(effects.contains(&Effect::ReleaseReset(C0)));
+    assert!(!effects.contains(&Effect::AssertReset(C0)));
+}
+
+/// Corruption during recovery gates and stops there. `Recovering`'s cursor is
+/// stale, so advancing it would verify C2 mid-recovery, or end the walk at
+/// `Ready` and skip the re-walk recovery exists to run.
+#[test]
+fn corruption_during_recovery_does_not_advance_the_walk() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_cascading()),
+            (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+            (C2, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationFailed(C0), // cursor stays on C0
+            Event::CorruptionDetected(C0), // gates C0 -> C1
+        ],
+    );
+    assert_eq!(state, State::Recovering(C0));
+    assert!(effects.contains(&Effect::ReportIsolated(C0)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    // The walk does not resume from inside recovery.
+    assert!(!effects.contains(&Effect::ReadFirmware(C2)));
+    assert!(!effects.contains(&Effect::VerifyFirmware(C2)));
+}
+
+/// A cascade during `AwaitingReady` gates the component under verification, so
+/// the walk moves on to C3. C1's in-flight verdict no longer matches the cursor
+/// and is dropped, leaving C1 in reset. `awaiting` survives the `Handled`.
+#[test]
+fn mid_walk_cascade_in_awaiting_ready_drops_late_verdict() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+            (C3, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // releases C0, cursor on C1
+            Event::CorruptionDetected(C1), // gates C1 -> C2, cursor moves to C3
+            Event::VerificationPassed(C1), // in flight before the gating
+        ],
+    );
+    // Still awaiting C0's readiness: the cursor moved, the payload is
+    // unchanged.
+    assert_eq!(state, State::AwaitingReady(Some(C0)));
+    for id in [C1, C2] {
+        assert!(effects.contains(&Effect::ReportIsolated(id)));
+        assert!(!effects.contains(&Effect::ReleaseReset(id)));
+    }
+    assert!(effects.contains(&Effect::ReadFirmware(C3)));
+    assert!(effects.contains(&Effect::VerifyFirmware(C3)));
+}
+
+/// A component gated while it is under verification is never released by its
+/// own in-flight verdict. Release keys off `chain[cursor]` alone, so leaving
+/// the cursor on a component the cascade just isolated would take it out of
+/// reset. The cursor moves past it instead and the walk continues to C2.
+#[test]
+fn gating_the_component_under_verification_never_releases_it() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_cascading()),
+            (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+            (C2, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,                          // cursor on C0, awaiting its verdict
+            Event::CorruptionDetected(C0), // gates C0 and C1, cursor moves to C2
+            Event::VerificationPassed(C0), // in flight before the gating: must not release
+            Event::VerificationPassed(C2),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    // Both are gated and reported before the cursor moves.
+    assert!(effects.contains(&Effect::ReportIsolated(C0)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    // Neither isolated component is taken out of reset.
+    assert!(!effects.contains(&Effect::ReleaseReset(C0)));
+    assert!(!effects.contains(&Effect::ReleaseReset(C1)));
+    // The walk continues past them instead of stalling on C0's verdict.
+    assert!(effects.contains(&Effect::ReadFirmware(C2)));
+    assert!(effects.contains(&Effect::ReleaseReset(C2)));
+    assert!(!effects.contains(&Effect::ReadFirmware(C1)));
+}
+
+/// The same gating with the rest of the chain gated too: the walk has no
+/// component to move on to, so it ends in `Ready` with everything held in
+/// reset. A non-`Required` cascade never escalates to lockdown.
+#[test]
+fn gating_the_last_ungated_component_ends_the_walk() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_cascading()),
+            (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+        ]),
+        &[
+            BOOT,
+            Event::CorruptionDetected(C0), // gates the whole chain
+            Event::VerificationPassed(C0), // in flight before the gating
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(!effects.contains(&Effect::ReleaseReset(C0)));
+    assert!(!effects.contains(&Effect::ReleaseReset(C1)));
+    assert!(!effects.contains(&Effect::ReadFirmware(C1)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
+/// The `AwaitingReady` analog of
+/// `gating_the_last_ungated_component_ends_the_walk`: with nothing ungated left
+/// to move to, the walk ends at `Ready`, the isolated pair held and no
+/// lockdown. C0's `ComponentReady` never arrives; the walk does not wait
+/// for it.
+#[test]
+fn gating_the_rest_of_the_chain_in_awaiting_ready_ends_the_walk() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // releases C0, cursor on C1
+            Event::CorruptionDetected(C1), // gates C1 -> C2, nothing left ungated
+            Event::VerificationPassed(C1), // in flight before the gating
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    for id in [C1, C2] {
+        assert!(effects.contains(&Effect::ReportIsolated(id)));
+        assert!(!effects.contains(&Effect::ReleaseReset(id)));
+    }
+    assert!(!effects.contains(&Effect::ReadFirmware(C2)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
+/// The other half of the cursor rule: gating a component the cursor has not
+/// reached leaves the cursor alone, so C1's verdict still releases it. An
+/// unconditional advance would make that verdict a mismatch and leave a
+/// verified component in reset. C3 depends on C2 so the cascade has a
+/// dependent to gate.
+#[test]
+fn cascade_in_awaiting_ready_below_the_cursor_leaves_it_alone() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_required()),
+            (C2, ComponentAttrs::passive_cascading()),
+            (C3, ComponentAttrs::passive_required().with_depends_on(C2)),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // releases C0, cursor on C1
+            Event::CorruptionDetected(C2), // cascade-gates C2 and C3, both below the cursor
+            Event::VerificationPassed(C1), // C1 is still under verification
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    // The cursor never left C1, so its verdict still counts.
+    assert!(effects.contains(&Effect::ReleaseReset(C1)));
+    // C2 and C3 are gated before their turn and the walk skips them.
+    for id in [C2, C3] {
+        assert!(effects.contains(&Effect::ReportIsolated(id)));
+        assert!(!effects.contains(&Effect::ReleaseReset(id)));
+        assert!(!effects.contains(&Effect::ReadFirmware(id)));
+    }
+}
+
+/// The cascade gates the component the `AwaitingReady` slot waits on. The slot
+/// keeps naming it, which changes nothing: `gate_one` cleared its
+/// `awaiting_boot`, a late `ComponentReady` releases nothing, and the walk
+/// reaches `Ready` when the cursor reaches the end of the chain, not when
+/// C0's `ComponentReady` arrives.
+#[test]
+fn gating_the_awaited_component_does_not_stall_the_walk() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_cascading()),
+            (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+            (C2, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // releases C0, awaits its readiness
+            Event::CorruptionDetected(C0), // gates the awaited C0 and C1
+            Event::ComponentReady(C0),     // in flight before the gating
+            Event::VerificationPassed(C1), // in flight before the gating
+            Event::VerificationPassed(C2),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    // C0 was live and goes back into reset; C1 goes with it. C1 had already
+    // been read and verified when C0's verdict advanced the cursor, so its own
+    // verdict is the one that must not release it.
+    assert!(effects.contains(&Effect::AssertReset(C0)));
+    for id in [C0, C1] {
+        assert!(effects.contains(&Effect::ReportIsolated(id)));
+    }
+    assert!(!effects.contains(&Effect::ReleaseReset(C1)));
+    assert!(effects.contains(&Effect::ReadFirmware(C2)));
+    assert!(effects.contains(&Effect::ReleaseReset(C2)));
+}
+
+/// A failure verdict in flight when the cascade gated the component does not
+/// put it into recovery.
+#[test]
+fn late_verification_failed_for_gated_component_is_dropped() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::active_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+            (C3, ComponentAttrs::passive_required()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0), // releases C0, cursor on C1
+            Event::CorruptionDetected(C1), // gates C1 -> C2, cursor moves to C3
+            Event::VerificationFailed(C1), // in flight before the gating
+        ],
+    );
+    assert_ne!(state, State::Recovering(C1), "isolated C1 entered recovery");
+    assert!(
+        !effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }),
+        "RecoverComponent fired for isolated C1"
+    );
+}
+
+/// A contained cascade does not lock the platform down through the `Required`
+/// component it held. Three corruption reports for the isolated C1 would
+/// otherwise exhaust its retries, and `gate_by_policy` would read C1's own
+/// `Required` policy and escalate. MAX_RETRY is 3.
+#[test]
+fn contained_cascade_does_not_lock_down_via_its_required_dependent() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_cascading()),
+            (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+        ]),
+        &[
+            BOOT,
+            Event::CorruptionDetected(C0), // gates C0, cascade-holds C1
+            Event::CorruptionDetected(C1), // isolated C1 into recovery, attempt 0
+            Event::Restored(C1),
+            Event::CorruptionDetected(C1), // attempt 1
+            Event::Restored(C1),
+            Event::CorruptionDetected(C1), // attempt 2
+            Event::Restored(C1),           // retries exhausted
+        ],
+    );
+    assert!(
+        !effects.contains(&Effect::LatchLockdown),
+        "contained cascade reached lockdown, state {state:?}"
+    );
+}
+
+/// A corruption report for a component the cascade already isolated is
+/// dropped.
+#[test]
+fn corruption_report_for_an_isolated_component_is_dropped() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_cascading()),
+            (C1, ComponentAttrs::passive_required().with_depends_on(C0)),
+        ]),
+        &[
+            BOOT,
+            Event::CorruptionDetected(C0), // gates C0, cascade-holds C1
+            Event::CorruptionDetected(C1), // C1 is already isolated
+        ],
+    );
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    assert_ne!(state, State::Recovering(C1), "isolated C1 entered recovery");
+    assert!(
+        !effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }),
+        "RecoverComponent fired for cascade-held C1"
+    );
+}
+
+/// A cascade reaches past a component that is already isolated. C1 is gated on
+/// its own first, so the walk from C0 has to continue through it to reach C2.
+/// Stopping at C1 would leave C2 out of reset with both components it depends
+/// on isolated.
+#[test]
+fn cascade_reaches_past_an_already_isolated_component() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_cascading()),
+            (C1, ComponentAttrs::passive_isolable().with_depends_on(C0)),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+        ]),
+        &[
+            BOOT,
+            Event::CorruptionDetected(C1), // isolable: gates C1 alone
+            Event::CorruptionDetected(C0), // cascading: C0 -> C1 -> C2
+            Event::VerificationPassed(C2),
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    for id in [C0, C1, C2] {
+        assert!(effects.contains(&Effect::ReportIsolated(id)));
+        assert!(!effects.contains(&Effect::ReleaseReset(id)));
+    }
+    // C1 is reported once, by the corruption that gated it, not again by the
+    // cascade passing through.
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| **e == Effect::ReportIsolated(C1))
+            .count(),
+        1
+    );
+}
+
 /// Runtime corruption under a non-`Required` policy reports too. This path
 /// never enters recovery at all, so without its own report the isolation would
 /// be silent.
@@ -1029,6 +1555,151 @@ fn required_exhaustion_reports_before_lockdown() {
         report < latch,
         "the report must be actuated before the latch",
     );
+}
+
+/// Platform-signaled recovery exhaustion (`RecoveryUnavailable`) short-circuits
+/// the retry cap: a single event, not `MAX_RETRY` cycles, is enough for an
+/// `Isolable` component to be gated and skipped.
+#[test]
+fn isolable_recovery_unavailable_skips() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationFailed(C1),  // → Recovering(C1)
+            Event::RecoveryUnavailable(C1), // platform: no image left
+            Event::VerificationPassed(C0),  // re-walk from top
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::RecoverComponent { id: C1, attempt: 0 }));
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    assert!(!effects.contains(&Effect::ReleaseReset(C1))); // never released
+    assert!(!effects.contains(&Effect::LatchLockdown)); // NOT a lockdown
+}
+
+/// Platform-signaled recovery exhaustion on a `Required` component reports it
+/// then latches `Locked` — no lockdown-avoidance policy applies to `Required`.
+#[test]
+fn required_recovery_unavailable_locks() {
+    let (effects, state) = drive(
+        passive_required(&[C0]),
+        &[
+            BOOT,
+            Event::VerificationFailed(C0), // → Recovering(C0)
+            Event::RecoveryUnavailable(C0),
+        ],
+    );
+    assert_eq!(state, State::Locked);
+    assert!(effects.contains(&Effect::ReportRecoveryFailed(C0)));
+    assert!(effects.contains(&Effect::LatchLockdown));
+}
+
+/// A `Cascading` root that goes `RecoveryUnavailable` gates itself and its
+/// transitive dependents, exactly like count-driven cascade exhaustion.
+#[test]
+fn cascading_recovery_unavailable_cascades() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_cascading()),
+            (C2, ComponentAttrs::passive_required().with_depends_on(C1)),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationFailed(C1), // → Recovering(C1)
+            Event::RecoveryUnavailable(C1),
+            Event::VerificationPassed(C0), // re-walk from top
+        ],
+    );
+    assert_eq!(state, State::Ready);
+    assert!(effects.contains(&Effect::AssertReset(C1)));
+    assert!(effects.contains(&Effect::AssertReset(C2)));
+    assert!(effects.contains(&Effect::ReportIsolated(C1)));
+    assert!(effects.contains(&Effect::ReportIsolated(C2)));
+    assert!(!effects.contains(&Effect::LatchLockdown));
+}
+
+/// `RecoveryUnavailable` is authoritative and immediate: it exhausts recovery
+/// on the first event regardless of how high `max_retry` is, and never
+/// consults (or bumps) the retry count.
+#[test]
+fn recovery_unavailable_short_circuits_retry_budget() {
+    let mut c = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
+    c.push((C0, ComponentAttrs::passive_isolable()))
+        .expect("fits");
+    c.push((C1, ComponentAttrs::passive_required()))
+        .expect("fits");
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(c.try_into().expect("valid chain"), u8::MAX);
+    let mut effects = Vec::new();
+    for ev in [
+        BOOT,
+        Event::VerificationFailed(C0), // → Recovering(C0)
+        Event::RecoveryUnavailable(C0),
+        Event::VerificationPassed(C1), // re-walk skips gated C0, reaches Ready
+    ] {
+        orch.dispatch_with(ev, |e| {
+            effects.push(e);
+            Ok(None)
+        });
+    }
+    assert_eq!(orch.state(), State::Ready);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::RecoverComponent { .. }))
+            .count(),
+        1,
+        "exactly one recovery attempt before exhaustion",
+    );
+    assert!(effects.contains(&Effect::AssertReset(C0)));
+}
+
+/// A `RecoveryUnavailable` for a component other than the one currently under
+/// recovery is dropped — same guard `Restored` already gets.
+#[test]
+fn recovery_unavailable_other_component_dropped() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationFailed(C1),  // → Recovering(C1)
+            Event::RecoveryUnavailable(C0), // wrong target: dropped
+        ],
+    );
+    assert_eq!(state, State::Recovering(C1));
+    assert!(!effects.contains(&Effect::AssertReset(C1)));
+    assert!(!effects.contains(&Effect::ReportIsolated(C1)));
+}
+
+/// A `RecoveryUnavailable` for an id outside the chain is dropped at the
+/// dispatch boundary, before any handler sees it.
+#[test]
+fn recovery_unavailable_off_chain_dropped() {
+    let (effects, state) = drive(
+        chain(&[
+            (C0, ComponentAttrs::passive_required()),
+            (C1, ComponentAttrs::passive_isolable()),
+        ]),
+        &[
+            BOOT,
+            Event::VerificationPassed(C0),
+            Event::VerificationFailed(C1),  // → Recovering(C1)
+            Event::RecoveryUnavailable(C2), // C2 is not in this chain
+        ],
+    );
+    assert_eq!(state, State::Recovering(C1));
+    assert!(!effects.contains(&Effect::AssertReset(C1)));
 }
 
 /// A component that recovers within its retry budget is not degraded, so
@@ -1146,7 +1817,8 @@ fn required_failure_in_awaiting_ready_enters_recovering() {
 }
 
 /// CorruptionDetected while in AwaitingReady (required component) →
-/// Recovering via the SupervisingPlatform superstate handler.
+/// Recovering. A `Required` corruption gates nothing, so the cursor-advancing
+/// arm returns the transition unchanged.
 #[test]
 fn corruption_in_awaiting_ready_triggers_recovery() {
     let (effects, state) = drive(
@@ -1164,8 +1836,8 @@ fn corruption_in_awaiting_ready_triggers_recovery() {
     assert!(effects.contains(&Effect::RecoverComponent { id: C0, attempt: 0 }));
 }
 
-/// CorruptionDetected while in Updating (required component) → Recovering
-/// via the SupervisingPlatform superstate handler.
+/// CorruptionDetected while in Updating (required component) → Recovering.
+/// Updating has its own arm; it discards the staged image on preemption.
 #[test]
 fn corruption_in_updating_triggers_recovery() {
     let (effects, state) = drive(
@@ -1428,7 +2100,7 @@ fn locked_is_terminal() {
     for ev in [BOOT, Event::VerificationFailed(C0), Event::Restored(C0)] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
     assert_eq!(orch.state(), State::Locked);
@@ -1443,7 +2115,7 @@ fn locked_is_terminal() {
     ] {
         orch.dispatch_with(ev, |e| {
             effects.push(e);
-            Ok(())
+            Ok(None)
         });
     }
     assert_eq!(
@@ -1497,7 +2169,7 @@ fn speculative_read_effects_are_emitted_together() {
 
     orch.dispatch_with(BOOT, |e| {
         effects.push(e);
-        Ok(())
+        Ok(None)
     });
     assert_eq!(
         effects,
@@ -1507,7 +2179,7 @@ fn speculative_read_effects_are_emitted_together() {
     effects.clear();
     orch.dispatch_with(Event::VerificationPassed(C0), |e| {
         effects.push(e);
-        Ok(())
+        Ok(None)
     });
     // All three effects emitted in the same handler, before ComponentReady.
     assert_eq!(
@@ -1547,6 +2219,27 @@ fn single_active_chain_goes_directly_to_ready() {
 fn chain_rejects_empty() {
     let empty = heapless::Vec::<(ComponentId, ComponentAttrs), CAPACITY>::new();
     assert_eq!(Chain::try_from(empty).unwrap_err(), ChainError::Empty);
+}
+
+/// More than `u8::MAX` components is rejected. `cursor` is a `u8` and uses
+/// `chain.len()` as its past-the-end sentinel, so a 256-entry chain would
+/// truncate that sentinel to 0 and the walk would never read as done.
+#[test]
+fn chain_rejects_more_than_u8_max_components() {
+    const OVER: usize = 256;
+    let mut entries: heapless::Vec<(ComponentId, ComponentAttrs), OVER> = heapless::Vec::new();
+    for i in 0..OVER {
+        entries
+            .push((
+                ComponentId::new(i as u8),
+                ComponentAttrs::passive_required(),
+            ))
+            .expect("fits OVER");
+    }
+    assert_eq!(
+        Chain::<OVER>::try_from(entries).unwrap_err(),
+        ChainError::TooLong
+    );
 }
 
 /// A repeated `ComponentId` is rejected: the state machine's linear id lookups would
@@ -1632,18 +2325,18 @@ impl FailOn {
 }
 
 impl Platform for FailOn {
-    fn execute(&mut self, effect: Effect) -> Result<(), EffectError> {
+    fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
         self.recorded.push(effect);
         if effect == self.trigger {
             self.failed = true;
             Err(EffectError)
         } else {
-            Ok(())
+            Ok(None)
         }
     }
 }
 
-/// A failed reset actuation is fail-closed: the driver injects `EffectFailed`
+/// A failed reset actuation is fail-closed: the orchestrator injects `EffectFailed`
 /// and the machine latches to `Locked`, emitting `LatchLockdown`.
 #[test]
 fn effect_failure_latches_lockdown() {
@@ -1682,7 +2375,7 @@ fn failed_isolation_actuation_latches_lockdown() {
     assert!(plat.recorded.contains(&Effect::LatchLockdown));
 }
 
-/// A failed recovery actuation is fail-closed too: if the shell cannot even
+/// A failed recovery actuation is fail-closed too: if the platform driver cannot even
 /// recover a required component, the platform latches rather
 /// than continuing with an unrecovered component.
 #[test]
@@ -1881,10 +2574,35 @@ impl SplitMix64 {
     }
 }
 
+/// Build a random three-component chain: kind, failure policy and dependency
+/// edge all vary per seed. The `AwaitingReady` cursor race needs a gateable
+/// component after an active one, which the old fixed chain never had, so the
+/// shape is part of what gets fuzzed.
+fn random_chain(rng: &mut SplitMix64) -> heapless::Vec<(ComponentId, ComponentAttrs), CAPACITY> {
+    let ids = [C0, C1, C2];
+    let mut c = heapless::Vec::new();
+    for (i, &id) in ids.iter().enumerate() {
+        let mut attrs = match rng.below(6) {
+            0 => ComponentAttrs::active_required(),
+            1 => ComponentAttrs::passive_required(),
+            2 => ComponentAttrs::active_isolable(),
+            3 => ComponentAttrs::passive_isolable(),
+            4 => ComponentAttrs::active_cascading(),
+            _ => ComponentAttrs::passive_cascading(),
+        };
+        // Depend on an earlier component half the time, so cascades have depth.
+        if i > 0 && rng.below(2) == 0 {
+            attrs = attrs.with_depends_on(ids[rng.below(i as u32) as usize]);
+        }
+        c.push((id, attrs)).expect("chain within CAPACITY");
+    }
+    c
+}
+
 /// Build one random event over the given id palette. Id-less events ignore it.
 fn random_event(rng: &mut SplitMix64, ids: &[ComponentId]) -> Event {
     let id = ids[rng.below(ids.len() as u32) as usize];
-    match rng.below(15) {
+    match rng.below(16) {
         0 => Event::VerificationPassed(id),
         1 => Event::VerificationFailed(id),
         2 => Event::ComponentReady(id),
@@ -1892,20 +2610,158 @@ fn random_event(rng: &mut SplitMix64, ids: &[ComponentId]) -> Event {
         4 => Event::BootConfirmed(id),
         5 => Event::CorruptionDetected(id),
         6 => Event::Restored(id),
-        7 => Event::Timeout(id),
+        7 => {
+            // Coin-flip: exercise both BootFailed and Timeout on
+            // this arm.
+            if rng.below(2) == 0 {
+                let kind = match rng.below(3) {
+                    0 => BootFailureKind::TimedOut,
+                    1 => BootFailureKind::DeviceRetriable,
+                    _ => BootFailureKind::DeviceFatal,
+                };
+                Event::BootFailed {
+                    id,
+                    checkpoint: "fuzz",
+                    kind,
+                }
+            } else {
+                Event::Timeout(id)
+            }
+        }
         8 => Event::AttestationChallenge,
         9 => Event::UpdateRequest,
         10 => Event::UpdateVerified,
         11 => Event::UpdateRejected,
         12 => Event::RecoveryFailed,
         13 => Event::CommitTimeout,
+        14 => Event::RecoveryUnavailable(id),
         _ => Event::EffectFailed,
+    }
+}
+
+/// Isolation is sticky: once a component is reported isolated, nothing in the
+/// rest of the run takes it out of reset or hands it to recovery. The
+/// verify-before-release property misses the recovery half of that, because
+/// recovery re-verifies before releasing.
+/// A `Cascading` component takes its whole dependent subtree with it. Only
+/// `Cascading` carries that promise: `Isolable` isolates the one component and
+/// its dependents keep running, so the check is scoped to cascading roots.
+/// Traversing only ungated dependents used to stop the walk at a component that
+/// was already isolated, leaving the subtree behind it out of reset.
+#[test]
+fn property_cascading_isolation_reaches_the_whole_subtree() {
+    const RUNS: u64 = 20_000;
+    const MAX_LEN: u32 = 24;
+
+    let palette = [C0, C1, C2, C3];
+
+    for seed in 0..RUNS {
+        let mut rng = SplitMix64(seed.wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(1));
+
+        let ch = random_chain(&mut rng);
+        let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
+            ch.clone().try_into().expect("valid chain"),
+            MAX_RETRY,
+        );
+        let mut platform = Recorder::new();
+
+        orch.dispatch(&mut platform, BOOT);
+        let len = 1 + rng.below(MAX_LEN);
+        for _ in 0..len {
+            let event = random_event(&mut rng, &palette);
+            orch.dispatch(&mut platform, event);
+        }
+
+        let mut isolated = [false; CAPACITY];
+        for effect in &platform.recorded {
+            if let Effect::ReportIsolated(id) = effect {
+                isolated[id.get() as usize] = true;
+            }
+        }
+
+        // Start from the dependents of every isolated `Cascading` component,
+        // then propagate down the `depends_on` edges to a fixed point.
+        // Propagation ignores the intermediate components' own policies:
+        // `cascade_hold` gates a subtree whatever the nodes in it are
+        // configured as, so an `Isolable` component in the middle must not
+        // stop it.
+        let mut must_isolate = [false; CAPACITY];
+        for &(id, attrs) in ch.iter() {
+            let Some(holder) = attrs.depends_on else {
+                continue;
+            };
+            let holder_cascading = ch
+                .iter()
+                .find(|(c, _)| *c == holder)
+                .is_some_and(|(_, a)| a.failure_policy == FailurePolicy::Cascading);
+            if isolated[holder.get() as usize] && holder_cascading {
+                must_isolate[id.get() as usize] = true;
+            }
+        }
+        for _ in 0..ch.len() {
+            for &(id, attrs) in ch.iter() {
+                if let Some(holder) = attrs.depends_on
+                    && must_isolate[holder.get() as usize]
+                {
+                    must_isolate[id.get() as usize] = true;
+                }
+            }
+        }
+        for &(id, _) in ch.iter() {
+            if must_isolate[id.get() as usize] {
+                assert!(
+                    isolated[id.get() as usize],
+                    "seed {seed}: {id:?} is under an isolated cascading component \
+                     but was never isolated",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn property_isolation_is_sticky_under_random_sequences() {
+    const RUNS: u64 = 20_000;
+    const MAX_LEN: u32 = 24;
+
+    let palette = [C0, C1, C2, C3];
+
+    for seed in 0..RUNS {
+        let mut rng = SplitMix64(seed.wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(1));
+
+        let ch = random_chain(&mut rng);
+        let mut orch =
+            Orchestrator::<CAPACITY, ECAP>::new(ch.try_into().expect("valid chain"), MAX_RETRY);
+        let mut platform = Recorder::new();
+
+        orch.dispatch(&mut platform, BOOT);
+        let len = 1 + rng.below(MAX_LEN);
+        for _ in 0..len {
+            let event = random_event(&mut rng, &palette);
+            orch.dispatch(&mut platform, event);
+        }
+
+        let mut isolated = [false; CAPACITY];
+        for effect in &platform.recorded {
+            match effect {
+                Effect::ReportIsolated(id) => isolated[id.get() as usize] = true,
+                Effect::ReleaseReset(id) => assert!(
+                    !isolated[id.get() as usize],
+                    "seed {seed}: released {id:?} after reporting it isolated",
+                ),
+                Effect::RecoverComponent { id, .. } => assert!(
+                    !isolated[id.get() as usize],
+                    "seed {seed}: recovered {id:?} after reporting it isolated",
+                ),
+                _ => {}
+            }
+        }
     }
 }
 
 #[test]
 fn property_verify_before_release_holds_under_random_sequences() {
-    const RUNS: u64 = 4000;
+    const RUNS: u64 = 20_000;
     const MAX_LEN: u32 = 24;
 
     // C0..C2 are in-chain; C3 is intentionally out-of-chain — fed as noise so
@@ -1916,11 +2772,7 @@ fn property_verify_before_release_holds_under_random_sequences() {
     for seed in 0..RUNS {
         let mut rng = SplitMix64(seed.wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(1));
 
-        let ch = chain(&[
-            (C0, ComponentAttrs::passive_required()),
-            (C1, ComponentAttrs::active_isolable()),
-            (C2, ComponentAttrs::passive_required()),
-        ]);
+        let ch = random_chain(&mut rng);
         let mut orch =
             Orchestrator::<CAPACITY, ECAP>::new(ch.try_into().expect("valid chain"), MAX_RETRY);
         let mut platform = Recorder::new();
@@ -1965,4 +2817,157 @@ fn property_verify_before_release_holds_under_random_sequences() {
             }
         }
     }
+}
+
+/// A returned event settles in the same run: a platform that answers every
+/// `VerifyFirmware` in place walks a provisioned chain to `Ready` from one
+/// dispatch.
+#[test]
+fn returned_verdicts_settle_in_one_dispatch() {
+    struct InstantVerify {
+        recorded: Vec<Effect>,
+    }
+    impl Platform for InstantVerify {
+        fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
+            self.recorded.push(effect);
+            Ok(match effect {
+                Effect::VerifyFirmware(id) => Some(Event::VerificationPassed(id)),
+                _ => None,
+            })
+        }
+    }
+
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
+        passive_required(&[C0, C1]).try_into().expect("valid chain"),
+        MAX_RETRY,
+    );
+    let mut platform = InstantVerify {
+        recorded: Vec::new(),
+    };
+
+    orch.dispatch(&mut platform, BOOT);
+
+    assert_eq!(orch.state(), State::Ready);
+    assert_eq!(
+        platform.recorded,
+        std::vec![
+            Effect::ReadFirmware(C0),
+            Effect::VerifyFirmware(C0),
+            Effect::ReleaseReset(C0),
+            Effect::ReadFirmware(C1),
+            Effect::VerifyFirmware(C1),
+            Effect::ReleaseReset(C1),
+        ],
+    );
+}
+
+/// A batch whose executors return more events than the pending queue holds
+/// fails closed: the run latches `Locked` instead of losing feedback.
+#[test]
+fn returned_event_overflow_latches_locked() {
+    struct Chatty;
+    impl Platform for Chatty {
+        fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
+            Ok(match effect {
+                // The re-walk after Restored quiesces every live component
+                // and re-verifies the first — on a full 8-chain that is more
+                // returned events than PENDING_CAP in one batch.
+                Effect::AssertReset(_) | Effect::ReadFirmware(_) => {
+                    Some(Event::AttestationChallenge)
+                }
+                Effect::VerifyFirmware(id) => Some(Event::VerificationPassed(id)),
+                _ => None,
+            })
+        }
+    }
+
+    let ids: Vec<ComponentId> = (0..8).map(ComponentId::new).collect();
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
+        passive_required(&ids).try_into().expect("valid chain"),
+        MAX_RETRY,
+    );
+    let mut platform = Chatty;
+
+    orch.dispatch(&mut platform, BOOT);
+    assert_eq!(orch.state(), State::Ready);
+
+    orch.dispatch(&mut platform, Event::CorruptionDetected(C0));
+    orch.dispatch(&mut platform, Event::Restored(C0));
+
+    assert_eq!(orch.state(), State::Locked);
+}
+
+/// A failed effect with the pending queue already full still latches: the
+/// latch evicts the newest queued event rather than being dropped itself.
+/// Regression test — a back-of-queue push would be lost here, and the run
+/// would settle to `Ready` as if nothing failed.
+#[test]
+fn failed_effect_with_full_queue_still_latches() {
+    struct ChattyThenFail {
+        rewalking: bool,
+    }
+    impl Platform for ChattyThenFail {
+        fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
+            match effect {
+                // The re-walk after Restored asserts reset on all eight live
+                // components first — exactly PENDING_CAP returned events, so
+                // the queue is full (but never overflowed) when the read
+                // that follows fails.
+                Effect::AssertReset(_) if self.rewalking => Ok(Some(Event::AttestationChallenge)),
+                Effect::ReadFirmware(_) if self.rewalking => Err(EffectError),
+                Effect::VerifyFirmware(id) => Ok(Some(Event::VerificationPassed(id))),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    let ids: Vec<ComponentId> = (0..8).map(ComponentId::new).collect();
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
+        passive_required(&ids).try_into().expect("valid chain"),
+        MAX_RETRY,
+    );
+    let mut platform = ChattyThenFail { rewalking: false };
+
+    orch.dispatch(&mut platform, BOOT);
+    assert_eq!(orch.state(), State::Ready);
+
+    orch.dispatch(&mut platform, Event::CorruptionDetected(C0));
+    platform.rewalking = true;
+    orch.dispatch(&mut platform, Event::Restored(C0));
+
+    assert_eq!(orch.state(), State::Locked);
+}
+
+/// An event returned by executing `LatchLockdown` itself is queued, settles
+/// in `Locked`, and is discarded — the latch stays terminal and nothing is
+/// actuated after the lockdown.
+#[test]
+fn event_returned_during_lockdown_is_discarded() {
+    struct FailRelease {
+        recorded: Vec<Effect>,
+    }
+    impl Platform for FailRelease {
+        fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
+            self.recorded.push(effect);
+            match effect {
+                Effect::ReleaseReset(_) => Err(EffectError),
+                Effect::LatchLockdown => Ok(Some(Event::AttestationChallenge)),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    let mut orch = Orchestrator::<CAPACITY, ECAP>::new(
+        passive_required(&[C0]).try_into().expect("valid chain"),
+        MAX_RETRY,
+    );
+    let mut platform = FailRelease {
+        recorded: Vec::new(),
+    };
+
+    orch.dispatch(&mut platform, BOOT);
+    orch.dispatch(&mut platform, Event::VerificationPassed(C0));
+
+    assert_eq!(orch.state(), State::Locked);
+    assert_eq!(platform.recorded.last(), Some(&Effect::LatchLockdown));
 }
