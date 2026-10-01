@@ -9,10 +9,12 @@
 //! over the `i3c_server`. The host plays the Update Agent.
 //!
 //! `MockFdOps` is a bounded-slice implementation per the callback-shape
-//! evaluation: `download_fw_data` takes one chunk per call, `verify`/`apply`
-//! report done immediately, and `get_xfer_size` is capped small so each
-//! `RequestFirmwareData` chunk response stays a single MCTP fragment (inbound
-//! multi-fragment is not yet supported by the i3c server).
+//! evaluation: `download_fw_data` takes one chunk per call and `verify`/`apply`
+//! report done immediately. Unlike the pldm_i3c correctness test, `get_xfer_size`
+//! here allows a chunk larger than one MCTP fragment: each `RequestFirmwareData`
+//! response spans a few inbound fragments, which the i3c server's inbound ring
+//! queues and the FD's MCTP stack reassembles — fewer, bigger download
+//! round-trips (the throughput lever).
 
 #![no_main]
 #![no_std]
@@ -39,16 +41,16 @@ use userspace::syscall;
 const FD_EID: u8 = 8;
 /// Update Agent EID this FD serves (the host).
 const UA_EID: u8 = 0x0a;
-/// Small firmware image so a full download is a handful of single-fragment
-/// chunks.
-// Larger than the pldm_i3c correctness image so the download phase is long
-// enough for a stable throughput number (matching how caliptra-mcu-sw measures
-// its PLDM transfer speed).
+/// Larger than the pldm_i3c correctness image (512) so the download phase is
+/// long enough for a stable throughput number, matching how caliptra-mcu-sw
+/// measures its PLDM transfer speed.
 const IMAGE_SIZE: usize = 4096;
-/// Cap the negotiated transfer size so each `RequestFirmwareData` chunk
-/// response fits one MCTP fragment (4 i3c + 4 MCTP + 1 type + PLDM hdr + data +
-/// PEC must stay under the 250-byte i3c frame / 241-byte MTU).
-const FD_XFER_CAP: usize = 180;
+/// Per-chunk transfer cap, deliberately bigger than one single-fragment MTU
+/// (241 B): each `RequestFirmwareData` response spans ~2 inbound MCTP fragments,
+/// which the N=4 inbound ring queues and the FD's MCTP stack reassembles — fewer,
+/// bigger download round-trips. Kept within the ring depth (<= 4 fragments) and
+/// FD_MAX_MSG (1024).
+const FD_XFER_CAP: usize = 460;
 /// How long the responder waits for a UA command while idle. Large, like the
 /// AST10x0 reference FD: `run_terminus` is called once and blocks here between
 /// commands, rather than being re-entered in a tight poll loop (that churn of
