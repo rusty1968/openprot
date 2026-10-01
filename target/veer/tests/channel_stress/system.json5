@@ -1,0 +1,70 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// VeeR on-target isolation test for the pw_kernel channel-IPC syscall path.
+//
+// Two processes, nothing else — no I3C, no MCTP, no PLDM:
+//
+//   server -- channel handler; echoes each request.
+//   client -- hammers `channel_transact` in a tight loop, then exits 0.
+//
+// Purpose: reproduce the jump-to-null / corrupted-context crash
+// (epc=0, SyscallBuffer::new_in_current_process) that the PLDM-over-I3C download
+// hits under sustained channel traffic, with everything but the kernel channel
+// syscalls stripped away. If this crashes, the bug is in pw_kernel's channel
+// path on veer, not in our I3C/PLDM code.
+//
+// Memory follows the caliptra emulator map: SRAM 0x40000000/0x80000.
+{
+  arch: {
+    type: "riscv",
+  },
+  kernel: {
+    flash_start_address: 0x40000000,
+    flash_size_bytes: 0x10000,
+    ram_start_address: 0x40040000,
+    ram_size_bytes: 0x8000,
+    // No interrupts in this test, but the kernel still references the table.
+    interrupt_table: {
+      table: {},
+    },
+  },
+  apps: [
+    {
+      name: "channel_stress",
+      flash_size_bytes: 0x10000,
+      processes: [
+        {
+          name: "server",
+          ram_size_bytes: 0x4000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            { name: "channel", type: "channel_handler" },
+            {
+              type: "thread",
+              name: "server_thread",
+              kernel_stack_size_bytes: 2048,
+            },
+          ],
+        },
+        {
+          name: "client",
+          ram_size_bytes: 0x2000,
+          objects: [
+            {
+              name: "channel",
+              type: "channel_initiator",
+              handler_process: "server",
+              handler_object_name: "channel",
+            },
+            {
+              type: "thread",
+              name: "client_thread",
+              kernel_stack_size_bytes: 2048,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+}
