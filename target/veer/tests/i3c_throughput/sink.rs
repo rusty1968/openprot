@@ -63,8 +63,11 @@ fn run() {
     pw_log::info!("mctp throughput: waiting for data");
 
     let ack = [0u8; 1];
-    let mut buf = [0u8; 255];
+    // Sized for a full multi-fragment MCTP message (stack MAX_PAYLOAD is 1023),
+    // so the host can send messages that span several i3c fragments.
+    let mut buf = [0u8; 1024];
     let mut total = 0usize;
+    let mut msgs = 0u32;
     let mut t0 = 0u64;
     let mut first = true;
 
@@ -82,6 +85,7 @@ fn run() {
                     first = false;
                 } else {
                     total = total.saturating_add(n);
+                    msgs = msgs.saturating_add(1);
                 }
             }
             Err(e) => {
@@ -98,9 +102,12 @@ fn run() {
     // bytes/s = total * MTIME_HZ / elapsed_ticks.
     let bytes_per_s = (total as u64).saturating_mul(MTIME_HZ) / elapsed;
     let kbps = bytes_per_s / 1024;
+    let per_msg = if msgs > 0 { total / msgs as usize } else { 0 };
     pw_log::info!(
-        "THROUGHPUT: {} bytes in {} ticks ({} B/s)",
+        "THROUGHPUT: {} bytes in {} msgs ({} B/msg) in {} ticks ({} B/s)",
         total as u32,
+        msgs as u32,
+        per_msg as u32,
         elapsed as u32,
         bytes_per_s as u32,
     );
