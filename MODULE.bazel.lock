@@ -2024,7 +2024,7 @@
         "usagesDigest": "/VAMMz3qWfIefz0b1BzFqtI/TQkbbb8pQUEeBQpFJkU=",
         "recordedFileInputs": {
           "@@//third_party/crates_io/Cargo.lock": "d2c79da0b47f63694108886b1d940f2b48822b18d8a754adad1af5fc082ef392",
-          "@@//third_party/crates_io/Cargo.toml": "f7d8aaacbaa9a1396aa3e34bf783e3e2d2a123f6011544ac78f28f0df9461f64",
+          "@@//third_party/crates_io/Cargo.toml": "6057a04668a2cbc737af78b6e8303288a9b88a89fa3722abe85c03ef8dc0847b",
           "@@caliptra_deps+//crates_io/embedded/Cargo.lock": "6e52a669bc642240f58ad33eb9fffcaeedd261231953822930a54fa51e95c4f9",
           "@@caliptra_deps+//crates_io/embedded/Cargo.toml": "2924efc1c0a21e31445c09d147b346d9f4ed0ad7eb9a8dbe04911cd918635c4b",
           "@@caliptra_deps+//crates_io/host/Cargo.lock": "22e73d90bd6bcbb4b0742deb60b28394a25beca374f0b159c5932625cb0e8ddb",
@@ -2040,7 +2040,7 @@
           "CARGO_BAZEL_GENERATOR_SHA256": null,
           "CARGO_BAZEL_GENERATOR_URL": null,
           "CARGO_BAZEL_ISOLATED": null,
-          "CARGO_BAZEL_REPIN": null,
+          "CARGO_BAZEL_REPIN": "1",
           "CARGO_BAZEL_REPIN_ONLY": null,
           "CARGO_BAZEL_TIMEOUT": null,
           "REPIN": null

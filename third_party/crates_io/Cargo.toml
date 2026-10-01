@@ -55,8 +55,12 @@ heapless = { version = "0.9", default-features = false }
 mctp = { git = "https://github.com/CodeConstruct/mctp-rs.git", default-features = false }
 mctp-lib = { git = "https://github.com/OpenPRoT/mctp-lib.git", branch = "9e-buildup" }
 spdm-lib = { git = "https://github.com/OpenPRoT/spdm-lib.git", branch = "main" }
-pldm-common = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
-pldm-interface = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
+# Pinned by rev: the crate.annotation patch in MODULE.bazel
+# (pldm_max_transfer.patch) targets this exact source. Leaving these unpinned
+# lets CARGO_BAZEL_REPIN float them to OpenPRoT HEAD, which has trait churn that
+# breaks the build and may not match the patch context.
+pldm-common = { git = "https://github.com/OpenPRoT/pldm-lib.git", rev = "c709ae4adbc28b168f10e4a4531149abf5116b92" }
+pldm-interface = { git = "https://github.com/OpenPRoT/pldm-lib.git", rev = "c709ae4adbc28b168f10e4a4531149abf5116b92" }
 # Pin to match Hubris ecosystem
 rand_core = { version = "0.9", default-features = false }
 sec1 = { version = "0.7.3" }
