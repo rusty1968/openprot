@@ -64,6 +64,18 @@ crate.from_cargo(
     ],
 )
 
+# Raise pldm-common's RequestFirmwareData payload cap (a hardcoded
+# MAX_TRANSFER_SIZE = 512 placeholder) so PLDM downloads can use larger,
+# multi-fragment chunks — fewer IPC round-trips per byte. caliptra-mcu-sw
+# derives the same limit from the MCTP message size (~1019 B); 960 B keeps the
+# reassembled MCTP message within our 1023-byte ceiling.
+crate.annotation(
+    crate = "pldm-common",
+    patch_args = ["-p1"],
+    patches = ["//third_party/crates_io:pldm_max_transfer.patch"],
+    repositories = ["rust_crates"],
+)
+
 # caliptra-dpe-response-buffer is a path-dependency workspace member inside
 # the caliptra-dpe repo (declared as `caliptra-dpe-response-buffer.workspace
 # = true` inside caliptra-dpe's own Cargo.toml, not in our crates_io

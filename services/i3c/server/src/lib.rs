@@ -21,11 +21,14 @@ use openprot_hal_blocking::i3c_hardware::I3cTarget;
 ///
 /// Sized to cover the window between the IRQ latching a frame and the client
 /// draining it over IPC — a cross-process round-trip, plus a host controller
-/// that polls and may resend — with margin for a request alongside a resend.
-/// The ring must not overflow in normal request/response flow: a dropped frame
-/// is an unrecoverable hole in MCTP reassembly, so overflow is an error path
-/// only (see [`Inbound::DroppedFull`]).
-pub const RX_RING: usize = 4;
+/// that polls and may resend — and, crucially, to hold every fragment of one
+/// multi-fragment MCTP message: the controller bursts a message's fragments
+/// back-to-back and they are only consumed once the whole message reassembles,
+/// so the ring must be at least as deep as the largest message's fragment count
+/// (a ~960 B PLDM chunk is ~5 fragments at the 241 B MTU). The ring must not
+/// overflow in normal flow: a dropped frame is an unrecoverable hole in MCTP
+/// reassembly, so overflow is an error path only (see [`Inbound::DroppedFull`]).
+pub const RX_RING: usize = 6;
 
 /// Outcome of draining one inbound frame in [`Server::latch_inbound`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,8 +225,8 @@ mod tests {
     use openprot_hal_blocking::i3c_hardware::{DynamicAddress, TargetEvent};
 
     /// Capacity of the test target's own inbound queue; larger than `RX_RING`
-    /// so overflow of the server ring can be exercised.
-    const FAKE_INBOUND: usize = 8;
+    /// so overflow of the server ring can be exercised (tracks `RX_RING`).
+    const FAKE_INBOUND: usize = RX_RING + 4;
 
     struct FakeTarget {
         addr: Option<u8>,
@@ -416,18 +419,17 @@ mod tests {
     #[test]
     fn ring_full_drops_newest_keeps_queued() {
         let mut s = srv();
-        // RX_RING fit; the remaining two overflow and are dropped.
-        let labels: [&[u8]; RX_RING + 2] = [b"f0", b"f1", b"f2", b"f3", b"f4", b"f5"];
-        for l in labels {
-            s.target.push_inbound(l);
+        // Push two more than the ring holds; each frame's single-byte payload is
+        // its index. The oldest RX_RING survive in order, the last two overflow.
+        for i in 0..RX_RING + 2 {
+            s.target.push_inbound(&[i as u8]);
         }
 
         assert!(drain(&mut s), "overflow must be reported as a drop");
 
-        // The first RX_RING frames (oldest) survived in order; f4/f5 dropped.
-        for expect in &labels[..RX_RING] {
+        for i in 0..RX_RING {
             let (status, body, len) = recv_once(&mut s);
-            assert_eq!((status, &body[..len]), (I3cStatus::Ok, *expect));
+            assert_eq!((status, &body[..len]), (I3cStatus::Ok, &[i as u8][..]));
         }
         let (status, _, len) = recv_once(&mut s);
         assert_eq!((status, len), (I3cStatus::NoData, 0));
