@@ -27,8 +27,11 @@ pub struct KernelConfig;
 impl KernelConfigInterface for KernelConfig {
     #[cfg(feature = "silicon")]
     const SYSTEM_CLOCK_HZ: u64 = 100_000_000;
+    // Matches TIMER_FREQUENCY_HZ in
+    // third_party/caliptra/caliptra-mcu-sw/platforms/fpga/runtime/src/main.rs,
+    // the confirmed clock rate for this core on the VCK190 build.
     #[cfg(feature = "fpga")]
-    const SYSTEM_CLOCK_HZ: u64 = 10_000_000; //FIXME
+    const SYSTEM_CLOCK_HZ: u64 = 20_000_000;
     #[cfg(feature = "emulator")]
     const SYSTEM_CLOCK_HZ: u64 = 1_000_000;
 }
@@ -56,10 +59,25 @@ impl VeerPicConfigInterface for VeerPicConfig {
     const PIC_BASE_ADDRESS: usize = PIC_BASE;
     const MAX_IRQS: u32 = 256;
     // The VeeR core requires the external-interrupt redirect table to live
-    // in DCCM; this image does not otherwise use DCCM. 256 IRQs * 4 bytes
-    // fits well within the 16KiB DCCM.
-    const MEIVT_BASE_ADDRESS: usize = 0x5000_0000;
+    // in DCCM. The start of DCCM (0x5000_0000) overlaps the ROM-dedicated RAM
+    // that the boot ROM/runtime uses as scratch, so the table must sit at the
+    // top of the window to avoid being clobbered. The runner configures a
+    // 16KiB DCCM (0x5000_0000..0x5000_4000); the redirect table (256 IRQs *
+    // 4 bytes = 1KiB) is placed in the final 1KiB, matching the reference
+    // firmware which links it at ORIGIN(dccm) + LENGTH(dccm) - 1024.
+    const MEIVT_BASE_ADDRESS: usize = 0x5000_3C00;
 }
+
+// Compile-time validation of the VeeR PIC constants above. This is a
+// module-level `const _`, not an associated const in an `impl` block: rustc
+// evaluates the former unconditionally, but the latter only where it is
+// referenced, which would silently disable these checks.
+const _: () = {
+    // MEIVT stores MEIHAP[31:10], so the table base must be 1KiB-aligned.
+    assert!(<VeerPicConfig as VeerPicConfigInterface>::MEIVT_BASE_ADDRESS & 0x3ff == 0);
+    // claimid is 8 bits, so the core can address at most 256 table entries.
+    assert!(<VeerPicConfig as VeerPicConfigInterface>::MAX_IRQS <= 256);
+};
 
 pub struct TimerConfig;
 

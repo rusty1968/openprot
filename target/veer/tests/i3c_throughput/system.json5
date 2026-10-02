@@ -1,0 +1,107 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// VeeR on-target throughput benchmark for MCTP over I3C.
+//
+// Same three-process topology as tests/mctp_i3c, with the echo app replaced by
+// a throughput sink that receives a fixed number of bytes and reports the rate:
+//
+//   i3c_server      -- owns the I3C peripheral and PIC IRQ 2, runs the
+//                      i3c_server_runtime reactor.
+//   mctp_server     -- i3c client + MCTP router, serves app clients on "mctp".
+//   throughput_sink -- MCTP app client that receives TARGET_BYTES, acking each
+//                      message, and logs THROUGHPUT_KBPS. It maps the RV timer
+//                      (0x21000000) so it can read `mtime` for emulated-time
+//                      measurement, like target/veer/syscall_latency.
+//
+// Caliptra emulator map (caliptra_runner.py): SRAM 0x40000000/0x80000,
+// I3C 0x20004000/0x1000, RV timer 0x21000000/0x100, PIC 0x60000000.
+{
+  arch: {
+    type: "riscv",
+  },
+  kernel: {
+    flash_start_address: 0x40000000,
+    flash_size_bytes: 0x10000,
+    ram_start_address: 0x40040000,
+    ram_size_bytes: 0x8000,
+  },
+  apps: [
+    {
+      name: "i3c_throughput",
+      flash_size_bytes: 0x30000,
+      processes: [
+        {
+          name: "i3c_server",
+          ram_size_bytes: 0x4000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            {
+              name: "i3c_irq",
+              type: "interrupt",
+              irqs: [{ name: "i3c", number: 2 }],
+            },
+            { name: "channel", type: "channel_handler" },
+            {
+              type: "thread",
+              name: "i3c_server_thread",
+              kernel_stack_size_bytes: 2048,
+            },
+          ],
+          memory_mappings: [
+            {
+              name: "i3c_regs",
+              type: "device",
+              start_address: 0x20004000,
+              size_bytes: 0x1000,
+            },
+          ],
+        },
+        {
+          name: "mctp_server",
+          ram_size_bytes: 0x10000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            { name: "mctp", type: "channel_handler" },
+            {
+              name: "i3c",
+              type: "channel_initiator",
+              handler_process: "i3c_server",
+              handler_object_name: "channel",
+            },
+            {
+              type: "thread",
+              name: "mctp_server_thread",
+              kernel_stack_size_bytes: 4096,
+            },
+          ],
+        },
+        {
+          name: "throughput_sink",
+          ram_size_bytes: 0x4000,
+          objects: [
+            {
+              name: "mctp",
+              type: "channel_initiator",
+              handler_process: "mctp_server",
+              handler_object_name: "mctp",
+            },
+            {
+              type: "thread",
+              name: "throughput_sink_thread",
+              kernel_stack_size_bytes: 2048,
+            },
+          ],
+          memory_mappings: [
+            {
+              name: "rv_timer",
+              type: "device",
+              start_address: 0x21000000,
+              size_bytes: 0x100,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+}

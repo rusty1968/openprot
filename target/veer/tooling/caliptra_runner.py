@@ -4,6 +4,7 @@
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,31 @@ from pw_tokenizer import detokenize
 
 _LOG = logging.getLogger(__name__)
 _LOG.setLevel(logging.INFO)
+
+# Environment variable naming the SSH host (user@host or host alias) for the
+# VCK190 FPGA board used by the "fpga" interface.
+FPGA_HOST = "VCK190_FPGA_HOST"
+
+# Timeout (seconds) for the remote fpga run. The VeeR core's exit()
+# implementation writes the PASS/FAIL sentinel and then spins forever (there's
+# no way for it to fully halt itself back to the host), so this bounds how
+# long we wait on a stuck or unreachable board rather than hanging forever.
+_FPGA_RUN_TIMEOUT_SECONDS = 300
+
+
+def scan_output_for_result(lines):
+    """Scan detokenized output lines for a PASS/FAIL sentinel.
+
+    Returns 0 on a line containing "PASS", 1 on a line containing "FAIL",
+    or None if no sentinel has appeared yet.
+    """
+    for line in lines:
+        if "PASS" in line:
+            return 0
+        if "FAIL" in line:
+            return 1
+    return None
+
 
 try:
 
@@ -116,9 +142,20 @@ def load_and_run(
     interface: str,
     manifest: str,
     vendor_pk_hash: str,
+    elf: Path | None = None,
 ) -> list[str]:
     """Prepare arguments to load an image into a board and spawn a console."""
     if interface == "emulator":
+        # The --rom-size/--sram-size/etc. values below must match
+        # caliptra-mcu-sw's own EMULATOR_MEMORY_MAP (the bus's addressable
+        # window for each region), not just mcu_rom.bin's/the linker
+        # script's idea of the region size -- see
+        # platforms/emulator/config/src/lib.rs in caliptra-mcu-sw at the
+        # pinned SHA (third_party/caliptra/versions.bzl's caliptra_mcu_sw
+        # entry). A CLI value smaller than the linker script's region lets
+        # the guest link/boot fine but reads past the CLI's declared window
+        # as unmapped/zero at runtime, which is silent (no build error, no
+        # panic) and was the root cause of a whole-suite hang here before.
         cmd = [
             _EMULATOR,
             f"--rom={_MCU_ROM}",
@@ -127,11 +164,11 @@ def load_and_run(
             f"--caliptra-firmware={_CPTRA_FIRMWARE}",
             "--i3c-port=65534",
             "--rom-offset=0x80000000",
-            "--rom-size=0x8000",
+            "--rom-size=0x10000",  # EMULATOR_MEMORY_MAP.rom_size = 64 * 1024
             "--dccm-offset=0x50000000",
             "--dccm-size=0x4000",
             "--sram-offset=0x40000000",
-            "--sram-size=0x80000",
+            "--sram-size=0x100000",  # EMULATOR_MEMORY_MAP.sram_size = 1024 * 1024
             "--pic-offset=0x60000000",
             "--i3c-offset=0x20004000",
             "--i3c-size=0x1000",
@@ -151,6 +188,75 @@ def load_and_run(
         if vendor_pk_hash and str(vendor_pk_hash) != "None":
             cmd.append(f"--vendor-pk-hash={vendor_pk_hash}")
         return cmd
+    elif interface == "fpga":
+        host = os.environ.get(FPGA_HOST)
+        if not host:
+            _LOG.fatal("%s is not set; cannot reach the VCK190 board", FPGA_HOST)
+            sys.exit(1)
+
+        remote_bin = f"/tmp/{Path(image).name}"
+        try:
+            subprocess.run(["scp", str(image), f"{host}:{remote_bin}"], check=True)
+        except subprocess.CalledProcessError as e:
+            _LOG.fatal("Failed to copy %s to %s: %s", image, host, e)
+            sys.exit(1)
+
+        # Loads the image into the MCU ROM backdoor SRAM, deasserts
+        # cptra_ss_rst_b, and streams the debug FIFO back over stdout.
+        # See hw/fpga/README.md's "JTAG debug" section and
+        # hw/fpga/kernel-modules/mcu_rom_backdoor.c for the mechanism.
+        cmd = [
+            "ssh",
+            host,
+            "sudo",
+            "caliptra-mcu-sw/hw/fpga/launch_openocd.sh",
+            "load-and-run",
+            remote_bin,
+        ]
+        _LOG.info("Invoking fpga runner: %s", cmd)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_FPGA_RUN_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            _LOG.fatal(
+                "fpga runner timed out after %s seconds; stdout so far: %s; "
+                "stderr so far: %s",
+                _FPGA_RUN_TIMEOUT_SECONDS,
+                e.stdout,
+                e.stderr,
+            )
+            sys.exit(1)
+
+        if proc.stderr:
+            _LOG.info("fpga runner stderr: %s", proc.stderr)
+
+        if proc.returncode != 0:
+            _LOG.fatal(
+                "ssh/remote command failed with exit code %d: %s",
+                proc.returncode,
+                proc.stderr,
+            )
+            sys.exit(1)
+
+        # This target's kernel config pins its log backend to
+        # log_backend_basic (a plain-text logger; see target/veer/BUILD.bazel's
+        # platform rule), so the board's console output is never tokenized and
+        # there is nothing to detokenize here, unlike the emulator's tokenized
+        # console path (see _detokenizer() above).
+        print(proc.stdout)
+        result = scan_output_for_result(proc.stdout.splitlines())
+        if result is None:
+            _LOG.fatal(
+                "Device produced no PASS/FAIL sentinel; fpga runner stderr: %s",
+                proc.stderr,
+            )
+            sys.exit(1)
+        sys.exit(result)
     else:
         raise Exception("unknown mechanism", mechanism)
 
@@ -200,6 +306,7 @@ def _main(args) -> int:
         args.interface,
         args.manifest,
         args.vendor_pk_hash,
+        elf=args.elf,
     )
     # TODO(cfrantz): add support for the tokenized console.
     return_code = simple_console(cmd)

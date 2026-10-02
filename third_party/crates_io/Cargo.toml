@@ -32,7 +32,7 @@ riscv-semihosting = "0.1.3"
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 serde_derive = "1.0.228"
 smlang = { version = "0.8.0", default-features = false }
-syn = { version = "2.0.104", features = ["full", "extra-traits"] }
+syn = { version = "3.0.3", features = ["full", "extra-traits"] }
 syn1 = { package = "syn", version = "1.0.109", features = ["full", "extra-traits"] }
 tock-registers = "0.9.0"
 vcell = "0.1.2"
@@ -55,8 +55,12 @@ heapless = { version = "0.9", default-features = false }
 mctp = { git = "https://github.com/CodeConstruct/mctp-rs.git", default-features = false }
 mctp-lib = { git = "https://github.com/OpenPRoT/mctp-lib.git", branch = "9e-buildup" }
 spdm-lib = { git = "https://github.com/OpenPRoT/spdm-lib.git", branch = "main" }
-pldm-common = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
-pldm-interface = { git = "https://github.com/OpenPRoT/pldm-lib.git" }
+# Pinned by rev: the crate.annotation patch in MODULE.bazel
+# (pldm_max_transfer.patch) targets this exact source. Leaving these unpinned
+# lets CARGO_BAZEL_REPIN float them to OpenPRoT HEAD, which has trait churn that
+# breaks the build and may not match the patch context.
+pldm-common = { git = "https://github.com/OpenPRoT/pldm-lib.git", rev = "c709ae4adbc28b168f10e4a4531149abf5116b92" }
+pldm-interface = { git = "https://github.com/OpenPRoT/pldm-lib.git", rev = "c709ae4adbc28b168f10e4a4531149abf5116b92" }
 # Pin to match Hubris ecosystem
 rand_core = { version = "0.9", default-features = false }
 sec1 = { version = "0.7.3" }
@@ -87,7 +91,7 @@ clap = { version = "4.5.40", features = ["derive", "env", "wrap_help"] }
 futures = "0.3"
 hex = "0.4.3"
 minijinja = { version = "2.12.0", features = ["loader"] }
-object = { version = "0.37.1", features = ["build", "elf", "read", "write"] }
+object = { version = "0.40.0", features = ["build", "elf", "read", "write"] }
 prost = "0.13"
 rustc-demangle = "0.1.25"
 serde_json5 = "0.2.1"
