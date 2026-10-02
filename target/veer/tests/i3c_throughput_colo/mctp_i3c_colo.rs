@@ -53,7 +53,11 @@ struct ColoTransport<'a> {
 }
 
 impl Transport for ColoTransport<'_> {
-    fn transact(&mut self, req: &[u8], resp: &mut [u8]) -> core::result::Result<usize, TransportError> {
+    fn transact(
+        &mut self,
+        req: &[u8],
+        resp: &mut [u8],
+    ) -> core::result::Result<usize, TransportError> {
         let mut srv = self.srv.borrow_mut();
         Ok(dispatch(&mut srv, req, resp))
     }
@@ -112,8 +116,12 @@ fn colo_loop() -> Result<()> {
                         handle::MCTP,
                         &response_buf[..wire::MctpResponseHeader::SIZE],
                     );
-                    let _ =
-                        syscall::wait_group_add(handle::WG, handle::MCTP, Signals::READABLE, 0usize);
+                    let _ = syscall::wait_group_add(
+                        handle::WG,
+                        handle::MCTP,
+                        Signals::READABLE,
+                        0usize,
+                    );
                 }
                 continue;
             }
