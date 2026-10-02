@@ -44,7 +44,14 @@ fn measure_nop_syscall(n: usize) -> Result<()> {
 
 #[entry]
 fn entry() -> Result<()> {
-    measure_nop_syscall(100)
+    let result = measure_nop_syscall(100);
+    // Signal completion so the caliptra_test harness sees the PASS/FAIL sentinel
+    // instead of hanging until the test timeout. `debug_shutdown` drives
+    // `Target::shutdown`, which writes "PASS" (code 0) or "FAIL" to the UART that
+    // caliptra_runner.py scans; it then exits, so the line below is unreachable
+    // and only satisfies the return type.
+    let _ = syscall::debug_shutdown(result);
+    result
 }
 
 #[panic_handler]
