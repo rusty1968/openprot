@@ -141,15 +141,16 @@ pub fn dispatch_mctp_op<S: Sender, const N: usize>(
 ///
 /// Call this on timer ticks and after feeding inbound packets to the server.
 /// For each handle that is now ready (message arrived or timed out),
-/// `on_ready(handle, response_len)` is called with `response` filled.
+/// `on_ready(handle, response_bytes)` is called with the encoded response.
 /// The platform must look up its stored reply token for `handle` and send
-/// the response through it.
+/// `response_bytes` through it *before returning*, since `response` is
+/// reused for the next ready handle (if any).
 pub fn drive_pending<S: Sender, const N: usize>(
     server: &mut Server<S, N>,
     now_millis: u64,
     recv_buf: &mut [u8],
     response: &mut [u8],
-    mut on_ready: impl FnMut(Handle, usize),
+    mut on_ready: impl FnMut(Handle, &[u8]),
 ) {
     let (_, ready) = server.update(now_millis, recv_buf);
     for (handle, result) in ready {
@@ -168,7 +169,7 @@ pub fn drive_pending<S: Sender, const N: usize>(
             }
             RecvResult::TimedOut => encode_error(response, ResponseCode::TimedOut),
         };
-        on_ready(handle, len);
+        on_ready(handle, &response[..len]);
     }
 }
 

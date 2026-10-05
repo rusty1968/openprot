@@ -1,0 +1,100 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 MCTP server-runtime QEMU test system image.
+//
+// Exercises the real `mctp_server_runtime::run()` loop without I2C:
+// `client_test` drives `server_test` over two channels (`mctp_a`, `mctp_b`)
+// plus a `transport` channel standing in for the I2C IRQ. `server_test`'s
+// outbound `Sender` is a loopback stub (see server_main.rs) instead of
+// `I2cSender`.
+//
+// Memory map (AST10x0: 768 KB SRAM, no XIP):
+//   0x00000000 - 0x00000500  vector table (1280 B)
+//   0x00000500 - 0x00020500  kernel flash (~128 KB)
+//   0x00020500 - 0x00060500  app flash (256 KB total; 128 KB per app)
+//   0x00060000 - 0x00080000  kernel RAM (128 KB)
+//   0x00080000 - 0x000C0000  app RAM (256 KB total; 64 KB per process)
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 1280,
+    },
+    kernel: {
+        flash_start_address: 0x00000500,
+        flash_size_bytes: 129792,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "server_test",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "server_test_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "wg",
+                            type: "wait_group",
+                        },
+                        {
+                            name: "mctp_a",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "mctp_b",
+                            type: "channel_handler",
+                        },
+                        {
+                            name: "transport",
+                            type: "channel_handler",
+                        },
+                        {
+                            type: "thread",
+                            name: "server_test_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },],
+                    
+                },
+            ],
+        },
+        {
+            name: "client_test",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "client_test_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        {
+                            name: "mctp_a",
+                            type: "channel_initiator",
+                            handler_process: "server_test_process",
+                            handler_object_name: "mctp_a",
+                        },
+                        {
+                            name: "mctp_b",
+                            type: "channel_initiator",
+                            handler_process: "server_test_process",
+                            handler_object_name: "mctp_b",
+                        },
+                        {
+                            name: "transport",
+                            type: "channel_initiator",
+                            handler_process: "server_test_process",
+                            handler_object_name: "transport",
+                        },
+                        {
+                            type: "thread",
+                            name: "client_test_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },],
+                    
+                },
+            ],
+        },
+    ],
+}

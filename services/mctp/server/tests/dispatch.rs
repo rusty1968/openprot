@@ -314,9 +314,9 @@ fn dispatch_recv_resolved_by_drive_pending() {
     // drive_pending should deliver the message
     let mut fired_handle: Option<Handle> = None;
     let mut fired_len = 0usize;
-    drive_pending(&mut server_a, 0, &mut recv_buf, &mut resp, |h, n| {
+    drive_pending(&mut server_a, 0, &mut recv_buf, &mut resp, |h, bytes| {
         fired_handle = Some(h);
-        fired_len = n;
+        fired_len = bytes.len();
     });
 
     assert_eq!(fired_handle, Some(listener_handle));
@@ -355,9 +355,9 @@ fn dispatch_recv_timeout() {
     // Advance time past deadline — no message ever arrives
     let mut fired_handle: Option<Handle> = None;
     let mut fired_len = 0usize;
-    drive_pending(&mut server, 200, &mut recv_buf, &mut resp, |h, n| {
+    drive_pending(&mut server, 200, &mut recv_buf, &mut resp, |h, bytes| {
         fired_handle = Some(h);
-        fired_len = n;
+        fired_len = bytes.len();
     });
 
     assert_eq!(fired_handle, Some(listener_handle));
