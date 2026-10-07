@@ -84,7 +84,7 @@ const SB_HEADER_OFFSET: usize = 0x400;
 /// Which generation of this image is running. In `.rodata`, so `&raw const` is
 /// its offset in the image on this non-XIP part; a `.data` static would resolve
 /// to the RAM copy instead. The bump applied on the way out over PLDM is what
-/// the second boot prints, so it can only have come from the round trip.
+/// the next boot prints, so it can only have come from the round trip.
 #[used]
 pub static BOOT_VERSION: u32 = 0;
 
@@ -653,23 +653,16 @@ fn run_update(
 
 #[entry]
 fn entry() {
-    pw_log::info!("BMC_VERSION:{}", boot_version() as u32);
-
-    // A non-zero version means this image already came round the loop, so the
-    // demo is over. Running the update again would never terminate.
-    if boot_version() != 0 {
-        let _ = syscall::debug_shutdown(Ok(()));
-        loop {}
-    }
+    pw_log::info!("Hello from BMC version {}", boot_version() as u32);
 
     // SAFETY: mints this process's memory mappings once, at its entry point.
     let mmaps = unsafe { take_mmaps() };
     // SAFETY: sole pin creation site in this binary, at boot; the pins! table is this chip's true pin map.
     let pins = unsafe { create_pins() };
     let gpio = GpioBlock::new(mmaps.gpio_regs);
-    // GPIOH5: this board's alive line, driven high for as long as it is running.
-    // The RoT watches it fall to confirm the reset it requested over GPIOJ0
-    // actually landed. Jumper: this pin -> RoT's GPIOH4.
+    // GPIOH5: this board's booted line, driven high once this image is running and
+    // left there, so a reset shows up to the RoT as a low gap followed by a rise.
+    // Jumper: this pin -> RoT's GPIOH4.
     let mut alive_pin = bind_gpio(pins.scu414_29, &gpio).into_output();
     let _ = alive_pin.set_high();
 
@@ -720,8 +713,13 @@ fn entry() {
             let _ = syscall::debug_shutdown(Err(Error::Internal));
         }
         Err(PldmServiceError::Mctp(e)) => {
-            pw_log::error!("UA: update flow failed, MCTP code {}", e.code as u32);
-            let _ = syscall::debug_shutdown(Err(Error::Internal));
+            // On the boot that follows activation the firmware device has already
+            // finished and shut down, so nothing answers and there is nothing to do.
+            pw_log::info!(
+                "UA: no firmware device answered, MCTP code {}",
+                e.code as u32
+            );
+            let _ = syscall::debug_shutdown(Ok(()));
         }
         Err(_) => {
             pw_log::error!("UA: update flow failed on a PLDM error");

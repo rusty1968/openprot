@@ -134,17 +134,17 @@ impl DelayNs for BoardDelay {
     }
 }
 
-/// How often [`wait_for_mock_bmc_reset`] re-reads the alive line while waiting.
+/// How often [`wait_for_boot_status`] re-reads the booted line while waiting.
 const ALIVE_POLL_INTERVAL_MICROS: u32 = 10_000;
 
-/// How long [`wait_for_mock_bmc_reset`] waits for the mock BMC to go quiet.
-/// By the time it looks the press is over, so this is a sanity bound rather
-/// than the expected cost.
+/// How long to wait for the mock BMC to go quiet. It has to cover the Pi's
+/// mirror noticing GPIOJ0, which is a 50ms sampling interval plus a `pinctrl`
+/// subprocess.
 const RESET_WINDOW: Duration = Duration::from_secs(1);
 
-/// How long GPIOJ0 is held high to request the reset. The Pi's mirror samples
-/// every 50ms plus a `pinctrl` subprocess, so the press spans several samples.
-const RESET_PULSE: Duration = Duration::from_millis(500);
+/// How long to wait for the mock BMC to come back up. It has to cover the boot
+/// ROM copying the whole image out of flash into SRAM, then kernel init.
+const BOOT_WINDOW: Duration = Duration::from_secs(30);
 
 /// A [`Platform`] that presses the mock BMC's reset on [`Effect::ActivateUpdate`]
 /// — standing in for the reboot a real activation would cause. Every other
@@ -152,9 +152,9 @@ const RESET_PULSE: Duration = Duration::from_millis(500);
 /// test proves, only that a real RequestUpdate, arriving over the wire from
 /// the update agent, drives the orchestrator through to activation.
 ///
-/// `execute` never manufactures the reboot's outcome: it only drives the line,
-/// and [`wait_for_mock_bmc_reset`] supplies `Event::BootConfirmed` from
-/// outside, once the mock BMC's alive line actually says so.
+/// `execute` never manufactures the reboot's outcome: it drives the line and
+/// watches, and only reports `Event::BootConfirmed` once the mock BMC's alive
+/// line actually says so.
 struct TestPlatform<OutP, InP> {
     reset: GpioResetControl<OutP, BoardDelay, PassthroughReset>,
     ready: GpioReadyMonitor<InP>,
@@ -164,37 +164,52 @@ impl<OutP: OutputPin, InP: InputPin> Platform for TestPlatform<OutP, InP> {
     fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
         match effect {
             Effect::ActivateUpdate => {
-                // A press, not a hold: the mock BMC cannot leave reset, let
-                // alone go quiet, while the line is still high.
+                // The fall has to be watched while the line is still high: the
+                // Pi's mirror drops the mock BMC's reset as soon as it sees
+                // GPIOJ0, so the line falls during the hold. The rise can only
+                // be watched after letting go, because the mirror holds the
+                // mock BMC down for as long as GPIOJ0 stays asserted.
                 //
-                // The `expect` documents an unreachable branch, not a
-                // swallowed error: the GPIO output's error type is
-                // `Infallible`, and `PassthroughReset` has a single variant,
-                // so `GpioResetControl`'s own id check always matches.
+                // The `expect`s document an unreachable branch, not a swallowed
+                // error: the GPIO output's error type is `Infallible`, and
+                // `PassthroughReset` has a single variant, so
+                // `GpioResetControl`'s own id check always matches.
                 self.reset
-                    .reset_pulse(&PassthroughReset::MockBmc, RESET_PULSE)
+                    .reset_assert(&PassthroughReset::MockBmc)
                     .expect("GPIOJ0 is Infallible and PassthroughReset has one variant");
-                pw_log::info!("FD: pulsed GPIOJ0 to reset the mock BMC");
-                Ok(None)
+                wait_for_boot_status(&mut self.ready, BootStatus::Booting, RESET_WINDOW);
+                self.reset
+                    .reset_deassert(&PassthroughReset::MockBmc)
+                    .expect("GPIOJ0 is Infallible and PassthroughReset has one variant");
+
+                if !wait_for_boot_status(&mut self.ready, BootStatus::Booted, BOOT_WINDOW) {
+                    pw_log::error!("FD: mock BMC reset, but never came back up");
+                    return Ok(None);
+                }
+
+                pw_log::info!("FD: GPIOJ0 reset landed; the mock BMC rebooted");
+                Ok(Some(Event::BootConfirmed(ORCH_COMPONENT)))
             }
             _ => Ok(None),
         }
     }
 }
 
-/// Watches the mock BMC's alive line (GPIOH4) until it falls or
-/// [`RESET_WINDOW`] elapses, returning whether the fall was observed in time.
-/// The mock BMC drives this line high for as long as it is running, so a fall
-/// is the reset landing. It does not come back: the harness loads that image
-/// into SRAM over UART, and the reset it performs boots the board from its SPI
-/// NOR instead, so the fall is all this side can observe. A read error is
-/// treated the same as still alive, matching `CheckpointWalk`'s existing
-/// silence-tolerance convention.
-fn wait_for_mock_bmc_reset<InP: InputPin>(alive: &mut GpioReadyMonitor<InP>) -> bool {
-    let deadline_us = RESET_WINDOW.as_micros() as u64;
+/// Watches the mock BMC's booted line (GPIOH4) until it reads `want` or
+/// `window` elapses, returning whether it was observed in time. The mock BMC
+/// raises this line at its entry point and leaves it there, so `Booting` is the
+/// low gap a reset carves out and `Booted` is the board back up afterwards. A
+/// read error is treated the same as not yet
+/// matching, following `CheckpointWalk`'s silence-tolerance convention.
+fn wait_for_boot_status<InP: InputPin>(
+    alive: &mut GpioReadyMonitor<InP>,
+    want: BootStatus,
+    window: Duration,
+) -> bool {
+    let deadline_us = window.as_micros() as u64;
     let mut waited_us: u64 = 0;
     loop {
-        if matches!(alive.boot_status(), Ok(BootStatus::Booting)) {
+        if matches!(alive.boot_status(), Ok(status) if status == want) {
             return true;
         }
         if waited_us >= deadline_us {
@@ -487,9 +502,9 @@ impl FdOps for DemoFdOps {
         self.verified.set(true);
         pw_log::info!("FD: image verified in flash, {} bytes", size as u32);
 
-        // Last flash access on this side, so hand the staging flash to the mock
-        // BMC: release SPIM0's input from our SPI1 master, then flip the
-        // fixture-level select. Passthrough stays on; that is the BMC's path.
+        // This round's last flash access on this side, so hand the staging flash
+        // to the mock BMC: release SPIM0's input from our SPI1 master, then flip
+        // the fixture-level select. Passthrough stays on; that is the BMC's path.
         // SAFETY: this process holds the SCU mapping and is its only writer.
         let scu = unsafe { ScuRegisters::new_global_unlocked() };
         scu.clear_spim_internal_master_route();
@@ -616,7 +631,7 @@ fn entry() {
     pw_log::info!("FD: waiting for the update agent at EID {}", UA_EID as u32);
 
     let mut buf = [0u8; FD_BUF_SIZE];
-    let mut update_latch = UpdateRequestLatch::new();
+    let mut update_latch = UpdateRequestLatch::new(ORCH_COMPONENT);
     // Returns as soon as ActivateFirmware puts the device back in Idle; an
     // idle timeout arrives as an error instead.
     match fd.run_terminus(
@@ -640,7 +655,7 @@ fn entry() {
     if let Some(event) = update_latch.take() {
         orchestrator.dispatch(&mut platform, event);
     }
-    let orchestrator_reached_updating = orchestrator.state() == State::Updating;
+    let orchestrator_reached_updating = orchestrator.state() == State::Updating(ORCH_COMPONENT);
     if !orchestrator_reached_updating {
         pw_log::error!("FD: orchestrator never reached State::Updating");
     }
@@ -648,16 +663,15 @@ fn entry() {
     // The real verify() outcome, already settled by the time run_terminus
     // returns, becomes the event that lets the orchestrator leave Updating.
     if orchestrator_reached_updating {
+        // ActivateUpdate drives GPIOJ0 and watches the alive line itself, so
+        // the BootConfirmed it reports comes back through this one dispatch.
+        // The rise is the proof: it says the reset request travelled through the
+        // Pi, landed on the mock BMC, and the board came back up.
         orchestrator.dispatch(&mut platform, verify_outcome_event(fd_ops.image_is_good()));
-        // The alive line going quiet is the whole proof: it says the reset
-        // request travelled through the Pi and landed on the mock BMC. It does
-        // not say new firmware booted — nothing on this side can observe that.
-        let reset_landed = wait_for_mock_bmc_reset(&mut platform.ready);
-        if reset_landed {
-            orchestrator.dispatch(&mut platform, Event::BootConfirmed(ORCH_COMPONENT));
-        } else {
-            pw_log::error!("FD: mock BMC kept running; the reset request never reached it");
-        }
+        // Activation only proposes the image, so the orchestrator re-walks its
+        // verification sequence. Boot verification is bypassed here, as it is in
+        // new_ready_core, so the walk is released the same way.
+        orchestrator.dispatch(&mut platform, Event::VerificationPassed(ORCH_COMPONENT));
     }
     let orchestrator_closed_the_loop =
         orchestrator_reached_updating && orchestrator.state() == State::Ready;

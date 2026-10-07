@@ -4,13 +4,15 @@
 """
 AST1060 EVB hardware interaction layer.
 
-Handles GPIO reset sequences, firmware upload via UART bootloader, and raw
-UART byte streaming. All configuration is received as CLI arguments from
-test_runner.py. Raw UART bytes are written to stdout; diagnostics go to
-stderr. Runs locally or is SCP'd to the Pi for remote test execution.
+Handles GPIO reset sequences, firmware upload via UART bootloader, and UART
+streaming, decoding the boards' tokenized logs against the ELFs named by
+--elf. Board output goes to stdout; diagnostics go to stderr. Runs locally
+or is SCP'd to the Pi for remote test execution.
 """
 
 import argparse
+import base64
+import binascii
 import subprocess
 import sys
 import threading
@@ -27,9 +29,62 @@ except ImportError:
     )
     sys.exit(1)
 
+# pw_tokenizer is vendored beside this script so the Pi needs no install; its
+# detokenize path is pure stdlib.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from pw_tokenizer import Detokenizer
+    from pw_tokenizer.detokenize import NestedMessageParser
+
+    _PW_TOKENIZER_AVAILABLE = True
+except ImportError:
+    _PW_TOKENIZER_AVAILABLE = False
+
 
 # All elapsed times reported by this script are relative to process start.
 _T0 = time.monotonic()
+
+# ELFs whose tokens the boards' logs are decoded against, set from --elf.
+_ELF_PATHS: list[str] = []
+
+# When set from --log-dir, each board's lines are also appended to <label>.log
+# there, so the two UARTs can be watched in separate terminals.
+_LOG_DIR: Path | None = None
+
+
+class _Decoder:
+    """Turns a board's tokenized log line back into text.
+
+    pw_tokenizer frames are `$<base64>`; everything else passes through. The
+    parser carries state between calls, so each UART stream needs its own.
+    """
+
+    def __init__(self, elf_paths: list[str]) -> None:
+        self._detok = (
+            Detokenizer(*elf_paths) if _PW_TOKENIZER_AVAILABLE and elf_paths else None
+        )
+        self._parser = NestedMessageParser() if self._detok else None
+
+    def decode(self, line: bytes) -> bytes:
+        if not self._parser:
+            return line
+        out = bytearray()
+        # The newline is what terminates a frame, and _stream_uart split it off.
+        for is_token, span in self._parser.read_messages(line + b"\n"):
+            if not is_token:
+                out += span
+                continue
+            try:
+                b64 = span[1:]
+                b64 += b"=" * (-len(b64) % 4)
+                result = self._detok.detokenize(base64.b64decode(b64, validate=True))
+            except (binascii.Error, ValueError):
+                result = None
+            if result is not None and result.ok():
+                out += str(result).encode("utf-8", errors="replace")
+            else:
+                out += span
+        return bytes(out).rstrip(b"\n")
 
 
 def _gpio_set(pin: int, state: str) -> None:
@@ -196,27 +251,32 @@ def _stream_uart(
     port.timeout = 1.0
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     buf = b""
+    decoder = _Decoder(_ELF_PATHS)
+    sink = (
+        open(_LOG_DIR / f"{label or 'uart'}.log", "ab", buffering=0)
+        if _LOG_DIR is not None
+        else None
+    )
     # Held back so the prefix only ever lands at a line start: a pw_tokenizer
     # $base64 frame is terminated by the newline, never split across one.
     partial = b""
     while True:
         data = port.read(1024)
         if deadline is not None and time.monotonic() > deadline:
-            print(
-                f"[{time.monotonic() - _T0:7.2f}] no verdict in {timeout_s:.0f}s;"
-                " board is silent",
-                file=sys.stderr,
-            )
+            print(f"no verdict in {timeout_s:.0f}s; board is silent", file=sys.stderr)
             return False
         if data:
             partial += data
             lines = partial.split(b"\n")
             partial = lines.pop()
             if lines:
+                now = b"%7.2f" % (time.monotonic() - _T0)
                 stamped = b"".join(
-                    b"[%7.2f %s] %s\n" % (time.monotonic() - _T0, label.encode(), line)
+                    b"[%s] [%s] %s\n" % (now, label.encode(), decoder.decode(line))
                     for line in lines
                 )
+                if sink is not None:
+                    sink.write(stamped)
                 try:
                     with lock or nullcontext():
                         sys.stdout.buffer.write(stamped)
@@ -280,7 +340,7 @@ def _run_paired(args, firmware_path: Path, slave_firmware_path: Path) -> bool:
         # earlier, and its output would otherwise sit in the tty buffer and
         # arrive all at once with the wrong timestamps.
         threads = [
-            threading.Thread(target=_monitor, args=(0, port_a, "A"), daemon=True)
+            threading.Thread(target=_monitor, args=(0, port_a, "rot"), daemon=True)
         ]
         threads[0].start()
 
@@ -293,7 +353,7 @@ def _run_paired(args, firmware_path: Path, slave_firmware_path: Path) -> bool:
         # its "staged" verdict and restart it before anything else can touch
         # srst; what boots next is the firmware the rest of the run depends on.
         if args.slave_stages_to_flash:
-            if not _stream_uart(port_b, _stdout_lock, "B"):
+            if not _stream_uart(port_b, _stdout_lock, "bmc"):
                 return False
             _sequence_to_normal_mode(
                 args.slave_srst_pin, args.slave_fwspick_pin, port_b
@@ -316,7 +376,7 @@ def _run_paired(args, firmware_path: Path, slave_firmware_path: Path) -> bool:
             watcher.start()
 
         threads.append(
-            threading.Thread(target=_monitor, args=(1, port_b, "B"), daemon=True)
+            threading.Thread(target=_monitor, args=(1, port_b, "bmc"), daemon=True)
         )
         threads[1].start()
         for t in threads:
@@ -408,7 +468,27 @@ def main() -> int:
         default=None,
         help="BCM GPIO pin device A drives high to request a device B reset",
     )
+    parser.add_argument(
+        "--elf",
+        action="append",
+        default=[],
+        help="ELF whose tokens the boards' logs are decoded against; repeatable",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory to also append each board's lines to, as <label>.log, "
+        "so the two UARTs can be tailed in separate terminals",
+    )
     args = parser.parse_args()
+
+    global _ELF_PATHS
+    _ELF_PATHS = args.elf
+
+    if args.log_dir:
+        global _LOG_DIR
+        _LOG_DIR = Path(args.log_dir)
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     if not args.stream_only:
         if not args.firmware:
