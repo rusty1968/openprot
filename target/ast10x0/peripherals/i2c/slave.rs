@@ -135,6 +135,14 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
         }
     }
 
+    /// Clear the packet-done interrupt status. In packet mode this also clears the related
+    /// status bits (0, 2, 4:5, 7, 15, 17), per the I2CS24 description.
+    fn clear_pkt_done(&mut self) {
+        self.mmio
+            .i2c
+            .write_reg(constants::I2CS24, constants::AST_I2CS_PKT_DONE);
+    }
+
     /// Arm slave receive path based on transfer mode.
     fn arm_slave_receive(&mut self, cmd: &mut u32) {
         if self.xfer_mode == I2cXferMode::DmaMode {
@@ -447,14 +455,17 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
 
         if (status & constants::AST_I2CS_PKT_DONE) != 0 {
             let mut cmd: u32 = constants::AST_I2CS_ACTIVE_ALL | constants::AST_I2CS_PKT_MODE_EN;
-            self.mmio
-                .i2c
-                .write_reg(constants::I2CS24, constants::AST_I2CS_PKT_DONE);
+            // The packet-done status is cleared only once any new command has been issued: the
+            // datasheet (slave packet-mode programming flow) says interrupt status "should be
+            // cleared after all new commands are ready", and the byte-mode path below already
+            // writes I2CS28 before I2CS24. Clearing it first let the controller carry on before
+            // the new DMA address, length and command were in place.
             let sts = status & (!(constants::AST_I2CS_PKT_DONE | constants::AST_I2CS_PKT_ERROR));
             if sts == constants::AST_I2CS_SLAVE_MATCH
                 || sts == constants::AST_I2CS_SLAVE_MATCH | constants::AST_I2CS_RX_DONE
             {
                 // S: Sw
+                self.clear_pkt_done();
                 return Some(SlaveEvent::WriteRequest);
             } else if sts == constants::AST_I2CS_SLAVE_MATCH | constants::AST_I2CS_WAIT_RX_DMA
                 || sts
@@ -465,6 +476,7 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 // S: Sw|D
                 self.arm_slave_receive(&mut cmd);
                 self.mmio.i2c.write_reg(constants::I2CS28, cmd);
+                self.clear_pkt_done();
                 return Some(SlaveEvent::DataReceived {
                     len: self.slave_rx_len(),
                 });
@@ -472,6 +484,7 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 // S: Sw|P
                 self.arm_slave_receive(&mut cmd);
                 self.mmio.i2c.write_reg(constants::I2CS28, cmd);
+                self.clear_pkt_done();
                 return Some(SlaveEvent::Stop);
             } else if sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_STOP
                 || sts == constants::AST_I2CS_RX_DONE | constants::AST_I2CS_WAIT_RX_DMA
@@ -499,6 +512,8 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                         | constants::AST_I2CS_STOP
             {
                 // S: (Sw)|D|(P)
+                // No new command is issued here; `slave_read` re-arms after the drain.
+                self.clear_pkt_done();
                 return Some(SlaveEvent::DataReceived {
                     len: self.slave_rx_len(),
                 });
@@ -509,6 +524,7 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                         | constants::AST_I2CS_WAIT_TX_DMA
             {
                 // S: rx_done | wait_tx
+                self.clear_pkt_done();
                 return Some(SlaveEvent::DataReceivedAndSent {
                     rx_len: self.slave_rx_len(),
                     tx_len: (((self.mmio.i2c.read_reg(constants::I2CC0C) >> 8) & 0x1f) + 1)
@@ -516,11 +532,13 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 });
             } else if sts == constants::AST_I2CS_SLAVE_MATCH | constants::AST_I2CS_WAIT_TX_DMA {
                 // S: Sw | wait_tx
+                self.clear_pkt_done();
                 return Some(SlaveEvent::DataSent {
                     len: (((self.mmio.i2c.read_reg(constants::I2CC0C) >> 8) & 0x1f) + 1) as usize,
                 });
             } else if sts == constants::AST_I2CS_WAIT_TX_DMA {
                 // S: wait_tx
+                self.clear_pkt_done();
                 return Some(SlaveEvent::DataSent {
                     len: (((self.mmio.i2c.read_reg(constants::I2CC0C) >> 8) & 0x1f) + 1) as usize,
                 });
@@ -534,9 +552,11 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                 // S: (Sr) (TX_NAK)|P — master read completed with NAK then STOP
                 self.arm_slave_receive(&mut cmd);
                 self.mmio.i2c.write_reg(constants::I2CS28, cmd);
+                self.clear_pkt_done();
                 return Some(SlaveEvent::Stop);
             } else {
                 // TODO packet slave sts
+                self.clear_pkt_done();
             }
         } else {
             //byte irq
