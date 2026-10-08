@@ -100,45 +100,52 @@ rust_binary(
     ],
 )
 
+SERVER_DEPS = [
+    "//services/i2c/api:i2c_api",
+    "//services/mctp/api:mctp_api",
+    "//services/mctp/server:mctp_server_lib",
+    "//services/mctp/transport-i2c:mctp_transport_i2c",
+    "//target/ast10x0/backend/i2c:i2c_backend_ast10x0",
+    "//target/ast10x0/peripherals",
+    "@pigweed//pw_kernel/syscall:syscall_user",
+    "@pigweed//pw_kernel/userspace",
+    "@pigweed//pw_log/rust:pw_log",
+    "@pigweed//pw_status/rust:pw_status",
+    "@rust_crates//:embedded-hal",
+    "@rust_crates//:mctp",
+    "@rust_crates//:mctp-lib",
+]
+
+# The I2C driver and the MCTP server share one process on each card, so MCTP
+# packets reach the bus without an I2C IPC hop.
 rust_app(
-    name = "i2c_server",
-    srcs = ["//target/ast10x0/tests/mctp/server:i2c_server_main.rs"],
-    codegen_crate_name = "app_i2c_server",
+    name = "mctp_i2c_server",
+    srcs = [
+        "server_common.rs",
+        "server_main.rs",
+    ],
+    codegen_crate_name = "app_mctp_i2c_server",
+    crate_root = "server_main.rs",
     edition = "2024",
     system_config = ":system_config",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = [
-        "//services/i2c/server-runtime:i2c_server_runtime",
-        "//target/ast10x0/backend/i2c:i2c_backend_ast10x0",
-        "//target/ast10x0/peripherals",
-        "@pigweed//pw_kernel/userspace",
-        "@pigweed//pw_log/rust:pw_log",
-    ],
+    deps = SERVER_DEPS,
 )
 
 rust_app(
-    name = "mctp_server",
-    srcs = ["//target/ast10x0/tests/mctp/server:main.rs"],
-    codegen_crate_name = "app_mctp_server",
+    name = "mctp_i2c_server_peer",
+    srcs = [
+        "server_common.rs",
+        "server_main_peer.rs",
+    ],
+    codegen_crate_name = "app_mctp_i2c_server_peer",
+    crate_root = "server_main_peer.rs",
     edition = "2024",
-    system_config = ":system_config",
+    system_config = ":peer_system_config",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = [
-        "//services/i2c/api:i2c_api",
-        "//services/i2c/client:i2c_client",
-        "//services/i2c/client-ipc:i2c_client_ipc",
-        "//services/mctp/api:mctp_api",
-        "//services/mctp/server:mctp_server_lib",
-        "//services/mctp/transport-i2c:mctp_transport_i2c",
-        "@pigweed//pw_kernel/syscall:syscall_user",
-        "@pigweed//pw_kernel/userspace",
-        "@pigweed//pw_log/rust:pw_log",
-        "@pigweed//pw_status/rust:pw_status",
-        "@rust_crates//:mctp",
-        "@rust_crates//:mctp-lib",
-    ],
+    deps = SERVER_DEPS,
 )
 
 app_regions(
@@ -184,47 +191,6 @@ rust_app(
     ],
 )
 
-rust_app(
-    name = "i2c_server_peer",
-    srcs = ["//target/ast10x0/tests/mctp/server:i2c_server_main_peer.rs"],
-    codegen_crate_name = "app_i2c_server_peer",
-    edition = "2024",
-    system_config = ":peer_system_config",
-    tags = ["kernel"],
-    target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = [
-        "//services/i2c/server-runtime:i2c_server_runtime",
-        "//target/ast10x0/backend/i2c:i2c_backend_ast10x0",
-        "//target/ast10x0/peripherals",
-        "@pigweed//pw_kernel/userspace",
-        "@pigweed//pw_log/rust:pw_log",
-    ],
-)
-
-rust_app(
-    name = "mctp_server_peer",
-    srcs = ["//target/ast10x0/tests/mctp/server:main_peer.rs"],
-    codegen_crate_name = "app_mctp_server_peer",
-    edition = "2024",
-    system_config = ":peer_system_config",
-    tags = ["kernel"],
-    target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = [
-        "//services/i2c/api:i2c_api",
-        "//services/i2c/client:i2c_client",
-        "//services/i2c/client-ipc:i2c_client_ipc",
-        "//services/mctp/api:mctp_api",
-        "//services/mctp/server:mctp_server_lib",
-        "//services/mctp/transport-i2c:mctp_transport_i2c",
-        "@pigweed//pw_kernel/syscall:syscall_user",
-        "@pigweed//pw_kernel/userspace",
-        "@pigweed//pw_log/rust:pw_log",
-        "@pigweed//pw_status/rust:pw_status",
-        "@rust_crates//:mctp",
-        "@rust_crates//:mctp-lib",
-    ],
-)
-
 app_regions(
     name = "app_pldm_ua_regions",
     app_name = "pldm_ua",
@@ -263,8 +229,7 @@ rust_app(
 system_image(
     name = "pldm_fd_image",
     apps = [
-        ":i2c_server",
-        ":mctp_server",
+        ":mctp_i2c_server",
         ":pldm_fd",
     ],
     kernel = ":target",
@@ -278,8 +243,7 @@ system_image(
 system_image(
     name = "pldm_ua_image",
     apps = [
-        ":i2c_server_peer",
-        ":mctp_server_peer",
+        ":mctp_i2c_server_peer",
         ":pldm_ua",
     ],
     kernel = ":peer_target",

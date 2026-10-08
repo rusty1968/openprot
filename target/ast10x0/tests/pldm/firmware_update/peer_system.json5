@@ -16,19 +16,19 @@
     },
     apps: [
         {
-            name: "i2c_server_peer",
-            flash_size_bytes: 16384,
+            name: "mctp_i2c_server_peer",
+            flash_size_bytes: 32768,
             processes: [
                 {
-                    name: "i2c_server_peer_process",
-                    ram_size_bytes: 65536,
+                    name: "mctp_i2c_server_peer_process",
+                    ram_size_bytes: 131072,
                     objects: [
                         {
                             name: "wg",
                             type: "wait_group",
                         },
                         {
-                            name: "i2c",
+                            name: "mctp",
                             type: "channel_handler",
                         },
                         {
@@ -43,7 +43,7 @@
                         },
                         {
                             type: "thread",
-                            name: "i2c_server_peer_thread",
+                            name: "mctp_i2c_server_peer_thread",
                             kernel_stack_size_bytes: 4096,
                         },
                     ],
@@ -53,37 +53,6 @@
                             type: "device",
                             start_address: 0x7e7b0000,
                             size_bytes: 0x4000,
-                        },
-                    ],
-                },
-            ],
-        },
-        {
-            name: "mctp_server_peer",
-            flash_size_bytes: 16384,
-            processes: [
-                {
-                    name: "mctp_server_peer_process",
-                    ram_size_bytes: 65536,
-                    objects: [
-                        {
-                            name: "wg",
-                            type: "wait_group",
-                        },
-                        {
-                            name: "mctp",
-                            type: "channel_handler",
-                        },
-                        {
-                            name: "i2c",
-                            type: "channel_initiator",
-                            handler_process: "i2c_server_peer_process",
-                            handler_object_name: "i2c",
-                        },
-                        {
-                            type: "thread",
-                            name: "mctp_server_peer_thread",
-                            kernel_stack_size_bytes: 4096,
                         },
                     ],
                 },
@@ -100,7 +69,7 @@
                         {
                             name: "mctp",
                             type: "channel_initiator",
-                            handler_process: "mctp_server_peer_process",
+                            handler_process: "mctp_i2c_server_peer_process",
                             handler_object_name: "mctp",
                         },
                         {
