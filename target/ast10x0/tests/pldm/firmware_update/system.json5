@@ -16,13 +16,13 @@
     kernel: {
         flash_start_address: 0x00000700,
         flash_size_bytes: 129280,
-        ram_start_address: 0x00060000,
+        ram_start_address: 0x00040000,
         ram_size_bytes: 131072,
     },
     apps: [
         {
             name: "i2c_server",
-            flash_size_bytes: 65536,
+            flash_size_bytes: 16384,
             processes: [
                 {
                     name: "i2c_server_process",
@@ -65,7 +65,7 @@
         },
         {
             name: "mctp_server",
-            flash_size_bytes: 131072,
+            flash_size_bytes: 16384,
             processes: [
                 {
                     name: "mctp_server_process",
@@ -96,7 +96,7 @@
         },
         {
             name: "pldm_fd",
-            flash_size_bytes: 65536,
+            flash_size_bytes: 32768,
             processes: [
                 {
                     name: "pldm_fd_process",
