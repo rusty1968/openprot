@@ -178,8 +178,14 @@ fn server_loop() -> Result<()> {
                 match rx {
                     Ok(n) if n > 0 => match i2c_receiver.decode(&i2c_rx_buf[..n]) {
                         Ok((pkt, _)) => {
-                            if server.inbound(pkt).is_err() {
-                                pw_log::error!("mctp inbound rejected a packet");
+                            if let Err(e) = server.inbound(pkt) {
+                                // `Server::inbound` folds every mctp error it doesn't
+                                // name into InternalError (1); NoSpace is 2.
+                                pw_log::error!(
+                                    "mctp inbound rejected a packet: code=0x{:02x} len=0x{:04x}",
+                                    e.code as u32,
+                                    pkt.len() as u32
+                                );
                             }
                             // A fragment may have opened a reassembly; have the
                             // router re-derive its timeout on the next pass.
