@@ -35,6 +35,7 @@ use openprot_hal_blocking::i2c_hardware::I2cBusRecovery;
 
 pub use ast10x0_peripherals::i2c::{
     Ast1060I2c, Ast1060I2cRegisters, ClockConfig, I2cConfig, I2cError, I2cSpeed, I2cXferMode,
+    SlaveRxLatch,
 };
 
 /// The yield closure type stored in every bus driver.
@@ -129,6 +130,9 @@ pub struct Ast1060I2cBackend {
     slave_enabled: bool,
     /// Mirrored slave address — serves `I2cSlaveCore::slave_address(&self)`.
     slave_addr: Option<SevenBitAddress>,
+    /// The last slave frame, copied out of the slave DMA buffer by the interrupt handler.
+    /// Lives here because the transient driver does not outlive a call.
+    slave_latch: SlaveRxLatch,
 }
 
 impl Ast1060I2cBackend {
@@ -141,14 +145,15 @@ impl Ast1060I2cBackend {
     /// constructor is used.
     fn make_driver(&mut self) -> Ast1060I2c<'_, Yield> {
         let regs = self.regs;
-        if let (Some(m), Some(s)) = (
+        let driver = if let (Some(m), Some(s)) = (
             self.master_dma_buf.as_deref_mut(),
             self.slave_dma_buf.as_deref_mut(),
         ) {
             Ast1060I2c::from_initialized_with_dma(regs, &self.config, m, s, spin as Yield)
         } else {
             Ast1060I2c::from_initialized(regs, &self.config, spin as Yield)
-        }
+        };
+        driver.with_slave_latch(&mut self.slave_latch)
     }
 }
 
@@ -272,6 +277,7 @@ pub fn open_bus<Scl: Routes<I2cScl>, Sda: Routes<I2cSda>>(
         slave_dma_buf: None,
         slave_enabled: false,
         slave_addr: None,
+        slave_latch: SlaveRxLatch::new(),
     })
 }
 
@@ -294,5 +300,6 @@ pub fn open_bus_dma<Scl: Routes<I2cScl>, Sda: Routes<I2cSda>>(
         slave_dma_buf: Some(slave_dma_buf.0),
         slave_enabled: false,
         slave_addr: None,
+        slave_latch: SlaveRxLatch::new(),
     })
 }

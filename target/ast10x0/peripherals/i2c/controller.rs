@@ -5,6 +5,7 @@
 
 use super::constants::{I2cMasterStatus, I2cStat};
 use super::registers::Ast1060I2cRegisters;
+use super::slave::SlaveRxLatch;
 use super::timing::configure_timing;
 use super::types::{I2cConfig, I2cXferMode};
 use super::{constants, error::I2cError};
@@ -46,6 +47,8 @@ pub struct Ast1060I2c<'a, Y: FnMut(u32)> {
     pub(crate) master_dma_buf: Option<&'a mut [u8]>,
     /// Slave DMA buffer for slave RX (non-cached SRAM, caller-owned)
     pub(crate) slave_dma_buf: Option<&'a mut [u8]>,
+    /// Where the interrupt handler parks a received frame before re-arming slave DMA.
+    pub(crate) slave_latch: Option<&'a mut SlaveRxLatch>,
     /// Cooperative yield invoked between status polls in
     /// [`wait_completion`]. Argument is the suggested wait window in
     /// nanoseconds.
@@ -99,8 +102,18 @@ impl<'a, Y: FnMut(u32)> Ast1060I2c<'a, Y> {
             completion: false,
             master_dma_buf: None,
             slave_dma_buf: None,
+            slave_latch: None,
             yield_ns,
         }
+    }
+
+    /// Lend this driver a [`SlaveRxLatch`] so a received slave frame is copied out of
+    /// the DMA buffer before DMA is re-armed. Without one, the frame stays in the DMA
+    /// buffer until `slave_read` and the next frame can overwrite it.
+    #[must_use]
+    pub fn with_slave_latch(mut self, latch: &'a mut SlaveRxLatch) -> Self {
+        self.slave_latch = Some(latch);
+        self
     }
 
     /// Create I2C instance with DMA mode support.

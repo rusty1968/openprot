@@ -79,7 +79,7 @@ pub use controller::Ast1060I2c;
 pub use error::I2cError;
 pub use global::init_i2c_global;
 pub use registers::Ast1060I2cRegisters;
-pub use slave::{SlaveBuffer, SlaveConfig, SlaveEvent};
+pub use slave::{SlaveBuffer, SlaveConfig, SlaveEvent, SlaveRxLatch, SLAVE_RX_LATCH_SIZE};
 pub use subsystem::bringup;
 pub use types::*;
 

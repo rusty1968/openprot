@@ -66,6 +66,45 @@ pub enum SlaveEvent {
     Stop,
 }
 
+/// Capacity of a [`SlaveRxLatch`]: one slave DMA buffer's worth.
+pub const SLAVE_RX_LATCH_SIZE: usize = 512;
+
+/// One received slave frame, copied out of the slave DMA buffer by the interrupt
+/// handler before DMA is re-armed.
+///
+/// Owned by whoever outlives the transient driver (the backend), and lent to each
+/// driver with [`Ast1060I2c::with_slave_latch`](super::Ast1060I2c::with_slave_latch).
+pub struct SlaveRxLatch {
+    buf: [u8; SLAVE_RX_LATCH_SIZE],
+    /// Bytes held; zero when empty.
+    len: usize,
+    overruns: u32,
+}
+
+impl SlaveRxLatch {
+    /// An empty latch.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            buf: [0; SLAVE_RX_LATCH_SIZE],
+            len: 0,
+            overruns: 0,
+        }
+    }
+
+    /// Frames replaced before they were read.
+    #[must_use]
+    pub const fn overruns(&self) -> u32 {
+        self.overruns
+    }
+}
+
+impl Default for SlaveRxLatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Slave mode data buffer for application-level buffering
 pub struct SlaveBuffer {
     data: [u8; SLAVE_BUFFER_SIZE],
@@ -132,6 +171,32 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
             // I2CC00 bit 20). Report the full count including that byte, consistent
             // with what slave_read returns.
             ((self.mmio.i2c.read_reg(constants::I2CC0C) >> 24) & 0x3f) as usize
+        }
+    }
+
+    /// Copy the `len` bytes just received out of the slave DMA buffer into the
+    /// attached [`SlaveRxLatch`], if there is one. Must run before DMA is re-armed.
+    ///
+    /// A frame still unread when the next one arrives is replaced and counted in
+    /// [`SlaveRxLatch::overruns`].
+    fn latch_received_frame(&mut self, len: usize) {
+        let (Some(latch), Some(dma_buf)) = (
+            self.slave_latch.as_deref_mut(),
+            self.slave_dma_buf.as_deref(),
+        ) else {
+            return;
+        };
+        let n = len.min(dma_buf.len()).min(latch.buf.len());
+        if n == 0 {
+            return;
+        }
+        if latch.len != 0 {
+            latch.overruns = latch.overruns.wrapping_add(1);
+            pw_log::warn!("i2c slave rx latch overrun");
+        }
+        if let (Some(dst), Some(src)) = (latch.buf.get_mut(..n), dma_buf.get(..n)) {
+            dst.copy_from_slice(src);
+            latch.len = n;
         }
     }
 
@@ -321,6 +386,19 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
 
             Ok(to_read)
         } else if self.xfer_mode == I2cXferMode::DmaMode {
+            // A frame the interrupt handler already copied out (and re-armed DMA for)
+            // is handed over as-is; the counter and DMA buffer now describe the next one.
+            if let Some(latch) = self.slave_latch.as_deref_mut() {
+                if latch.len != 0 {
+                    let n = latch.len.min(buffer.len());
+                    if let (Some(dst), Some(src)) = (buffer.get_mut(..n), latch.buf.get(..n)) {
+                        dst.copy_from_slice(src);
+                    }
+                    latch.len = 0;
+                    return Ok(n);
+                }
+            }
+
             // DMA mode: the hardware has already DMA'd into `self.dma_buf`.
             // AST_I2CC_SLAVE_PKT_SAVE_ADDR deposits the address byte at dma_buf[0];
             // include it in the returned data (matches buffer-mode treatment above).
@@ -463,11 +541,16 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
                         | constants::AST_I2CS_WAIT_RX_DMA
             {
                 // S: Sw|D
+                // Take the frame out of the DMA buffer *before* re-arming: arming
+                // zeroes the byte counter and points DMA back at offset 0, so the
+                // next frame would overwrite this one, and a later `slave_read`
+                // would see a counter that no longer describes it. The length is
+                // read first for the same reason.
+                let len = self.slave_rx_len();
+                self.latch_received_frame(len);
                 self.arm_slave_receive(&mut cmd);
                 self.mmio.i2c.write_reg(constants::I2CS28, cmd);
-                return Some(SlaveEvent::DataReceived {
-                    len: self.slave_rx_len(),
-                });
+                return Some(SlaveEvent::DataReceived { len });
             } else if sts == constants::AST_I2CS_SLAVE_MATCH | constants::AST_I2CS_STOP {
                 // S: Sw|P
                 self.arm_slave_receive(&mut cmd);
