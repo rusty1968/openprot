@@ -32,6 +32,7 @@ use openprot_hal::i2c::{I2cBus, I2cScl, I2cSda};
 use openprot_hal::resource::{Pin, Routes};
 use openprot_hal_blocking::i2c_hardware::slave::{I2cIsrEvent, I2cSlaveBuffer, I2cSlaveCore};
 use openprot_hal_blocking::i2c_hardware::I2cBusRecovery;
+use util_region::{Mmap, Region};
 
 pub use ast10x0_peripherals::i2c::{
     Ast1060I2c, Ast1060I2cRegisters, ClockConfig, I2cConfig, I2cError, I2cSpeed, I2cXferMode,
@@ -64,6 +65,31 @@ impl NonCachedBuf {
     #[must_use]
     pub fn __from_ram_nc(buf: &'static mut [u8]) -> Self {
         Self(buf)
+    }
+}
+
+/// The non-cached SRAM window. The cacheable area (SCUA50) ends at `0xA0000`, so the CPU and the DMA
+/// engine see the same bytes here without cache maintenance.
+const RAM_NC_START: usize = 0x000A_0000;
+const RAM_NC_END: usize = 0x000C_0000;
+
+impl NonCachedBuf {
+    /// Take the first `len` bytes of a dedicated mapping as a DMA buffer. `None` if the mapping is
+    /// not entirely inside the non-cached window, or is smaller than `len`.
+    ///
+    /// The region token is consumed, so the buffer is the mapping's only user; it is zeroed here
+    /// because the window holds whatever the previous boot left.
+    #[must_use]
+    pub fn from_region<T: Mmap>(region: Region<T>, len: usize) -> Option<Self> {
+        let end = T::START.checked_add(len)?;
+        if len == 0 || len > T::LEN || T::START < RAM_NC_START || end > RAM_NC_END {
+            return None;
+        }
+        // SAFETY: the token proves this process owns `T`'s mapping and nothing else holds it, it is
+        // at least `len` bytes (checked above), and the range lies in the non-cached window.
+        let buf = unsafe { core::slice::from_raw_parts_mut(region.as_mut_ptr(), len) };
+        buf.fill(0);
+        Some(Self(buf))
     }
 }
 

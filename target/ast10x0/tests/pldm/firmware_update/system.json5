@@ -53,6 +53,24 @@
                     ],
                     memory_mappings: [
                         {
+                            // The slave RX DMA buffer, in the non-cached SRAM window
+                            // (0xA0000+, outside the cacheable area) so the CPU reads
+                            // what the DMA engine wrote. The kernel's own `.ram_nc`
+                            // statics start at 0xA0000; this sits clear of them.
+                            name: "i2c_slave_dma",
+                            type: "read_write_data",
+                            start_address: 0x000a1000,
+                            size_bytes: 0x200,
+                        },
+                        {
+                            // The master TX/RX DMA staging buffer, in the same non-cached
+                            // window and for the same reason as `i2c_slave_dma`.
+                            name: "i2c_master_dma",
+                            type: "read_write_data",
+                            start_address: 0x000a2000,
+                            size_bytes: 0x1000,
+                        },
+                        {
                             name: "i2c_regs",
                             type: "device",
                             start_address: 0x7e7b0000,

@@ -16,6 +16,7 @@ rust_library(
         "//hal/blocking",
         "//services/i2c/api:i2c_api",
         "//target/ast10x0/peripherals",
+        "//util/region",
         "@ast1060_pac",
         "@rust_crates//:embedded-hal",
     ],

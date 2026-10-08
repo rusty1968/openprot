@@ -7,7 +7,7 @@
 
 #[allow(unused_imports)]
 use util_region::{Mmap, Region};
-{% for m in process.memory_mappings %}{% if m["type"] == "device" %}{% set mmap = m.name | replace("_", " ") | title | replace(" ", "") %}
+{% for m in process.memory_mappings %}{% if (m["type"] == "device" or (m["type"] == "read_write_data" and m.name != "ram")) %}{% set mmap = m.name | replace("_", " ") | title | replace(" ", "") %}
 pub struct {{mmap}};
 
 impl Mmap for {{mmap}} {
@@ -17,7 +17,7 @@ impl Mmap for {{mmap}} {
 {% endif %}{% endfor %}
 /// The device memory mappings declared for `{{process.name}}`.
 pub struct Mmaps {
-{% for m in process.memory_mappings %}{% if m["type"] == "device" %}    pub {{m.name}}: Region<{{m.name | replace("_", " ") | title | replace(" ", "")}}>,
+{% for m in process.memory_mappings %}{% if (m["type"] == "device" or (m["type"] == "read_write_data" and m.name != "ram")) %}    pub {{m.name}}: Region<{{m.name | replace("_", " ") | title | replace(" ", "")}}>,
 {% endif %}{% endfor %}}
 
 /// # Safety
@@ -26,6 +26,6 @@ pub struct Mmaps {
 #[allow(unused)]
 pub const unsafe fn take_mmaps() -> Mmaps {
     Mmaps {
-{% for m in process.memory_mappings %}{% if m["type"] == "device" %}        {{m.name}}: unsafe { Region::new() },
+{% for m in process.memory_mappings %}{% if (m["type"] == "device" or (m["type"] == "read_write_data" and m.name != "ram")) %}        {{m.name}}: unsafe { Region::new() },
 {% endif %}{% endfor %}    }
 }

@@ -100,11 +100,15 @@ fn server_loop() -> Result<()> {
     // SAFETY: sole pin creation site in this binary, at boot; the pins! table is this chip's true pin map.
     let pins = unsafe { create_pins() };
     let (scl, sda) = (pins.scu418_0, pins.scu418_1);
+    // Both DMA buffers live in the non-cached SRAM window (`i2c_master_dma` and `i2c_slave_dma` in
+    // the system config), so the CPU and the DMA engine see the same bytes.
+    // SAFETY: sole call, at boot; mints each mapping the process declares once.
+    let mmaps = unsafe { take_mmaps() };
     let (Some(master_dma_buf), Some(slave_dma_buf)) = (
-        i2c_backend::non_cached_buf!(4096),
-        i2c_backend::non_cached_buf!(512),
+        i2c_backend::NonCachedBuf::from_region(mmaps.i2c_master_dma, 4096),
+        i2c_backend::NonCachedBuf::from_region(mmaps.i2c_slave_dma, 512),
     ) else {
-        pw_log::error!("i2c DMA buffers already taken");
+        pw_log::error!("i2c DMA buffers unavailable");
         return Err(Error::Internal);
     };
     let Ok(mut driver) =

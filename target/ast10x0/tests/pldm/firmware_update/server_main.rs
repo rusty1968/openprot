@@ -7,6 +7,7 @@
 #![no_std]
 
 use app_mctp_i2c_server::{handle, signals};
+use app_mctp_i2c_server_regions::take_mmaps;
 
 const OWN_EID: u8 = 8;
 const OWN_I2C_ADDR: u8 = 0x10;

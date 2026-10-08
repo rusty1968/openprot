@@ -116,6 +116,24 @@ SERVER_DEPS = [
     "@rust_crates//:mctp-lib",
 ]
 
+app_regions(
+    name = "app_mctp_i2c_server_regions",
+    app_name = "mctp_i2c_server",
+    edition = "2024",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+)
+
+app_regions(
+    name = "app_mctp_i2c_server_peer_regions",
+    app_name = "mctp_i2c_server_peer",
+    edition = "2024",
+    system_config = ":peer_system_config",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+)
+
 # The I2C driver and the MCTP server share one process on each card, so MCTP
 # packets reach the bus without an I2C IPC hop.
 rust_app(
@@ -130,7 +148,7 @@ rust_app(
     system_config = ":system_config",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = SERVER_DEPS,
+    deps = SERVER_DEPS + [":app_mctp_i2c_server_regions"],
 )
 
 rust_app(
@@ -145,7 +163,7 @@ rust_app(
     system_config = ":peer_system_config",
     tags = ["kernel"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
-    deps = SERVER_DEPS,
+    deps = SERVER_DEPS + [":app_mctp_i2c_server_peer_regions"],
 )
 
 app_regions(
