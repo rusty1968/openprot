@@ -15,9 +15,9 @@
     },
     kernel: {
         flash_start_address: 0x00000700,
-        flash_size_bytes: 129280,
-        ram_start_address: 0x00040000,
-        ram_size_bytes: 131072,
+        flash_size_bytes: 63744,
+        ram_start_address: 0x00020000,
+        ram_size_bytes: 81920,
     },
     apps: [
         {
