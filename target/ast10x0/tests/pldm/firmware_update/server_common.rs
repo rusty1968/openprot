@@ -25,7 +25,7 @@ use openprot_mctp_transport_i2c::{I2cSender, MctpI2cReceiver};
 use pw_status::{Error, Result};
 use userspace::entry;
 use userspace::syscall::{self, Signals};
-use userspace::time::{Clock, Duration, Instant, SystemClock};
+use userspace::time::{sleep_until, Clock, Duration, Instant, SystemClock};
 
 const SLAVE_CFG: I2cConfig = I2cConfig {
     speed: I2cSpeed::Standard,
@@ -35,6 +35,12 @@ const SLAVE_CFG: I2cConfig = I2cConfig {
     smbus_alert: false,
     clock_config: ClockConfig::ast1060_default(),
 };
+
+/// EXPERIMENT: pause after every master write, before the sender emits the next
+/// fragment. The sender's own per-fragment log lines (blocking console writes)
+/// space the fragments out as a side effect; this makes that spacing explicit so
+/// the effect of pacing on rejected inbound packets can be measured. 0 disables.
+const TX_GAP_MS: u64 = 10;
 
 /// Lets the MCTP sender (master writes) and the IRQ handler (slave reads)
 /// share the one bus driver. Single-threaded, so `RefCell` never contends.
@@ -50,7 +56,14 @@ impl<B: I2c<SevenBitAddress>> I2c<SevenBitAddress> for SharedBus<'_, B> {
         address: SevenBitAddress,
         operations: &mut [Operation<'_>],
     ) -> core::result::Result<(), Self::Error> {
-        self.0.borrow_mut().transaction(address, operations)
+        let result = self.0.borrow_mut().transaction(address, operations);
+        if TX_GAP_MS > 0 {
+            let until = SystemClock::now()
+                .checked_add_duration(Duration::from_millis(TX_GAP_MS))
+                .unwrap_or(Instant::MAX);
+            let _ = sleep_until(until);
+        }
+        result
     }
 }
 
