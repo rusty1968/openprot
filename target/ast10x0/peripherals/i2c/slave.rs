@@ -79,6 +79,7 @@ pub struct SlaveRxLatch {
     /// Bytes held; zero when empty.
     len: usize,
     overruns: u32,
+    torn: u32,
 }
 
 impl SlaveRxLatch {
@@ -89,6 +90,7 @@ impl SlaveRxLatch {
             buf: [0; SLAVE_RX_LATCH_SIZE],
             len: 0,
             overruns: 0,
+            torn: 0,
         }
     }
 
@@ -96,6 +98,13 @@ impl SlaveRxLatch {
     #[must_use]
     pub const fn overruns(&self) -> u32 {
         self.overruns
+    }
+
+    /// Frames dropped because the byte counter moved while they were being copied out, meaning
+    /// the DMA engine was still writing and the copy may be torn.
+    #[must_use]
+    pub const fn torn(&self) -> u32 {
+        self.torn
     }
 }
 
@@ -178,17 +187,38 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
     /// attached [`SlaveRxLatch`], if there is one. Must run before DMA is re-armed.
     ///
     /// A frame still unread when the next one arrives is replaced and counted in
-    /// [`SlaveRxLatch::overruns`].
+    /// [`SlaveRxLatch::overruns`]. If the byte counter has moved by the time the copy is done, the
+    /// DMA engine was still writing, so the copy may be torn: it is dropped and counted in
+    /// [`SlaveRxLatch::torn`].
     fn latch_received_frame(&mut self, len: usize) {
+        if !self.copy_frame_to_latch(len) {
+            return;
+        }
+        let after = self.slave_rx_len();
+        if after != len {
+            pw_log::error!(
+                "i2c slave rx count moved during copy: before={:#x} after={:#x}",
+                len as u32,
+                after as u32
+            );
+            if let Some(latch) = self.slave_latch.as_deref_mut() {
+                latch.len = 0;
+                latch.torn = latch.torn.wrapping_add(1);
+            }
+        }
+    }
+
+    /// Copy `len` received bytes into the latch; `true` if a frame was latched.
+    fn copy_frame_to_latch(&mut self, len: usize) -> bool {
         let (Some(latch), Some(dma_buf)) = (
             self.slave_latch.as_deref_mut(),
             self.slave_dma_buf.as_deref(),
         ) else {
-            return;
+            return false;
         };
         let n = len.min(dma_buf.len()).min(latch.buf.len());
         if n == 0 {
-            return;
+            return false;
         }
         if latch.len != 0 {
             latch.overruns = latch.overruns.wrapping_add(1);
@@ -197,7 +227,9 @@ impl<Y: FnMut(u32)> Ast1060I2c<'_, Y> {
         if let (Some(dst), Some(src)) = (latch.buf.get_mut(..n), dma_buf.get(..n)) {
             dst.copy_from_slice(src);
             latch.len = n;
+            return true;
         }
+        false
     }
 
     /// Arm slave receive path based on transfer mode.
