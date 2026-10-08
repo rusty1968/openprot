@@ -110,6 +110,10 @@ fn server_loop() -> Result<()> {
     let sender = I2cSender::new(SharedBus(&bus), OWN_I2C_ADDR, REMOTE_I2C_ADDR);
     let i2c_receiver = MctpI2cReceiver::new(OWN_I2C_ADDR);
     let mut server = openprot_mctp_server::Server::<_, 16>::new(mctp::Eid(OWN_EID), 0, sender);
+    // The router's clock is milliseconds since this point.
+    let start = SystemClock::now();
+    // When the router next needs `update()` to expire stalled reassemblies.
+    let mut next_update = start;
 
     let mut request_buf = [0u8; MAX_REQUEST_SIZE];
     let mut response_buf = [0u8; MAX_RESPONSE_SIZE];
@@ -129,9 +133,19 @@ fn server_loop() -> Result<()> {
     syscall::wait_group_add(handle::WG, handle::I2C2_IRQ, signals::I2C2, 1usize)?;
 
     loop {
+        let now = SystemClock::now();
+        if now >= next_update {
+            let elapsed_ms = (now - start).as_millis() as u64;
+            // No handle uses `register_recv`, so nothing is ever ready here;
+            // this only lets the router expire a reassembly that lost a fragment.
+            let (interval_ms, _ready) = server.update(elapsed_ms, &mut recv_buf);
+            next_update = now
+                .checked_add_duration(Duration::from_millis(u64::from(interval_ms.max(1))))
+                .unwrap_or(Instant::MAX);
+        }
         let wait_deadline = pending_recv
             .as_ref()
-            .map_or(Instant::MAX, |pending| pending.deadline);
+            .map_or(next_update, |pending| pending.deadline.min(next_update));
         let ev = match syscall::object_wait(
             handle::WG,
             Signals::READABLE | signals::I2C2,
@@ -139,7 +153,9 @@ fn server_loop() -> Result<()> {
         ) {
             Ok(ev) => ev,
             Err(Error::DeadlineExceeded) => {
-                if pending_recv.take().is_some() {
+                let now = SystemClock::now();
+                if pending_recv.as_ref().is_some_and(|p| now >= p.deadline) {
+                    pending_recv = None;
                     let _ = respond_error(ResponseCode::TimedOut, &mut response_buf);
                     let _ = syscall::wait_group_add(
                         handle::WG,
@@ -157,10 +173,17 @@ fn server_loop() -> Result<()> {
             // Slave IRQ: drain a received packet, ack, feed the router.
             let event = bus.borrow_mut().try_next_slave_event();
             if let Ok(Some((I2cIsrEvent::SlaveWrRecvd, _))) = event {
-                match bus.borrow_mut().read_slave_buffer(&mut i2c_rx_buf) {
+                // Bind the result so the bus borrow ends before the router runs.
+                let rx = bus.borrow_mut().read_slave_buffer(&mut i2c_rx_buf);
+                match rx {
                     Ok(n) if n > 0 => match i2c_receiver.decode(&i2c_rx_buf[..n]) {
                         Ok((pkt, _)) => {
-                            let _ = server.inbound(pkt);
+                            if server.inbound(pkt).is_err() {
+                                pw_log::error!("mctp inbound rejected a packet");
+                            }
+                            // A fragment may have opened a reassembly; have the
+                            // router re-derive its timeout on the next pass.
+                            next_update = SystemClock::now();
                         }
                         Err(_) => pw_log::error!("i2c frame decode failed"),
                     },
