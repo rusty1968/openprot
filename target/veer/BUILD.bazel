@@ -129,6 +129,10 @@ rust_library(
 rust_library(
     name = "config",
     srcs = ["config.rs"],
+    aliases = {
+        "@rust_caliptra_crates//:caliptra-mcu-config-emulator": "mcu_config_emulator",
+        "@rust_caliptra_crates//:caliptra-mcu-config-fpga": "mcu_config_fpga",
+    },
     crate_features = select({
         ":emulator": ["emulator"],
         ":fpga": ["fpga"],
@@ -142,8 +146,8 @@ rust_library(
     deps = [
         "@pigweed//pw_kernel/config:kernel_config_interface",
         "@pigweed//pw_kernel/lib/memory_config",
-        "@rust_caliptra_crates//:mcu-config-emulator",
-        "@rust_caliptra_crates//:mcu-config-fpga",
+        "@rust_caliptra_crates//:caliptra-mcu-config-emulator",
+        "@rust_caliptra_crates//:caliptra-mcu-config-fpga",
     ],
 )
 

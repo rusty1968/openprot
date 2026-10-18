@@ -217,6 +217,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "caliptra-mcu-config-fpga"
+version = "0.1.0"
+source = "git+https://github.com/chipsalliance/caliptra-mcu-sw?rev=a8b5eb8cf8ef98279988237e58f3ed9ade0072f5#a8b5eb8cf8ef98279988237e58f3ed9ade0072f5"
+dependencies = [
+ "caliptra-mcu-config",
+]
+
+[[package]]
 name = "caliptra-mcu-error"
 version = "0.1.0"
 source = "git+https://github.com/chipsalliance/caliptra-mcu-sw?rev=a8b5eb8cf8ef98279988237e58f3ed9ade0072f5#a8b5eb8cf8ef98279988237e58f3ed9ade0072f5"
@@ -508,6 +516,7 @@ dependencies = [
  "caliptra-lms-types",
  "caliptra-mcu-config",
  "caliptra-mcu-config-emulator",
+ "caliptra-mcu-config-fpga",
  "caliptra-mcu-error",
  "caliptra-mcu-flash-image",
  "caliptra-mcu-image-header",
