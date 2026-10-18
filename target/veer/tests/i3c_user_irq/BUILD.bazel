@@ -92,8 +92,8 @@ rust_test(
     name = "i3c_user_irq_test",
     srcs = ["i3c_user_irq_host_test.rs"],
     crate_root = "i3c_user_irq_host_test.rs",
-    edition = "2024",
     data = [":i3c_user_irq_runner"],
+    edition = "2024",
     # caliptra_runner.py hardcodes --i3c-port=65534; must not run in parallel.
     tags = [
         "emulator",

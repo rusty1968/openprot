@@ -17,13 +17,40 @@ pub use loopback::LoopbackTransport;
 use i3c_api::{decode_request, encode_response, I3cOp, I3cStatus, HEADER, MAX_PAYLOAD};
 use openprot_hal_blocking::i3c_hardware::I3cTarget;
 
-/// The I3C target the server owns, plus its IPC channel, IRQ handle, the
-/// single-frame inbound latch, and the outbound "response staged, awaiting
-/// read" flag.
+/// Depth of the inbound frame ring.
 ///
-/// One frame is latched at a time: MCTP over I3C is request/response, so the
-/// client `Recv`s before the next inbound frame. A frame arriving while one is
-/// still latched overwrites it — the bus is never blocked.
+/// Sized to cover the window between the IRQ latching a frame and the client
+/// draining it over IPC — a cross-process round-trip, plus a host controller
+/// that polls and may resend — with margin for a request alongside a resend.
+/// The ring must not overflow in normal request/response flow: a dropped frame
+/// is an unrecoverable hole in MCTP reassembly, so overflow is an error path
+/// only (see [`Inbound::DroppedFull`]).
+pub const RX_RING: usize = 4;
+
+/// Outcome of draining one inbound frame in [`Server::latch_inbound`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inbound {
+    /// A frame was read from the target and queued into the ring.
+    Latched,
+    /// Nothing was available to latch (empty or a zero-length descriptor).
+    Empty,
+    /// A frame was read but dropped because the ring was full — a lost MCTP
+    /// fragment. [`RX_RING`] is sized so this should not occur in normal flow;
+    /// the runtime logs it.
+    DroppedFull,
+}
+
+/// The I3C target the server owns, plus its IPC channel, IRQ handle, the
+/// inbound frame ring, and the outbound "response staged, awaiting read" flag.
+///
+/// Inbound frames are queued in a [`RX_RING`]-deep FIFO. MCTP over I3C is
+/// request/response, but the client draining a latched frame spans a
+/// cross-process round-trip, during which the controller can land the next
+/// frame (a resend, or the next fragment); the ring holds those so none is
+/// lost. `latch_inbound` pushes the oldest-first; `Recv` pops it. The ring
+/// never overwrites an unread frame — on overflow a frame is dropped and logged
+/// instead (an error path `RX_RING` is sized to avoid). The bus is never
+/// blocked.
 ///
 /// Outbound has back-pressure. A `Send` stages a response for the controller's
 /// next private read and sets [`tx_pending`](Server::tx_pending); the flag
@@ -42,9 +69,14 @@ pub struct Server<T> {
     pub irq: u32,
     /// The controller driver implementing the facade.
     pub target: T,
-    rx: [u8; MAX_PAYLOAD],
-    rx_len: usize,
-    rx_ready: bool,
+    /// Inbound frame ring buffers, one `MAX_PAYLOAD` slot per ring entry.
+    rx: [[u8; MAX_PAYLOAD]; RX_RING],
+    /// Payload length latched in each ring slot.
+    rx_len: [usize; RX_RING],
+    /// Index of the oldest queued frame (the next `Recv` pops this slot).
+    rx_head: usize,
+    /// Number of frames currently queued in the ring.
+    rx_count: usize,
     tx_pending: bool,
 }
 
@@ -55,16 +87,17 @@ impl<T> Server<T> {
             channel,
             irq,
             target,
-            rx: [0u8; MAX_PAYLOAD],
-            rx_len: 0,
-            rx_ready: false,
+            rx: [[0u8; MAX_PAYLOAD]; RX_RING],
+            rx_len: [0usize; RX_RING],
+            rx_head: 0,
+            rx_count: 0,
             tx_pending: false,
         }
     }
 
-    /// Whether an inbound frame is latched and waiting for a `Recv`.
+    /// Whether any inbound frame is queued and waiting for a `Recv`.
     pub fn has_frame(&self) -> bool {
-        self.rx_ready
+        self.rx_count > 0
     }
 
     /// Whether a staged transmit is still awaiting the controller's private
@@ -83,27 +116,41 @@ impl<T> Server<T> {
 }
 
 impl<T: I3cTarget> Server<T> {
-    /// Drain one inbound frame into the latch after a [`TargetEvent::InboundReady`].
+    /// Drain one inbound frame into the ring after a [`TargetEvent::InboundReady`].
     ///
-    /// Returns `true` if a frame was latched. A frame overwrites any previously
-    /// latched but unread frame.
-    pub fn latch_inbound(&mut self) -> Result<bool, T::Error> {
-        match self.target.read_frame(&mut self.rx)? {
-            // A zero-length descriptor is not a real frame. The RX-descriptor
-            // interrupt can fire with no payload (seen on the emulator around
-            // the controller's write/private-read command traffic), and
-            // `read_frame` then reports `Some(0)`. Latching it would raise a
-            // spurious wake and, worse, overwrite a real frame still waiting in
-            // the single-frame latch for the client to read — dropping a valid
-            // inbound message. A zero-length inbound is never a valid MCTP
-            // frame, so treat it as "nothing arrived".
-            Some(n) if n > 0 => {
-                self.rx_len = n.min(MAX_PAYLOAD);
-                self.rx_ready = true;
-                Ok(true)
-            }
-            _ => Ok(false),
+    /// Reads one frame from the target and, if the ring has room, queues it at
+    /// the tail; returns [`Inbound`] describing what happened. The runtime calls
+    /// this in a loop until it returns [`Inbound::Empty`], so a single IRQ that
+    /// covers several hardware frames drains them all.
+    ///
+    /// A zero-length descriptor is not a real frame: the RX-descriptor interrupt
+    /// can fire with no payload (seen on the emulator around the controller's
+    /// write/private-read command traffic), and `read_frame` then reports
+    /// `Some(0)`. A zero-length inbound is never a valid MCTP frame, so it is
+    /// treated as "nothing arrived" ([`Inbound::Empty`]).
+    ///
+    /// When the ring is full the frame is still read out of the hardware (to
+    /// keep the RX path moving) but dropped — [`Inbound::DroppedFull`]. Dropping
+    /// the new frame is the lesser evil: overwriting a queued one would lose an
+    /// earlier MCTP fragment. `RX_RING` is sized so this does not happen in
+    /// normal flow.
+    pub fn latch_inbound(&mut self) -> Result<Inbound, T::Error> {
+        if self.rx_count >= RX_RING {
+            let mut scratch = [0u8; MAX_PAYLOAD];
+            return Ok(match self.target.read_frame(&mut scratch)? {
+                Some(n) if n > 0 => Inbound::DroppedFull,
+                _ => Inbound::Empty,
+            });
         }
+        let tail = (self.rx_head + self.rx_count) % RX_RING;
+        Ok(match self.target.read_frame(&mut self.rx[tail])? {
+            Some(n) if n > 0 => {
+                self.rx_len[tail] = n.min(MAX_PAYLOAD);
+                self.rx_count += 1;
+                Inbound::Latched
+            }
+            _ => Inbound::Empty,
+        })
     }
 }
 
@@ -146,14 +193,18 @@ pub fn dispatch<T: I3cTarget>(srv: &mut Server<T>, req: &[u8], resp: &mut [u8]) 
             }
         }
         I3cOp::Recv => {
-            if !srv.rx_ready {
+            if srv.rx_count == 0 {
                 return status_only(resp, I3cStatus::NoData);
             }
+            let head = srv.rx_head;
             let cap = resp.len().saturating_sub(HEADER);
-            let n = srv.rx_len.min(cap);
-            let out = encode_response(I3cStatus::Ok, srv.rx.get(..n).unwrap_or(&[]), resp);
-            srv.rx_ready = false;
-            srv.rx_len = 0;
+            let n = srv.rx_len[head].min(cap);
+            let out = encode_response(I3cStatus::Ok, srv.rx[head].get(..n).unwrap_or(&[]), resp);
+            // Pop the oldest frame whether or not the encode succeeded: a
+            // response buffer too small to hold it would otherwise wedge the
+            // ring on the same frame forever.
+            srv.rx_head = (srv.rx_head + 1) % RX_RING;
+            srv.rx_count -= 1;
             out.unwrap_or_else(|| status_only(resp, I3cStatus::Internal))
         }
         I3cOp::DynamicAddress => match srv.target.dynamic_address() {
@@ -170,9 +221,17 @@ mod tests {
     use i3c_api::{decode_response, encode_request, MAX_FRAME};
     use openprot_hal_blocking::i3c_hardware::{DynamicAddress, TargetEvent};
 
+    /// Capacity of the test target's own inbound queue; larger than `RX_RING`
+    /// so overflow of the server ring can be exercised.
+    const FAKE_INBOUND: usize = 8;
+
     struct FakeTarget {
         addr: Option<u8>,
-        inbound: Option<[u8; 4]>,
+        /// Pending inbound frames, oldest first; `read_frame` pops the front.
+        frames: [[u8; MAX_PAYLOAD]; FAKE_INBOUND],
+        frame_lens: [usize; FAKE_INBOUND],
+        frame_head: usize,
+        frame_count: usize,
         sent: [u8; MAX_PAYLOAD],
         sent_len: usize,
     }
@@ -181,10 +240,28 @@ mod tests {
         fn default() -> Self {
             Self {
                 addr: None,
-                inbound: None,
+                frames: [[0u8; MAX_PAYLOAD]; FAKE_INBOUND],
+                frame_lens: [0usize; FAKE_INBOUND],
+                frame_head: 0,
+                frame_count: 0,
                 sent: [0u8; MAX_PAYLOAD],
                 sent_len: 0,
             }
+        }
+    }
+
+    impl FakeTarget {
+        /// Queue one inbound frame for a later `read_frame`.
+        fn push_inbound(&mut self, data: &[u8]) {
+            assert!(
+                self.frame_count < FAKE_INBOUND,
+                "test inbound queue overflow"
+            );
+            let tail = (self.frame_head + self.frame_count) % FAKE_INBOUND;
+            let n = data.len().min(MAX_PAYLOAD);
+            self.frames[tail][..n].copy_from_slice(&data[..n]);
+            self.frame_lens[tail] = n;
+            self.frame_count += 1;
         }
     }
 
@@ -197,21 +274,25 @@ mod tests {
             Ok(())
         }
         fn on_interrupt(&mut self) -> Result<TargetEvent, Self::Error> {
-            if self.inbound.is_some() {
+            if self.frame_count > 0 {
                 Ok(TargetEvent::InboundReady)
             } else {
                 Ok(TargetEvent::None)
             }
         }
         fn read_frame(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-            match self.inbound.take() {
-                Some(frame) if frame.len() <= buf.len() => {
-                    buf[..frame.len()].copy_from_slice(&frame);
-                    Ok(Some(frame.len()))
-                }
-                Some(_) => Err(FakeError),
-                None => Ok(None),
+            if self.frame_count == 0 {
+                return Ok(None);
             }
+            let head = self.frame_head;
+            let n = self.frame_lens[head];
+            if n > buf.len() {
+                return Err(FakeError);
+            }
+            buf[..n].copy_from_slice(&self.frames[head][..n]);
+            self.frame_head = (self.frame_head + 1) % FAKE_INBOUND;
+            self.frame_count -= 1;
+            Ok(Some(n))
         }
         fn send(&mut self, data: &[u8]) -> Result<(), Self::Error> {
             let n = data.len().min(MAX_PAYLOAD);
@@ -269,32 +350,111 @@ mod tests {
         );
     }
 
-    #[test]
-    fn latch_then_recv_returns_frame_once() {
-        let mut s = srv();
-        s.target.inbound = Some(*b"ping");
+    /// Drive the runtime's drain loop against the fake target: latch until
+    /// `Empty`, returning whether any overflow drop occurred.
+    fn drain(s: &mut Server<FakeTarget>) -> bool {
+        let mut dropped = false;
+        loop {
+            match s.latch_inbound() {
+                Ok(Inbound::Latched) => continue,
+                Ok(Inbound::DroppedFull) => dropped = true,
+                Ok(Inbound::Empty) => break,
+                Err(_) => panic!("read_frame failed"),
+            }
+        }
+        dropped
+    }
 
-        // Simulate the IRQ path draining the frame into the latch.
-        assert_eq!(s.on_interrupt_event(), TargetEvent::InboundReady);
-        assert_eq!(s.latch_inbound(), Ok(true));
-        assert!(s.has_frame());
-
+    fn recv_once(s: &mut Server<FakeTarget>) -> (I3cStatus, [u8; MAX_PAYLOAD], usize) {
         let mut req = [0u8; MAX_FRAME];
         let mut resp = [0u8; MAX_FRAME];
         let n = encode_request(I3cOp::Recv, &[], &mut req).unwrap();
+        let rn = dispatch(s, &req[..n], &mut resp);
+        let (status, body) = decode_response(&resp[..rn]).unwrap();
+        let mut out = [0u8; MAX_PAYLOAD];
+        out[..body.len()].copy_from_slice(body);
+        (status, out, body.len())
+    }
 
-        let rn = dispatch(&mut s, &req[..n], &mut resp);
-        assert_eq!(
-            decode_response(&resp[..rn]),
-            Some((I3cStatus::Ok, &b"ping"[..]))
-        );
+    #[test]
+    fn latch_then_recv_returns_frame_once() {
+        let mut s = srv();
+        s.target.push_inbound(b"ping");
+
+        // Simulate the IRQ path draining the frame into the ring.
+        assert_eq!(s.on_interrupt_event(), TargetEvent::InboundReady);
+        assert_eq!(s.latch_inbound(), Ok(Inbound::Latched));
+        assert!(s.has_frame());
+
+        let (status, body, len) = recv_once(&mut s);
+        assert_eq!((status, &body[..len]), (I3cStatus::Ok, &b"ping"[..]));
         assert!(!s.has_frame());
 
-        let rn = dispatch(&mut s, &req[..n], &mut resp);
-        assert_eq!(
-            decode_response(&resp[..rn]),
-            Some((I3cStatus::NoData, &[][..]))
-        );
+        let (status, _, len) = recv_once(&mut s);
+        assert_eq!((status, len), (I3cStatus::NoData, 0));
+    }
+
+    #[test]
+    fn ring_queues_multiple_frames_fifo() {
+        let mut s = srv();
+        s.target.push_inbound(b"one");
+        s.target.push_inbound(b"two");
+        s.target.push_inbound(b"three");
+
+        assert!(!drain(&mut s), "three frames fit the ring, no drop");
+        assert!(s.has_frame());
+
+        for expect in [&b"one"[..], &b"two"[..], &b"three"[..]] {
+            let (status, body, len) = recv_once(&mut s);
+            assert_eq!((status, &body[..len]), (I3cStatus::Ok, expect));
+        }
+        let (status, _, len) = recv_once(&mut s);
+        assert_eq!((status, len), (I3cStatus::NoData, 0));
+        assert!(!s.has_frame());
+    }
+
+    #[test]
+    fn ring_full_drops_newest_keeps_queued() {
+        let mut s = srv();
+        // RX_RING fit; the remaining two overflow and are dropped.
+        let labels: [&[u8]; RX_RING + 2] = [b"f0", b"f1", b"f2", b"f3", b"f4", b"f5"];
+        for l in labels {
+            s.target.push_inbound(l);
+        }
+
+        assert!(drain(&mut s), "overflow must be reported as a drop");
+
+        // The first RX_RING frames (oldest) survived in order; f4/f5 dropped.
+        for expect in &labels[..RX_RING] {
+            let (status, body, len) = recv_once(&mut s);
+            assert_eq!((status, &body[..len]), (I3cStatus::Ok, *expect));
+        }
+        let (status, _, len) = recv_once(&mut s);
+        assert_eq!((status, len), (I3cStatus::NoData, 0));
+    }
+
+    #[test]
+    fn ring_wraps_around() {
+        let mut s = srv();
+        // Fill most of the ring, drain some to advance head, then refill so the
+        // tail wraps past the modulus.
+        s.target.push_inbound(b"a");
+        s.target.push_inbound(b"b");
+        assert!(!drain(&mut s));
+        let (_, b, l) = recv_once(&mut s); // pop "a", head -> 1
+        assert_eq!(&b[..l], b"a");
+
+        s.target.push_inbound(b"c");
+        s.target.push_inbound(b"d");
+        s.target.push_inbound(b"e"); // tail wraps
+        assert!(!drain(&mut s));
+
+        for expect in [&b"b"[..], &b"c"[..], &b"d"[..], &b"e"[..]] {
+            let (status, body, len) = recv_once(&mut s);
+            assert_eq!((status, &body[..len]), (I3cStatus::Ok, expect));
+        }
+        let (status, _, len) = recv_once(&mut s);
+        assert_eq!((status, len), (I3cStatus::NoData, 0));
     }
 
     #[test]

@@ -123,15 +123,9 @@ pub trait I3cTargetHotJoin: I3cTargetErrorType {
 /// A composed marker, not a re-declaration of the parts, so its surface can
 /// never drift from the traits it bundles. IBI and Hot-Join are deliberately
 /// excluded — they are optional capabilities a consumer names explicitly.
-pub trait I3cTargetDevice:
-    I3cTargetIdentity + I3cTargetTransfer + I3cTargetInterrupt
-{
-}
+pub trait I3cTargetDevice: I3cTargetIdentity + I3cTargetTransfer + I3cTargetInterrupt {}
 
-impl<T> I3cTargetDevice for T where
-    T: I3cTargetIdentity + I3cTargetTransfer + I3cTargetInterrupt
-{
-}
+impl<T> I3cTargetDevice for T where T: I3cTargetIdentity + I3cTargetTransfer + I3cTargetInterrupt {}
 
 #[cfg(test)]
 mod tests {

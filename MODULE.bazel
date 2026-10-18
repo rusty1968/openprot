@@ -22,9 +22,7 @@ local_path_override(
 
 git_override(
     module_name = "pigweed",
-    commit = "f9b83b60c9fa3dc7d0127e687fef170147cd2d3e",
-    patch_args = ["-p1"],
-    patches = [],
+    commit = "3ada25a6333e9165e3fdbc925d2862926c8356e3",  # roll:pigweed
     remote = "https://pigweed.googlesource.com/pigweed/pigweed",
 )
 
@@ -65,6 +63,7 @@ crate.from_cargo(
         "thumbv7em-none-eabi",
     ],
 )
+
 # caliptra-dpe-response-buffer is a path-dependency workspace member inside
 # the caliptra-dpe repo (declared as `caliptra-dpe-response-buffer.workspace
 # = true` inside caliptra-dpe's own Cargo.toml, not in our crates_io

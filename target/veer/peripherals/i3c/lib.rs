@@ -27,7 +27,7 @@
 #![no_std]
 
 use caliptra_ss_registers::i3c;
-use i3c::bits::{InterruptEnable, InterruptStatus, StbyCrDeviceAddr, Status};
+use i3c::bits::{InterruptEnable, InterruptStatus, Status, StbyCrDeviceAddr};
 
 use core::marker::PhantomData;
 use openprot_hal_blocking::i3c_hardware::{

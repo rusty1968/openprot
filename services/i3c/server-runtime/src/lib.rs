@@ -12,18 +12,24 @@
 //! ## Hot path
 //!
 //! - **IRQ** — the wait returns the I3C interrupt signal; `on_interrupt` decodes
-//!   it. On `InboundReady` the runtime drains one frame into the server's latch,
-//!   `interrupt_ack`s, and raises `USER` on the client channel so a parked
-//!   client wakes. On `ResponseRead` the staged transmit was consumed, so the
-//!   runtime releases outbound back-pressure and answers any held `Send`.
+//!   it. On `InboundReady` the runtime drains every available frame into the
+//!   server's ring, `interrupt_ack`s, and raises `USER` on the client channel so
+//!   a parked client wakes. On `ResponseRead` the staged transmit was consumed,
+//!   so the runtime releases outbound back-pressure and answers any held `Send`.
 //!
 //! ## Outbound back-pressure
 //!
 //! A `Send` stages a response for the controller's next private read. A second
 //! `Send` arriving before that read is *held* — its IPC reply is deferred and
-//! the channel dropped from the wait — until `ResponseRead` fires, so fragments
-//! are never staged faster than the controller drains them. The client, being
-//! synchronous, simply blocks in `channel_transact` meanwhile.
+//! the channel dropped from the wait — so fragments are never staged faster than
+//! the controller drains them. The client, being synchronous, simply blocks in
+//! `channel_transact` meanwhile.
+//!
+//! Back-pressure is released on `ResponseRead` and, as a fallback, on the next
+//! `InboundReady`: the i3c target derives `ResponseRead` from the hardware
+//! `IbiDone` interrupt, which is not raised reliably after a private read, and a
+//! fresh inbound request proves (by request/response ordering) the prior
+//! response was read. See [`release_backpressure`].
 //! - **IPC** — the wait returns `READABLE`; the runtime reads one request and
 //!   dispatches. A `Recv` that consumes the latch also clears `USER`; the IRQ
 //!   path re-raises it when the next frame lands.
@@ -33,10 +39,41 @@
 #![no_std]
 
 use i3c_api::{decode_request, I3cOp, MAX_FRAME};
-use i3c_server::{dispatch, Server};
+use i3c_server::{dispatch, Inbound, Server};
 use openprot_hal_blocking::i3c_hardware::{I3cTarget, TargetEvent};
 use userspace::syscall::{self, Signals};
 use userspace::time::Instant;
+
+/// Release outbound back-pressure: clear `tx_pending` and answer any held
+/// `Send` by dispatching it now and re-arming the channel in the wait group.
+///
+/// Called both from the `ResponseRead` IRQ and — as a fallback — when a fresh
+/// inbound request arrives. The i3c target derives `ResponseRead` from the
+/// hardware `IbiDone` interrupt, which the controller/emulator does not reliably
+/// raise after a private read; a missed `IbiDone` alone would leave `tx_pending`
+/// set and wedge the next `Send` forever. In strict request/response the
+/// controller reads a response before issuing its next request, so a new inbound
+/// write is itself proof the prior response was read — a sound protocol-level
+/// release trigger that keeps the flow alive when `IbiDone` is missed.
+fn release_backpressure<T: I3cTarget>(
+    wg: u32,
+    srv: &mut Server<T>,
+    held: &[u8; MAX_FRAME],
+    held_len: &mut Option<usize>,
+    response_buf: &mut [u8; MAX_FRAME],
+) {
+    srv.notify_response_read();
+    let Some(len) = held_len.take() else {
+        return;
+    };
+    let resp_len = dispatch(srv, &held[..len], &mut response_buf[..]);
+    if syscall::channel_respond(srv.channel, &response_buf[..resp_len]).is_err() {
+        pw_log::error!("channel_respond (held send) failed");
+    }
+    if syscall::wait_group_add(wg, srv.channel, Signals::READABLE, srv.channel as usize).is_err() {
+        pw_log::error!("wait_group_add (re-arm channel) failed");
+    }
+}
 
 /// Run the i3c server forever.
 ///
@@ -75,35 +112,38 @@ pub fn run<T: I3cTarget>(wg: u32, irq_signals: Signals, srv: &mut Server<T>) -> 
             let acked = w.pending_signals & irq_signals;
             match srv.target.on_interrupt() {
                 Ok(TargetEvent::InboundReady) => {
-                    if srv.latch_inbound().is_err() {
-                        pw_log::error!("i3c read_frame failed");
+                    // Drain every frame the IRQ covers into the ring; a single
+                    // RX-descriptor interrupt can stand for more than one
+                    // hardware frame. Stop on Empty.
+                    let mut dropped = false;
+                    loop {
+                        match srv.latch_inbound() {
+                            Ok(Inbound::Latched) => continue,
+                            Ok(Inbound::DroppedFull) => {
+                                dropped = true;
+                                continue;
+                            }
+                            Ok(Inbound::Empty) => break,
+                            Err(_) => {
+                                pw_log::error!("i3c read_frame failed");
+                                break;
+                            }
+                        }
                     }
+                    if dropped {
+                        pw_log::error!("i3c inbound ring full; frame(s) dropped");
+                    }
+                    // A fresh inbound request proves the controller read the
+                    // prior response (request/response ordering), so release
+                    // back-pressure here too — the fallback for a missed
+                    // `IbiDone`/`ResponseRead`. A no-op when nothing is pending.
+                    release_backpressure(wg, srv, &held, &mut held_len, &mut response_buf);
                 }
                 Ok(TargetEvent::ResponseRead) => {
                     // The controller read the staged response: release outbound
-                    // back-pressure, then dispatch and answer any held `Send`.
-                    srv.notify_response_read();
-                    if let Some(len) = held_len.take() {
-                        let resp_len = dispatch(srv, &held[..len], &mut response_buf);
-                        if syscall::channel_respond(srv.channel, &response_buf[..resp_len]).is_err()
-                        {
-                            pw_log::error!("channel_respond (held send) failed");
-                        }
-                        if syscall::wait_group_add(
-                            wg,
-                            srv.channel,
-                            Signals::READABLE,
-                            srv.channel as usize,
-                        )
-                        .is_err()
-                        {
-                            pw_log::error!("wait_group_add (re-arm channel) failed");
-                        }
-                    }
+                    // back-pressure and answer any held `Send`.
+                    release_backpressure(wg, srv, &held, &mut held_len, &mut response_buf);
                 }
-                // on_interrupt reports one event per IRQ; in the request/response
-                // flow an inbound write and a response-read do not coincide, so a
-                // ResponseRead is never masked by an InboundReady here.
                 Ok(_) => {}
                 Err(_) => pw_log::error!("i3c on_interrupt failed"),
             }
@@ -144,10 +184,12 @@ pub fn run<T: I3cTarget>(wg: u32, irq_signals: Signals, srv: &mut Server<T>) -> 
 
         let is_recv = op == Some(I3cOp::Recv);
         let resp_len = dispatch(srv, &request_buf[..req_len], &mut response_buf);
-        // A Recv consumes the latch, so drop the USER notification; the IRQ path
-        // re-raises it when the next frame arrives.
-        if is_recv && syscall::object_set_peer_user_signal(srv.channel, false).is_err() {
-            pw_log::error!("object_set_peer_user_signal clear failed");
+        // A Recv pops one frame from the ring. Keep USER asserted while frames
+        // remain so the client drains the rest; clear it only when the ring is
+        // empty (the IRQ path re-raises it when the next frame arrives). A blind
+        // clear here would park the client with frames still queued.
+        if is_recv && syscall::object_set_peer_user_signal(srv.channel, srv.has_frame()).is_err() {
+            pw_log::error!("object_set_peer_user_signal update failed");
         }
         if syscall::channel_respond(srv.channel, &response_buf[..resp_len]).is_err() {
             pw_log::error!("channel_respond failed");
