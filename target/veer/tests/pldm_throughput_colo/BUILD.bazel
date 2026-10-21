@@ -8,14 +8,14 @@ load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")
 load("@pigweed//pw_kernel/tooling:target_linker_script.bzl", "target_linker_script")
 load("@pigweed//pw_kernel/tooling/panic_detector:rust_binary_no_panics_test.bzl", "rust_binary_no_panics_test")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
-load("//target/veer:defs.bzl", "TARGET_COMPATIBLE_WITH")
+load("//target/veer:defs.bzl", "TARGET_COMPATIBLE_WITH", "veer_system_config")
 load("//target/veer/tooling:caliptra_runner.bzl", "caliptra_runner")
 
 package(default_visibility = ["//visibility:public"])
 
-filegroup(
+veer_system_config(
     name = "system_config",
-    srcs = ["system.json5"],
+    src = "system.json5.tmpl",
 )
 
 target_codegen(
@@ -118,6 +118,16 @@ rust_binary_no_panics_test(
 caliptra_runner(
     name = "pldm_throughput_colo_runner",
     interface = "emulator",
+    tags = ["manual"],
+    target = ":pldm_throughput_colo_image",
+)
+
+# Build-only FPGA (VCK190) target: renders the system config from the FPGA memory
+# map and builds the image. The host test drives the emulator's I3C TCP socket,
+# which does not exist on the board, so there is no FPGA test target here.
+caliptra_runner(
+    name = "pldm_throughput_colo_fpga_runner",
+    interface = "fpga",
     tags = ["manual"],
     target = ":pldm_throughput_colo_image",
 )

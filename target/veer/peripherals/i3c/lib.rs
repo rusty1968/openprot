@@ -30,6 +30,12 @@ use caliptra_ss_registers::i3c;
 use i3c::bits::{InterruptEnable, InterruptStatus, Status, StbyCrDeviceAddr};
 
 use core::marker::PhantomData;
+// I3C register block base for the selected target type, from upstream
+// caliptra-mcu-sw's memory maps (same selection as target/veer's kernel config).
+#[cfg(not(feature = "fpga"))]
+use mcu_config_emulator::EMULATOR_MEMORY_MAP as MCU_MEMORY_MAP;
+#[cfg(feature = "fpga")]
+use mcu_config_fpga::FPGA_MEMORY_MAP as MCU_MEMORY_MAP;
 use openprot_hal_blocking::i3c_hardware::{
     DynamicAddress, I3cTarget, I3cTargetConfig, TargetEvent,
 };
@@ -60,7 +66,7 @@ impl CaliptraI3cTarget {
     /// lifetime of this value.
     pub const unsafe fn new() -> Self {
         Self {
-            regs: i3c::I3C_CSR_ADDR as *const i3c::regs::I3c,
+            regs: MCU_MEMORY_MAP.i3c_offset as *const i3c::regs::I3c,
             ibi_mdb: MDB_PENDING_READ,
             _not_send_sync: PhantomData,
         }

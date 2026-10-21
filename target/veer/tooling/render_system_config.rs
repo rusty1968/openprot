@@ -38,6 +38,7 @@ fn main() {
     //   @KERNEL_RAM_START@    Where the system generator starts placing app
     //                         data: KERNEL_RAM_OFFSET into MCU SRAM.
     //   @MCI_BASE@            MCI register block (timer, device mappings).
+    //   @I3C_BASE@            Caliptra-SS I3C register block (device mappings).
     let substitutions = [
         // Start of MCU SRAM. MCU ROM will jump here.
         ("@KERNEL_FLASH_START@", map.sram_offset),
@@ -45,6 +46,8 @@ fn main() {
         ("@KERNEL_RAM_START@", map.sram_offset + KERNEL_RAM_OFFSET),
         // MCI register block base offset
         ("@MCI_BASE@", map.mci_offset),
+        // I3C register block base offset
+        ("@I3C_BASE@", map.i3c_offset),
     ];
 
     let mut rendered =

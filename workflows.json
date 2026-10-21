@@ -134,7 +134,8 @@
         }
       },
       "targets": [
-        "//target/veer/unittest_runner:fpga_test"
+        "//target/veer/unittest_runner:fpga_test",
+        "//target/veer/tests/pldm_throughput_colo:pldm_throughput_colo_fpga_runner"
       ]
     },
     {

@@ -41,3 +41,21 @@ bazel test //target/veer/tests/pldm_throughput_colo:pldm_throughput_colo_test \
     --test_output=all --test_arg=--nocapture --nocache_test_results --jobs=2 \
     2>&1 | grep -E 'PLDM_THROUGHPUT|Stats over'
 ```
+
+## FPGA (VCK190): build-only
+
+The system config is a template (`system.json5.tmpl`) rendered by
+`veer_system_config` from upstream caliptra-mcu-sw's `EMULATOR_MEMORY_MAP` /
+`FPGA_MEMORY_MAP`, and the I3C driver takes its register base from the same map.
+`pldm_throughput_colo_fpga_runner` (`interface = "fpga"`, tagged `manual`) builds
+the image for the board; it is part of the `caliptra_fpga_build` workflow.
+
+```bash
+bazel build --config=k_veer --//target/veer:target_type=fpga \
+    //target/veer/tests/pldm_throughput_colo:pldm_throughput_colo_fpga_runner
+```
+
+Not runnable on the board yet: the host test is a UA that drives the emulator's
+I3C TCP socket (`127.0.0.1:65534`), which has no FPGA equivalent. Running it needs
+a host-side I3C controller path to the board, plus the bitstream/mcu-sw pin
+matching the pinned `caliptra_mcu_sw` (see `third_party/caliptra/versions.bzl`).
