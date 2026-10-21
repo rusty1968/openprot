@@ -15,9 +15,30 @@ stay in the MCTP stack, which is transport-independent.
 ## Key Types
 
 - `I3cSender<T>` — implements `mctp_lib::Sender`; handles fragmentation,
-  encoding and optional PEC via `MctpI3cEncap`
-- `MctpI3cReceiver` — decodes inbound I3C frames into MCTP packets
-- `MctpI3cEncap` — adds and removes the four-byte transport header
+  framing and the PEC via `MctpI3cEncap`
+- `MctpI3cReceiver` — verifies and strips the PEC of inbound I3C frames and
+  returns the MCTP packets; caches this target's dynamic address for the PEC
+- `MctpI3cEncap` — frames an outbound MCTP packet (packet, then PEC)
+
+## Wire format
+
+DSP0233: one MCTP packet is the data of one I3C private transfer, followed by a
+PEC byte. There is **no** command code, byte count or source-address field in
+front of the packet (those belong to the SMBus/I2C binding, DSP0237).
+
+```text
+[Target Address + R/W][ACK][ MCTP packet ... ][ PEC ]
+                            ^ Write/Read Data 1
+```
+
+The PEC is an SMBus CRC-8 over the address byte of the transfer (`addr << 1 |
+R/W`) followed by the packet. The address byte is on the bus in the address
+phase and is not part of the data, but it is covered by the PEC:
+
+| Direction | PEC covers |
+|---|---|
+| controller write to this target (inbound) | `(own_addr << 1) \| 0`, then the packet |
+| controller read of this target (outbound) | `(own_addr << 1) \| 1`, then the packet |
 
 ## How it differs from the I2C binding
 
@@ -28,25 +49,26 @@ The two are deliberately shaped alike, but three things are forced by I3C:
   private read — one `I3cOp::Send` carrying the whole framed packet. The I2C
   sender trims the leading destination byte because embedded-hal prepends it;
   nothing is trimmed here.
-- **The source address is runtime state.** I3C dynamic addresses are assigned
-  by ENTDAA, so `I3cSender` reads the address back per message rather than
-  taking it at construction. Sending before enumeration is `Unreachable`.
-- **PEC is optional.** I3C protects the transfer at the link layer, so both
-  `encode` and `decode` take an explicit flag instead of assuming one.
+- **The address is runtime state.** I3C dynamic addresses are assigned by
+  ENTDAA. The PEC covers the address byte, so a wrong address makes every frame
+  fail its PEC. `I3cSender` reads the address back per message rather than
+  taking it at construction (sending before enumeration is `Unreachable`);
+  `MctpI3cReceiver` caches it and re-reads it only when a PEC check fails.
+- **The PEC is mandatory.** DSP0233 requires it, so the `pec` flags default to
+  `true` everywhere. They exist so a test can turn it off.
 
 ## MTU
 
-`get_mtu()` reports `MCTP_I3C_IPC_MAXMTU` (241), not the DSP0233 ceiling
-`MCTP_I3C_MAXMTU` (254). The i3c service carries one framed packet per
-`I3cOp::Send`, capped at `i3c_api::MAX_PAYLOAD` (250 — the caliptra i3c-core
-private write limit), and a framed packet is:
+`get_mtu()` reports `MCTP_I3C_IPC_MAXMTU` (245). The i3c service carries one
+framed packet per `I3cOp::Send`, capped at `i3c_api::MAX_PAYLOAD` (250 — the
+caliptra i3c-core private write limit), and a framed packet is:
 
 ```text
-4 (I3C header) + 4 (MCTP header) + payload + 1 (PEC) <= 250  =>  payload <= 241
+4 (MCTP header) + payload + 1 (PEC) <= 250  =>  payload <= 245
 ```
 
 The MCTP header is inside what gets framed because `Fragmenter` emits
-`mtu + MctpHeader::LEN` bytes per packet. Reporting 254 here would produce
+`mtu + MctpHeader::LEN` bytes per packet. Reporting a larger MTU would produce
 frames the service rejects as `TooLong`, and only for large payloads.
 
 ## Testing
@@ -55,10 +77,11 @@ frames the service rejects as `TooLong`, and only for large payloads.
 bazel test //services/mctp/transport-i3c/...
 ```
 
-- `mctp_transport_i3c_test` — encapsulation unit tests (header round-trip,
-  framing rejection, PEC, buffer limits)
-- `mctp_transport_i3c_roundtrip_test` — `Server::send()` through `I3cSender`,
-  the real `i3c_server::dispatch`, and back out through `MctpI3cReceiver`;
+- `mctp_transport_i3c_test` — framing unit tests (PEC direction and address
+  byte, rejection of bad PECs, buffer limits, MTU arithmetic) and the receiver's
+  address cache
+- `mctp_transport_i3c_roundtrip_test` — `Server::send()` through `I3cSender`
+  and the real `i3c_server::dispatch`, checked as a controller would read it;
   no kernel, no emulator
 
 ## Dependencies

@@ -15,9 +15,7 @@ use i3c_server::{LoopbackTransport, Server as I3cServer};
 use mctp::Eid;
 use openprot_hal_blocking::i3c_hardware::{DynamicAddress, I3cTarget, TargetEvent};
 use openprot_mctp_server::Server;
-use openprot_mctp_transport_i3c::{
-    I3cSender, MctpI3cReceiver, MCTP_I3C_HEADER, MCTP_I3C_IPC_MAXMTU,
-};
+use openprot_mctp_transport_i3c::{transfer_pec, I3cSender, MctpI3cReceiver, MCTP_I3C_IPC_MAXMTU};
 
 const OWN_ADDR: u8 = 0x08;
 const REMOTE_ADDR: u8 = 0x1d;
@@ -67,6 +65,23 @@ fn server(sends: &RefCell<Vec<Vec<u8>>>, addr: Option<u8>, pec: bool) -> Server<
     Server::new(Eid(OWN_EID), 0, I3cSender::new(client, REMOTE_ADDR, pec))
 }
 
+/// Decode a frame the way the I3C *controller* sees it: the target's response to
+/// a private read. DSP0233 frames it as the MCTP packet followed by a PEC over
+/// the read address byte `(addr << 1) | 1` and the packet. Nothing precedes the
+/// packet.
+fn controller_read_decode(addr: u8, frame: &[u8], pec: bool) -> &[u8] {
+    if !pec {
+        return frame;
+    }
+    let (received, packet) = frame.split_last().expect("frame carries a PEC");
+    assert_eq!(
+        *received,
+        transfer_pec((addr << 1) | 1, packet),
+        "PEC of a controller read"
+    );
+    packet
+}
+
 #[test]
 fn sender_receiver_roundtrip() {
     let sends = RefCell::new(Vec::new());
@@ -80,13 +95,9 @@ fn sender_receiver_roundtrip() {
     let frames = sends.borrow();
     assert_eq!(frames.len(), 1, "short payload should be one frame");
 
-    // Decode from the controller's side. Unlike the I2C binding nothing is
-    // trimmed off the front: I3cOp::Send carries the whole framed packet.
-    let rx = MctpI3cReceiver::new(true);
-    let (pkt, header) = rx.decode(&frames[0]).expect("decode");
-
-    assert_eq!(header.source, OWN_ADDR, "source address");
-    assert_eq!(header.dest, REMOTE_ADDR, "destination address");
+    // The frame is exactly the MCTP packet plus a PEC.
+    let pkt = controller_read_decode(OWN_ADDR, &frames[0], true);
+    assert_eq!(frames[0].len(), pkt.len() + 1);
 
     // MCTP transport header (4) then the message-type byte, then the payload.
     assert!(pkt.len() >= 5, "packet too short: {}", pkt.len());
@@ -105,12 +116,11 @@ fn roundtrip_without_pec() {
         .expect("send");
 
     let frames = sends.borrow();
-    let rx = MctpI3cReceiver::new(false);
-    let (pkt, _) = rx.decode(&frames[0]).expect("decode");
+    let pkt = controller_read_decode(OWN_ADDR, &frames[0], false);
     assert_eq!(&pkt[5..], payload);
 
-    // One byte shorter than the same exchange with a PEC.
-    assert_eq!(frames[0].len(), MCTP_I3C_HEADER + pkt.len());
+    // Without a PEC the frame is the bare packet.
+    assert_eq!(frames[0].len(), pkt.len());
 }
 
 #[test]
@@ -153,10 +163,8 @@ fn large_payload_fragments_and_every_frame_fits() {
             frame.len(),
             I3C_MAX_PAYLOAD
         );
-        // Each frame must survive decoding on its own.
-        MctpI3cReceiver::new(true)
-            .decode(frame)
-            .unwrap_or_else(|e| panic!("frame {i} failed to decode: {e:?}"));
+        // Each frame must carry a valid PEC on its own.
+        controller_read_decode(OWN_ADDR, frame, true);
     }
 }
 
@@ -207,6 +215,23 @@ fn send_before_entdaa_fails_without_touching_the_bus() {
     );
 }
 
+/// A frame the target stages for a controller *read* must not be accepted as an
+/// inbound controller *write*: the two PECs cover different address bytes
+/// (`(addr << 1) | 1` versus `addr << 1`).
+#[test]
+fn receiver_rejects_an_outbound_frame() {
+    let sends = RefCell::new(Vec::new());
+    let mut srv = server(&sends, Some(OWN_ADDR), true);
+
+    let req = srv.req(REMOTE_EID).expect("req");
+    srv.send(Some(req), MSG_TYPE, None, None, false, b"loopback")
+        .expect("send");
+
+    let frame = sends.borrow()[0].clone();
+    let mut rx = MctpI3cReceiver::new(true);
+    assert!(rx.decode(&frame, || Some(OWN_ADDR)).is_err());
+}
+
 #[test]
 fn receiver_rejects_a_corrupt_pec() {
     let sends = RefCell::new(Vec::new());
@@ -216,9 +241,19 @@ fn receiver_rejects_a_corrupt_pec() {
     srv.send(Some(req), MSG_TYPE, None, None, false, b"tamper")
         .expect("send");
 
-    let mut frame = sends.borrow()[0].clone();
-    let last = frame.len() - 1;
-    frame[last] ^= 0xff;
+    // Re-frame the packet the way a controller writes it, then corrupt the PEC.
+    let frame = sends.borrow()[0].clone();
+    let packet = controller_read_decode(OWN_ADDR, &frame, true).to_vec();
+    let mut write = packet.clone();
+    write.push(transfer_pec(OWN_ADDR << 1, &packet));
 
-    assert!(MctpI3cReceiver::new(true).decode(&frame).is_err());
+    let mut rx = MctpI3cReceiver::new(true);
+    assert_eq!(
+        rx.decode(&write, || Some(OWN_ADDR)).expect("good write"),
+        &packet[..]
+    );
+
+    let last = write.len() - 1;
+    write[last] ^= 0xff;
+    assert!(rx.decode(&write, || Some(OWN_ADDR)).is_err());
 }

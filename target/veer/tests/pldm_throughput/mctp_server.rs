@@ -50,7 +50,7 @@ fn mctp_server_loop() -> Result<()> {
     );
     // A second client on the same i3c channel, used to collect inbound frames.
     let mut i3c_rx_client = I3cClient::new(IpcTransport::new(handle::I3C));
-    let i3c_receiver = MctpI3cReceiver::new(PEC);
+    let mut i3c_receiver = MctpI3cReceiver::new(PEC);
 
     let mut server = Server::<_, 16>::new(mctp::Eid(OWN_EID), 0, sender);
     let mut i3c_rx_buf = [0u8; I3C_RX_MAX];
@@ -70,8 +70,12 @@ fn mctp_server_loop() -> Result<()> {
             // trip to every wake.
             match i3c_rx_client.recv(&mut i3c_rx_buf) {
                 Ok(Some(n)) => {
-                    let decoded = i3c_rx_buf.get(..n).map(|frame| i3c_receiver.decode(frame));
-                    if let Some(Ok((pkt, _))) = decoded {
+                    let decoded = i3c_rx_buf.get(..n).map(|frame| {
+                        i3c_receiver.decode(frame, || {
+                            i3c_rx_client.dynamic_address().ok().flatten()
+                        })
+                    });
+                    if let Some(Ok(pkt)) = decoded {
                         let _ = server.inbound(pkt);
                     } else {
                         pw_log::error!("i3c frame decode failed");

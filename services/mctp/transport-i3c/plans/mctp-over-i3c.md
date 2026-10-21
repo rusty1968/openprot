@@ -4,6 +4,11 @@ Completes the I3C transport binding for the MCTP server. The encapsulation
 layer landed in `4706184`; this plan covers everything between that and a
 working MCTP exchange on the VeeR emulator.
 
+> **Update:** the four-byte SMBus-style header this plan describes (`dest`,
+> `0x0F`, byte count, `src`) was replaced by DSP0233 framing — the MCTP packet
+> followed by a PEC over the address byte — see the last section. Where the text
+> below says 241-byte MTU or "4 (I3C hdr)", read 245 and no I3C header.
+
 ## Starting point
 
 | Piece | State |
@@ -143,3 +148,26 @@ bazel test //target/veer/tests/mctp_i3c:mctp_i3c_test       # phase 4
 before PRs land. Skipped deliberately for this work at the owner's direction;
 the design decisions above stand in for it and should be carried into the PR
 description.
+
+## Update — framing aligned with DSP0233
+
+The first version of `encap` reused the SMBus/I2C block-write framing (DSP0237:
+destination byte, command code `0x0F`, byte count, source byte) on I3C. DSP0233
+has none of those fields: the MCTP packet is the data of the private transfer,
+followed by a PEC. A standards-conforming controller (and the caliptra-mcu-sw
+host harness and native MCU binding) therefore sends `[MCTP packet][PEC]`, and
+the old decoder rejected every such frame.
+
+What changed:
+
+- `encap.rs` frames `[MCTP packet][PEC]`. The PEC is an SMBus CRC-8 over the
+  address byte of the transfer (`addr << 1 | R/W`) followed by the packet:
+  `R/W = 0` for inbound (controller write), `1` for outbound (controller read).
+- The header type, command code, byte-count check and `MCTP_I3C_MAXMTU` are gone.
+  The MTU is `i3c_api::MAX_PAYLOAD - MCTP_HEADER_LEN - pec` = 245 with a PEC.
+- `MctpI3cReceiver::decode` takes a closure that reads this target's dynamic
+  address (the PEC covers it). The receiver caches it and re-reads only after a
+  PEC failure, so the hot path costs no extra IPC.
+- PEC is mandatory in the spec; the `pec` flags stay only so tests can disable it.
+- The `target/veer/tests/*` host tests build plain MCTP packets and let
+  `i3c_host` add the PEC, instead of hand-building SMBus-style frames.

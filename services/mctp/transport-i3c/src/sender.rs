@@ -28,12 +28,14 @@ use crate::encap::{mctp_i3c_ipc_mtu, MctpI3cEncap, MCTP_I3C_IPC_FRAME, MCTP_I3C_
 /// I3C target, handing each finished frame to the i3c service.
 pub struct I3cSender<T> {
     client: I3cClient<T>,
-    /// Destination dynamic address. Single-peer for now, matching the I2C
-    /// binding; a full EID → address neighbour table is tracked in
+    /// The controller's dynamic address. DSP0233 has no destination or source
+    /// field, so it is not carried on the wire (an I3C target always sends to the
+    /// controller); it is kept for diagnostics and API stability. A full
+    /// EID → address neighbour table is tracked in
     /// <https://github.com/OpenPRoT/mctp-lib/issues/4>.
     remote_addr: u8,
-    /// Whether to append an SMBus PEC. I3C protects the transfer at the link
-    /// layer, so this is negotiated rather than assumed.
+    /// Whether to append an SMBus PEC. DSP0233 requires one, so this is `true`
+    /// for any conforming controller.
     pec: bool,
 }
 
@@ -60,9 +62,9 @@ impl<T: Transport> I3cSender<T> {
     /// This target's current dynamic address.
     ///
     /// Read fresh rather than cached: ENTDAA runs whenever the controller
-    /// re-enumerates the bus, and a stale value would put the wrong source
-    /// address in every outbound header — a fault that is invisible locally
-    /// because the frames still encode and send cleanly.
+    /// re-enumerates the bus, and a stale value would put the wrong address in
+    /// every outbound PEC (which covers the address byte) — a fault that is
+    /// invisible locally because the frames still encode and send cleanly.
     fn own_addr(&mut self) -> Result<u8> {
         match self.client.dynamic_address() {
             Ok(Some(addr)) => Ok(addr),
@@ -94,7 +96,7 @@ impl<T: Transport> mctp_lib::Sender for I3cSender<T> {
             match fragmenter.fragment_vectored(payload, &mut pkt) {
                 SendOutput::Packet(p) => {
                     let mut out = [0u8; MCTP_I3C_IPC_FRAME];
-                    let n = encoder.encode(addr, p, pec, &mut out)?;
+                    let n = encoder.encode(p, pec, &mut out)?;
                     let frame = out.get(..n).ok_or(mctp::Error::TxFailure)?;
                     if self.client.send(frame).is_err() {
                         pw_log::error!(
