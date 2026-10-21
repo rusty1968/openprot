@@ -26,24 +26,23 @@
 //! crossings per byte" lever. Keep the message within the ring depth
 //! (4 fragments => ~960 B) so no fragment is dropped.
 //!
-//! Addresses/EIDs mirror tests/mctp_i3c: target 0x08, controller 0x0a, target
-//! EID 8, host EID 9, MCTP message type 1.
+//! Addresses/EIDs mirror tests/mctp_i3c: target 0x08, target EID 8, host EID 9,
+//! MCTP message type 1. Each private write carries one MCTP packet followed by a
+//! PEC (DSP0233), which `send_private_write_on_stream` appends.
 
 use i3c_host::{
-    connect_i3c_socket, crc8_smbus, read_outgoing_packet, send_private_read_on_stream,
-    send_private_write_raw_on_stream, Runner,
+    connect_i3c_socket, read_outgoing_packet, send_private_read_on_stream,
+    send_private_write_on_stream, Runner,
 };
 use std::time::Duration;
 
 const TARGET_ADDR: u8 = 0x08;
-const CONTROLLER_ADDR: u8 = 0x0a;
 const TARGET_EID: u8 = 8;
 const HOST_EID: u8 = 9;
 const MSG_TYPE: u8 = 1;
-const MCTP_I3C_CMD: u8 = 0x0f;
 
 /// Max MCTP packet payload per i3c fragment. The single-fragment MTU is
-/// 250 - 4 (i3c hdr) - 4 (mctp hdr) - 1 (pec) = 241; 240 leaves a byte of slack.
+/// 250 - 4 (mctp hdr) - 1 (pec) = 245; 240 leaves a few bytes of slack.
 const FRAG_PAYLOAD: usize = 240;
 
 /// Default data bytes per MCTP message when `TPUT_MSG_BYTES` is unset.
@@ -57,23 +56,10 @@ fn msg_bytes() -> usize {
         .clamp(1, 959)
 }
 
-/// Frame one i3c private write: `[dest<<1, cmd, byte_count, src<<1|1] + mctp + pec`.
-fn frame_mctp_packet(mctp_packet: &[u8]) -> Vec<u8> {
-    let byte_count = (1 + mctp_packet.len()) as u8;
-    let mut frame = vec![
-        TARGET_ADDR << 1,
-        MCTP_I3C_CMD,
-        byte_count,
-        (CONTROLLER_ADDR << 1) | 1,
-    ];
-    frame.extend_from_slice(mctp_packet);
-    frame.push(crc8_smbus(&frame));
-    frame
-}
-
-/// Build the i3c frames for one MCTP message carrying `data`, fragmenting into
-/// `FRAG_PAYLOAD`-sized MCTP packets with SOM/EOM/sequence flags (TO=1, tag 0).
-fn build_message_frames(data: &[u8]) -> Vec<Vec<u8>> {
+/// Build the MCTP packets (one private write each) for one MCTP message carrying
+/// `data`, fragmenting into `FRAG_PAYLOAD`-sized packets with SOM/EOM/sequence
+/// flags (TO=1, tag 0).
+fn build_message_packets(data: &[u8]) -> Vec<Vec<u8>> {
     // MCTP message = [msg_type] + data; fragment the whole body.
     let mut body = Vec::with_capacity(1 + data.len());
     body.push(MSG_TYPE);
@@ -91,7 +77,7 @@ fn build_message_frames(data: &[u8]) -> Vec<Vec<u8>> {
             let flags = som | eom | seq | 0x08; // TO=1, tag 0
             let mut pkt = vec![0x01, TARGET_EID, HOST_EID, flags];
             pkt.extend_from_slice(chunk);
-            frame_mctp_packet(&pkt)
+            pkt
         })
         .collect()
 }
@@ -115,11 +101,11 @@ fn i3c_throughput_host_test() {
 
     let n = msg_bytes();
     let data = vec![0xa5u8; n];
-    let frames = build_message_frames(&data);
+    let packets = build_message_packets(&data);
     eprintln!(
         "driving {}-byte messages ({} i3c fragment(s) each)",
         n,
-        frames.len()
+        packets.len()
     );
 
     let mut rounds = 0u32;
@@ -130,8 +116,8 @@ fn i3c_throughput_host_test() {
     // is bounded so a lost ack can't wedge the run; on exhaustion the outer loop
     // resends the whole message.
     while !runner.exited() {
-        for frame in &frames {
-            let _ = send_private_write_raw_on_stream(&mut stream, TARGET_ADDR, frame);
+        for packet in &packets {
+            let _ = send_private_write_on_stream(&mut stream, TARGET_ADDR, packet);
         }
         rounds += 1;
         for _ in 0..1000 {

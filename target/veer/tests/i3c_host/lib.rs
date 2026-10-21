@@ -113,10 +113,10 @@ pub fn send_private_write_on_stream(
 /// Send a private write whose data block is transmitted verbatim — no PEC is
 /// appended. The caller owns the entire framing, including any trailing PEC.
 ///
-/// Use this when the payload is already a complete framed message (e.g. an
-/// MCTP-over-I3C frame from `MctpI3cEncap`, which carries its own PEC over a
-/// frame that begins with the destination byte). The PEC-adding
-/// [`send_private_write_on_stream`] would double-count the address in that case.
+/// For MCTP-over-I3C (DSP0233) use [`send_private_write_on_stream`] instead: the
+/// frame is the MCTP packet followed by a PEC over the write address byte and the
+/// packet, which is what it appends. This raw variant is for tests that need a
+/// deliberately malformed or non-standard frame.
 pub fn send_private_write_raw_on_stream(
     stream: &mut TcpStream,
     target_addr: u8,
@@ -164,6 +164,30 @@ pub fn read_outgoing_packet<R: Read>(reader: &mut R) -> Result<OutgoingPacket, S
         from_addr: header[1],
         data,
     })
+}
+
+/// The MCTP packet inside the data a target returned for a private read.
+///
+/// DSP0233 frames it as the packet followed by a PEC over the read address byte
+/// `(target_addr << 1) | 1` and the packet. Nothing precedes the packet. Fails if
+/// the data is empty, is only a PEC, or the PEC does not match.
+pub fn packet_from_read(target_addr: u8, data: &[u8]) -> Result<&[u8], String> {
+    let (received, packet) = data
+        .split_last()
+        .ok_or_else(|| "empty read frame".to_string())?;
+    if packet.is_empty() {
+        return Err("read frame holds a PEC but no packet".to_string());
+    }
+    let mut pec_input = Vec::with_capacity(1 + packet.len());
+    pec_input.push((target_addr << 1) | 1);
+    pec_input.extend_from_slice(packet);
+    let expected = crc8_smbus(&pec_input);
+    if *received != expected {
+        return Err(format!(
+            "bad PEC on read from 0x{target_addr:02x}: got {received:#04x}, expected {expected:#04x}"
+        ));
+    }
+    Ok(packet)
 }
 
 pub fn extract_target_addr(line: &str) -> Option<u8> {
@@ -389,6 +413,33 @@ mod tests {
         assert_eq!(pkt.ibi, 0);
         assert_eq!(pkt.from_addr, 8);
         assert_eq!(pkt.data, vec![0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn packet_from_read_strips_a_read_direction_pec() {
+        let packet = [0x01, 0x0a, 0x08, 0xc8, 0x01, 0x02];
+        let mut pec_input = vec![(0x08u8 << 1) | 1];
+        pec_input.extend_from_slice(&packet);
+        let mut data = packet.to_vec();
+        data.push(crc8_smbus(&pec_input));
+
+        assert_eq!(packet_from_read(0x08, &data).unwrap(), &packet);
+    }
+
+    #[test]
+    fn packet_from_read_rejects_bad_framing() {
+        let packet = [0x01, 0x0a, 0x08, 0xc8];
+
+        // PEC computed for a write (address byte with R/W# = 0) must not pass.
+        let mut write_pec = vec![0x08u8 << 1];
+        write_pec.extend_from_slice(&packet);
+        let mut data = packet.to_vec();
+        data.push(crc8_smbus(&write_pec));
+        assert!(packet_from_read(0x08, &data).is_err());
+
+        // Empty, and a PEC with no packet.
+        assert!(packet_from_read(0x08, &[]).is_err());
+        assert!(packet_from_read(0x08, &[0x00]).is_err());
     }
 
     #[test]

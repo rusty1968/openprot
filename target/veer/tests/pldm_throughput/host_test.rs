@@ -17,8 +17,8 @@
 //! Framing mirrors `tests/mctp_i3c`; PLDM messages use `pldm_common` codecs.
 
 use i3c_host::{
-    connect_i3c_socket, crc8_smbus, read_outgoing_packet, send_private_read_on_stream,
-    send_private_write_raw_on_stream, Runner,
+    connect_i3c_socket, packet_from_read, read_outgoing_packet, send_private_read_on_stream,
+    send_private_write_on_stream, Runner,
 };
 use pldm_common::codec::{PldmCodec, PldmCodecWithLifetime};
 use pldm_common::message::firmware_update::apply_complete::ApplyCompleteResponse;
@@ -41,7 +41,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const I3C_TARGET_ADDR: u8 = 0x08;
-const I3C_CTRL_ADDR: u8 = 0x0a;
 const FD_EID: u8 = 8;
 const UA_EID: u8 = 0x0a;
 const PLDM_MSG_TYPE: u8 = 0x01;
@@ -67,41 +66,39 @@ fn image() -> Vec<u8> {
     (0..IMAGE_SIZE).map(|i| (i as u8).wrapping_mul(7)).collect()
 }
 
-/// Wrap PLDM bytes in an MCTP-over-I3C frame (UA -> FD) with the given MCTP
-/// flags byte, appending PEC. `flags` bit3 is TO (tag owner); bits2:0 are the tag.
-fn mctp_frame(pldm: &[u8], flags: u8) -> Vec<u8> {
+/// Wrap PLDM bytes in an MCTP packet (UA -> FD) with the given MCTP flags byte:
+/// `[ver, dest EID, src EID, flags, msg type, pldm...]`. `flags` bit3 is TO (tag
+/// owner); bits2:0 are the tag.
+///
+/// This is the whole data of the I3C private write (DSP0233): the PEC is added by
+/// `send_private_write_on_stream`, and nothing precedes the packet.
+fn mctp_packet(pldm: &[u8], flags: u8) -> Vec<u8> {
     let mut mctp = vec![0x01, FD_EID, UA_EID, flags, PLDM_MSG_TYPE];
     mctp.extend_from_slice(pldm);
-    let byte_count = (1 + mctp.len()) as u8;
-    let mut frame = vec![
-        I3C_TARGET_ADDR << 1,
-        0x0f,
-        byte_count,
-        (I3C_CTRL_ADDR << 1) | 1,
-    ];
-    frame.extend_from_slice(&mctp);
-    frame.push(crc8_smbus(&frame));
-    frame
+    mctp
 }
 
 /// A UA-originated PLDM *request* (RequestUpdate, PassComponentTable, ...):
 /// SOM|EOM, TO=1 (the UA owns the tag), tag 0.
-fn ua_to_fd_frame(pldm: &[u8]) -> Vec<u8> {
-    mctp_frame(pldm, 0xC8)
+fn ua_to_fd_packet(pldm: &[u8]) -> Vec<u8> {
+    mctp_packet(pldm, 0xC8)
 }
 
-/// The i3c frames for a UA *response* to an FD-initiated request
+/// The MCTP packets of a UA *response* to an FD-initiated request
 /// (RequestFirmwareData / *Complete), TO=0 and echoing the tag the FD owns for
 /// that transaction. (TO=1 would route to the FD's responder instead of its
 /// requester, stalling the download.)
 ///
-/// A response larger than one fragment is split into <=240-byte MCTP packets
-/// with SOM/EOM/sequence flags; the FD's MCTP stack reassembles them. This is
-/// what lets `FD_XFER_CAP` exceed the single-fragment MTU — bigger chunks, fewer
-/// download round-trips. Small responses yield a single frame. Keep the message
-/// within the inbound ring depth (4 fragments ~= 960 B).
-fn fd_response_frames(pldm: &[u8], tag: u8) -> Vec<Vec<u8>> {
-    const FRAG_PAYLOAD: usize = 240; // <= 241 MTU with PEC
+/// A response larger than one fragment is split into MCTP packets of at most
+/// `FRAG_PAYLOAD` payload bytes with SOM/EOM/sequence flags; the FD's MCTP stack
+/// reassembles them. This is what lets `FD_XFER_CAP` exceed the single-fragment
+/// MTU — bigger chunks, fewer download round-trips. Small responses yield a
+/// single packet. Keep the message within the inbound ring depth (4 fragments
+/// ~= 960 B).
+fn fd_response_packets(pldm: &[u8], tag: u8) -> Vec<Vec<u8>> {
+    // Within the 245-byte MTU (250-byte frame limit - 4-byte MCTP header -
+    // 1-byte PEC).
+    const FRAG_PAYLOAD: usize = 240;
     let mut body = Vec::with_capacity(1 + pldm.len());
     body.push(PLDM_MSG_TYPE);
     body.extend_from_slice(pldm);
@@ -118,33 +115,24 @@ fn fd_response_frames(pldm: &[u8], tag: u8) -> Vec<Vec<u8>> {
             let flags = som | eom | seq | (tag & 0x07); // TO=0
             let mut mctp = vec![0x01, FD_EID, UA_EID, flags];
             mctp.extend_from_slice(chunk);
-            let byte_count = (1 + mctp.len()) as u8;
-            let mut frame = vec![
-                I3C_TARGET_ADDR << 1,
-                0x0f,
-                byte_count,
-                (I3C_CTRL_ADDR << 1) | 1,
-            ];
-            frame.extend_from_slice(&mctp);
-            frame.push(crc8_smbus(&frame));
-            frame
+            mctp
         })
         .collect()
 }
 
-/// The MCTP flags byte of an FD frame (index 7: [i3c 4][ver dest src flags]).
-fn mctp_tag_from_frame(data: &[u8]) -> Option<u8> {
-    data.get(7).map(|flags| flags & 0x07)
+/// The MCTP flags byte of an FD packet (index 3: `[ver dest src flags]`).
+fn mctp_tag_from_packet(data: &[u8]) -> Option<u8> {
+    data.get(3).map(|flags| flags & 0x07)
 }
 
-/// Extract the PLDM payload from an FD frame. Layout:
-/// [i3c hdr 4][mctp hdr 4][msg_type 1][pldm...][PEC].
-fn pldm_from_frame(data: &[u8]) -> Option<&[u8]> {
-    const PREFIX: usize = 4 + 4 + 1;
-    if data.len() < PREFIX + 1 {
+/// Extract the PLDM payload from an FD packet. Layout:
+/// `[mctp hdr 4][msg_type 1][pldm...]`.
+fn pldm_from_packet(data: &[u8]) -> Option<&[u8]> {
+    const PREFIX: usize = 4 + 1;
+    if data.len() <= PREFIX {
         return None;
     }
-    Some(&data[PREFIX..data.len() - 1])
+    Some(&data[PREFIX..])
 }
 
 /// True if the PLDM message is a request (Rq bit set in byte 0).
@@ -161,18 +149,19 @@ fn command(stream: &mut std::net::TcpStream, runner: &Runner, pldm: &[u8], cmd: 
     // stage a reply we then read — livelocking the round-trip. Re-send only
     // occasionally, to recover a first write that raced the socket accept.
     const RESEND_EVERY: u32 = 10;
-    let frame = ua_to_fd_frame(pldm);
+    let packet = ua_to_fd_packet(pldm);
     for i in 0..200u32 {
         if runner.exited() {
             return None;
         }
         if i % RESEND_EVERY == 0 {
-            let _ = send_private_write_raw_on_stream(stream, I3C_TARGET_ADDR, &frame);
+            let _ = send_private_write_on_stream(stream, I3C_TARGET_ADDR, &packet);
         }
         thread::sleep(Duration::from_millis(50));
         if send_private_read_on_stream(stream, I3C_TARGET_ADDR).is_ok()
             && let Ok(pkt) = read_outgoing_packet(stream)
-            && let Some(resp) = pldm_from_frame(&pkt.data)
+            && let Ok(mctp) = packet_from_read(I3C_TARGET_ADDR, &pkt.data)
+            && let Some(resp) = pldm_from_packet(mctp)
             && resp.len() >= 4
             && !is_request(resp)
             && resp[2] == cmd
@@ -198,8 +187,9 @@ fn read_fd_request(stream: &mut std::net::TcpStream, runner: &Runner) -> Option<
         }
         if send_private_read_on_stream(stream, I3C_TARGET_ADDR).is_ok()
             && let Ok(pkt) = read_outgoing_packet(stream)
-            && let Some(tag) = mctp_tag_from_frame(&pkt.data)
-            && let Some(pldm) = pldm_from_frame(&pkt.data)
+            && let Ok(mctp) = packet_from_read(I3C_TARGET_ADDR, &pkt.data)
+            && let Some(tag) = mctp_tag_from_packet(mctp)
+            && let Some(pldm) = pldm_from_packet(mctp)
             && is_request(pldm)
         {
             return Some((pldm.to_vec(), tag));
@@ -349,8 +339,8 @@ fn pldm_throughput_host_test() {
             }
             _ => continue,
         };
-        for frame in fd_response_frames(&resp[..resp_len], tag) {
-            let _ = send_private_write_raw_on_stream(&mut stream, I3C_TARGET_ADDR, &frame);
+        for packet in fd_response_packets(&resp[..resp_len], tag) {
+            let _ = send_private_write_on_stream(&mut stream, I3C_TARGET_ADDR, &packet);
         }
         if applied {
             break;
