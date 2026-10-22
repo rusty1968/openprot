@@ -109,6 +109,23 @@ impl CaliptraI3cTarget {
     // TTI receive (controller → target private write)
     // -------------------------------------------------------------------------
 
+    /// Raw TTI state for debugging (interrupt status, queue status, descriptor
+    /// queue depth, data queue depth, target error interrupt status, status,
+    /// framing error count, read-initiated PEC error count).
+    pub fn debug_regs(&self) -> [u32; 8] {
+        let r = self.regs();
+        [
+            r.tti_interrupt_status.get(),
+            r.tti_queue_status.get(),
+            r.tti_desc_queue_depth.get(),
+            r.tti_data_queue_depth.get(),
+            r.tti_target_err_intr_status.get(),
+            r.tti_status.get(),
+            r.tti_target_err_cnt_framing.get(),
+            r.tti_target_err_cnt_ri_pec.get(),
+        ]
+    }
+
     /// Return `true` if an RX descriptor is waiting in the TTI queue.
     pub fn rx_pending(&self) -> bool {
         self.regs()
