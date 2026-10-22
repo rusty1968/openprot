@@ -16,6 +16,16 @@ pub unsafe extern "C" fn pw_assert_HandleFailure() -> ! {
 
 #[riscv_rt::entry]
 fn main() -> ! {
+    // The FPGA MCU ROM arms MCI WDT1 (~800M cycles, ~44.7 s). Nothing here
+    // services it, so the MCU would reset mid-run (fatal error 0x10). Disable
+    // it, as the caliptra-mcu-sw runtime does at startup.
+    #[cfg(feature = "fpga")]
+    unsafe {
+        // SAFETY: MCI_BASE + 0xb0 is mci_reg_wdt_timer1_en; writing 0 stops the timer.
+        let wdt1_en = core::ptr::with_exposed_provenance_mut::<u32>(kernel_config::MCI_BASE + 0xb0);
+        wdt1_en.write_volatile(0);
+    }
+
     kernel::static_init_state!(static mut INIT_STATE: InitKernelState<Arch>);
 
     // SAFETY: `main` is only executed once, so we never generate more than one
