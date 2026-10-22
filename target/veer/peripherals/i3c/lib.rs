@@ -120,16 +120,28 @@ impl CaliptraI3cTarget {
     /// or `None` if no descriptor was present.
     pub fn rx_read(&mut self, buf: &mut [u8]) -> Option<usize> {
         let regs = self.regs();
-        if !regs
+        // `RxDescStat` is not a reliable "queue not empty" flag: on the FPGA it
+        // deasserts while one descriptor is still queued (seen after a burst of
+        // four frames: depth 1, status 0), which strands the last frame because
+        // no further interrupt arrives for it. So also consult the RX descriptor
+        // queue depth (low byte of `tti_desc_queue_depth`). The status bit stays
+        // as a trigger so a model that does not implement the depth register
+        // keeps working.
+        let status_set = regs
             .tti_interrupt_status
-            .is_set(i3c::bits::InterruptStatus::RxDescStat)
-        {
+            .is_set(i3c::bits::InterruptStatus::RxDescStat);
+        let queued = regs.tti_desc_queue_depth.get() & 0xff != 0;
+        if !status_set && !queued {
             return None;
         }
 
         let desc = regs.tti_rx_desc_queue_port.get();
         // Lower 16 bits of descriptor carry the data length in bytes.
         let len = (desc & 0xffff) as usize;
+        if len == 0 {
+            // An empty descriptor means the queue has drained.
+            return None;
+        }
         let nwords = (len + 3) / 4;
 
         let mut i = 0usize;
@@ -143,9 +155,12 @@ impl CaliptraI3cTarget {
             }
         }
 
-        // W1C — clear the status bit.
-        regs.tti_interrupt_status
-            .write(i3c::bits::InterruptStatus::RxDescStat::SET);
+        // `RxDescStat` is level-triggered: the hardware keeps it set while
+        // descriptors remain queued and drops it when the queue empties, so it
+        // is not cleared here. (Clearing it by hand would strand any frames
+        // still queued behind this one: no new interrupt arrives for them.) The
+        // upstream caliptra-mcu-sw driver likewise never writes this bit and
+        // reads descriptors until it deasserts.
 
         Some(len.min(buf.len()))
     }
