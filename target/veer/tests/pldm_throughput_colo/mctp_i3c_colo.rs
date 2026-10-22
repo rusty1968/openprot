@@ -31,7 +31,7 @@ use i3c_server::{dispatch, Inbound, Server};
 use mctp_i3c_colo_codegen::{handle, signals};
 use mctp_server_runtime::Channel;
 use openprot_hal_blocking::i3c_hardware::{I3cTarget, TargetEvent};
-use openprot_mctp_transport_i3c::{transfer_pec, I3cSender, MctpI3cReceiver};
+use openprot_mctp_transport_i3c::{I3cSender, MctpI3cReceiver};
 use pw_status::Result;
 use userspace::process_entry;
 use userspace::syscall;
@@ -59,7 +59,7 @@ impl Transport for ColoTransport<'_> {
 }
 
 fn colo_loop() -> Result<()> {
-    pw_log::info!("colocated i3c+mctp server starting (dsp0233 framing, diag build 6)");
+    pw_log::info!("colocated i3c+mctp server starting");
 
     // SAFETY: this process exclusively owns the I3C peripheral, mapped as a
     // device region by system.json5; Caliptra ROM already initialized the core.
@@ -79,8 +79,6 @@ fn colo_loop() -> Result<()> {
     let mut server = openprot_mctp_server::Server::<_, 16>::new(mctp::Eid(OWN_EID), 0, sender);
     let mut i3c_rx_buf = [0u8; I3C_RX_MAX];
     let mut channels = [Channel::new(handle::MCTP)];
-    // Diagnostics (local): how many events/packets to log.
-    let mut diag_budget = 120u32;
 
     // The MCTP side of the loop is the shared runtime. Its transport wake
     // source here is the i3c IRQ itself, so the callback does the i3c
@@ -96,13 +94,6 @@ fn colo_loop() -> Result<()> {
             // Read the event first (releasing the RefCell borrow) so the latch
             // loop below can borrow the Server again without a double-borrow.
             let evt = srv.borrow_mut().target.on_interrupt();
-            // Only unexpected events are logged; the common ones would use up
-            // the diagnostic budget before the transfer starts.
-            match evt {
-                Ok(TargetEvent::InboundReady) | Ok(TargetEvent::ResponseRead) => {}
-                Ok(_) => pw_log::info!("i3c diag: irq event other"),
-                Err(_) => pw_log::info!("i3c diag: irq event error"),
-            }
             match evt {
                 Ok(TargetEvent::InboundReady) => loop {
                     match srv.borrow_mut().latch_inbound() {
@@ -130,64 +121,9 @@ fn colo_loop() -> Result<()> {
                     i3c_receiver.decode(frame, || i3c_rx_client.dynamic_address().ok().flatten())
                 });
                 if let Some(Ok(pkt)) = decoded {
-                    let res = server.inbound(pkt);
-                    if diag_budget > 0 {
-                        diag_budget -= 1;
-                        let byte = |i: usize| pkt.get(i).copied().unwrap_or(0) as u32;
-                        pw_log::info!(
-                            "i3c diag: rx pkt len={} dest={} src={} flags=0x{:02x} type=0x{:02x} inbound_ok={}",
-                            pkt.len() as u32,
-                            byte(1),
-                            byte(2),
-                            byte(3),
-                            byte(4),
-                            res.is_ok() as u32
-                        );
-                        let r = srv.borrow().target.debug_regs();
-                        pw_log::info!(
-                            "i3c regs: irq=0x{:08x} qs=0x{:08x} desc=0x{:08x} data=0x{:08x}",
-                            r[0],
-                            r[1],
-                            r[2],
-                            r[3]
-                        );
-                        pw_log::info!(
-                            "i3c regs: err=0x{:08x} st=0x{:08x} framing={} ri_pec={}",
-                            r[4],
-                            r[5],
-                            r[6],
-                            r[7]
-                        );
-                    }
+                    let _ = server.inbound(pkt);
                 } else {
                     pw_log::error!("i3c frame decode failed");
-                    // Diagnostics (local): what arrived and what PEC we expected.
-                    if let Some(frame) = i3c_rx_buf.get(..n) {
-                        let own = i3c_rx_client.dynamic_address().ok().flatten();
-                        let body_len = frame.len().saturating_sub(1);
-                        let body = frame.get(..body_len).unwrap_or(&[]);
-                        let rx_pec = frame.get(body_len).copied().unwrap_or(0);
-                        let expect = own.map(|a| transfer_pec(a << 1, body)).unwrap_or(0);
-                        pw_log::error!(
-                            "i3c diag: len={} own_addr={} pec_rx=0x{:02x} pec_expect=0x{:02x}",
-                            n as u32,
-                            own.map(|a| a as u32).unwrap_or(0xffff),
-                            rx_pec as u32,
-                            expect as u32
-                        );
-                        let b = |i: usize| frame.get(i).copied().unwrap_or(0) as u32;
-                        pw_log::error!(
-                            "i3c diag: bytes {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                            b(0),
-                            b(1),
-                            b(2),
-                            b(3),
-                            b(4),
-                            b(5),
-                            b(6),
-                            b(7)
-                        );
-                    }
                 }
             }
         },
