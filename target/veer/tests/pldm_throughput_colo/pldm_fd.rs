@@ -15,11 +15,17 @@
 //! response spans a few inbound fragments, which the i3c server's inbound ring
 //! queues and the FD's MCTP stack reassembles — fewer, bigger download
 //! round-trips (the throughput lever).
+//!
+//! The device identity and firmware parameters match the caliptra-mcu-sw native
+//! FD (`firmware_update/config.rs`), so the same Update Agent package
+//! (`get_streaming_boot_pldm_fw_manifest`) accepts either stack. The component
+//! size comes from `UpdateComponent`, and downloaded bytes are counted and
+//! discarded, like the native `bench-skip-validation` path (no staging writes).
 
 #![no_main]
 #![no_std]
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 
 use openprot_mctp_client_ipc::IpcMctpClient;
 use openprot_pldm_service::firmware_device::{FirmwareDevice, RunTerminusResult, FD_MAX_MSG};
@@ -29,7 +35,11 @@ use pldm_common::message::firmware_update::get_fw_params::FirmwareParameters;
 use pldm_common::message::firmware_update::get_status::ProgressPercent;
 use pldm_common::message::firmware_update::transfer_complete::TransferResult;
 use pldm_common::message::firmware_update::verify_complete::VerifyResult;
-use pldm_common::protocol::firmware_update::{ComponentResponseCode, Descriptor};
+use pldm_common::protocol::firmware_update::{
+    ComponentActivationMethods, ComponentClassification, ComponentParameterEntry,
+    ComponentResponseCode, Descriptor, DescriptorType, FirmwareDeviceCapability,
+    PldmFirmwareString, PldmFirmwareVersion,
+};
 use pldm_common::util::fw_component::FirmwareComponent;
 use pldm_fd_codegen::handle;
 use pldm_interface::config::PLDM_PROTOCOL_CAPABILITIES;
@@ -41,10 +51,9 @@ use userspace::syscall;
 const FD_EID: u8 = 8;
 /// Update Agent EID this FD serves (the host).
 const UA_EID: u8 = 0x0a;
-/// Larger than the pldm_i3c correctness image (512) so the download phase is
-/// long enough for a stable throughput number, matching how caliptra-mcu-sw
-/// measures its PLDM transfer speed.
-const IMAGE_SIZE: usize = 4096;
+/// Component size assumed until `UpdateComponent` supplies the real one. The
+/// pldm_i3c host test serves an image of this size.
+const DEFAULT_IMAGE_SIZE: usize = 4096;
 /// Per-chunk transfer cap, well past the single-fragment MTU (241 B): each
 /// `RequestFirmwareData` response spans ~5 inbound MCTP fragments, which the
 /// inbound ring (`RX_RING = 6`) queues and the FD's MCTP stack reassembles into
@@ -65,10 +74,16 @@ const IDLE_TIMEOUT_MILLIS: u32 = 15_000;
 /// Bound each FD-initiated request's wait for the UA response.
 const REQUESTER_TIMEOUT_MILLIS: u32 = 5_000;
 
+/// Device UUID the Update Agent's package targets (same as the native FD).
+const DEVICE_UUID: [u8; 16] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+];
+
 struct MockFdOps {
     component_accepted: Cell<bool>,
+    /// Size of the component being downloaded, from `UpdateComponent`.
+    image_size: Cell<usize>,
     download_bytes_received: Cell<usize>,
-    downloaded_image: RefCell<[u8; IMAGE_SIZE]>,
     verified: Cell<bool>,
     applied: Cell<bool>,
 }
@@ -77,8 +92,8 @@ impl MockFdOps {
     const fn new() -> Self {
         Self {
             component_accepted: Cell::new(false),
+            image_size: Cell::new(DEFAULT_IMAGE_SIZE),
             download_bytes_received: Cell::new(0),
-            downloaded_image: RefCell::new([0u8; IMAGE_SIZE]),
             verified: Cell::new(false),
             applied: Cell::new(false),
         }
@@ -86,12 +101,40 @@ impl MockFdOps {
 }
 
 impl FdOps for MockFdOps {
-    fn get_device_identifiers(&self, _ids: &mut [Descriptor]) -> Result<usize, FdOpsError> {
-        Ok(0)
+    fn get_device_identifiers(&self, ids: &mut [Descriptor]) -> Result<usize, FdOpsError> {
+        let slot = ids.first_mut().ok_or(FdOpsError::DeviceIdentifiersError)?;
+        *slot = Descriptor::new(DescriptorType::Uuid, &DEVICE_UUID)
+            .map_err(|_| FdOpsError::DeviceIdentifiersError)?;
+        Ok(1)
     }
 
     fn get_firmware_parms(&self, params: &mut FirmwareParameters) -> Result<(), FdOpsError> {
-        *params = FirmwareParameters::default();
+        // Same values as the native FD: one firmware component, identifier 0xffff,
+        // active comparison stamp below the package's 0xffffffff.
+        let err = |_| FdOpsError::FirmwareParametersError;
+        let active_string = PldmFirmwareString::new("UTF-8", "soc-fw-1.0").map_err(err)?;
+        let active_version = PldmFirmwareVersion::new(0x1234_5678, &active_string, Some("20250210"));
+        let pending_string = PldmFirmwareString::new("UTF-8", "soc-fw-1.1").map_err(err)?;
+        let pending_version =
+            PldmFirmwareVersion::new(0x8765_4321, &pending_string, Some("20250213"));
+        let activation_methods = ComponentActivationMethods(0x0001);
+        let capabilities = FirmwareDeviceCapability(0x0010);
+        let entry = ComponentParameterEntry::new(
+            ComponentClassification::Firmware,
+            0xffff,
+            0,
+            &active_version,
+            &pending_version,
+            activation_methods,
+            capabilities,
+        );
+        *params = FirmwareParameters::new(
+            capabilities,
+            1,
+            &active_string,
+            &pending_string,
+            &[entry],
+        );
         Ok(())
     }
 
@@ -101,10 +144,14 @@ impl FdOps for MockFdOps {
 
     fn handle_component(
         &self,
-        _component: &FirmwareComponent,
+        component: &FirmwareComponent,
         _fw_params: &FirmwareParameters,
         _op: ComponentOperation,
     ) -> Result<ComponentResponseCode, FdOpsError> {
+        // PassComponentTable carries no size; UpdateComponent does.
+        if let Some(size) = component.comp_image_size {
+            self.image_size.set(size as usize);
+        }
         self.component_accepted.set(true);
         Ok(ComponentResponseCode::CompCanBeUpdated)
     }
@@ -114,7 +161,9 @@ impl FdOps for MockFdOps {
         _component: &FirmwareComponent,
     ) -> Result<(usize, usize), FdOpsError> {
         let offset = self.download_bytes_received.get();
-        let length = IMAGE_SIZE
+        let length = self
+            .image_size
+            .get()
             .checked_sub(offset)
             .ok_or(FdOpsError::FwDownloadError)?
             .min(FD_XFER_CAP);
@@ -127,21 +176,20 @@ impl FdOps for MockFdOps {
         data: &[u8],
         _component: &FirmwareComponent,
     ) -> Result<TransferResult, FdOpsError> {
+        // Count and discard: no staging writes, like the native bench path.
         let end = offset
             .checked_add(data.len())
             .ok_or(FdOpsError::FwDownloadError)?;
-        let mut image = self.downloaded_image.borrow_mut();
-        image
-            .get_mut(offset..end)
-            .ok_or(FdOpsError::FwDownloadError)?
-            .copy_from_slice(data);
+        if end > self.image_size.get() {
+            return Err(FdOpsError::FwDownloadError);
+        }
         self.download_bytes_received
             .set(end.max(self.download_bytes_received.get()));
         Ok(TransferResult::TransferSuccess)
     }
 
     fn is_download_complete(&self, _component: &FirmwareComponent) -> bool {
-        self.download_bytes_received.get() >= IMAGE_SIZE
+        self.download_bytes_received.get() >= self.image_size.get()
     }
 
     fn query_download_progress(
@@ -149,7 +197,8 @@ impl FdOps for MockFdOps {
         _component: &FirmwareComponent,
         progress_percent: &mut ProgressPercent,
     ) -> Result<(), FdOpsError> {
-        let pct = (self.download_bytes_received.get() * 100 / IMAGE_SIZE) as u8;
+        let size = self.image_size.get().max(1);
+        let pct = (self.download_bytes_received.get() * 100 / size) as u8;
         progress_percent
             .set_value(pct.min(100))
             .map_err(|_| FdOpsError::FwDownloadError)?;
