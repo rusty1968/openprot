@@ -9,7 +9,7 @@
 
 use i3c_api::{I3cStatus, MAX_PAYLOAD};
 use i3c_client::{ClientError, I3cClient};
-use i3c_server::{LoopbackTransport, Server};
+use i3c_server::{Inbound, LoopbackTransport, Server};
 use openprot_hal_blocking::i3c_hardware::{DynamicAddress, I3cTarget, TargetEvent};
 
 /// A target whose inbound queue and outbound record are both visible to tests.
@@ -110,7 +110,10 @@ fn recv_returns_the_latched_frame_once() {
         .server()
         .target
         .queue(&[0x01, 0x02, 0x03, 0x04]);
-    assert!(c.transport().server().latch_inbound().expect("latch"));
+    assert_eq!(
+        c.transport().server().latch_inbound().expect("latch"),
+        Inbound::Latched
+    );
 
     let mut buf = [0u8; MAX_PAYLOAD];
     assert_eq!(c.recv(&mut buf).expect("recv"), Some(4));
@@ -146,7 +149,10 @@ fn oversize_send_is_rejected_client_side() {
 fn recv_into_a_short_buffer_is_rejected_without_losing_the_frame() {
     let mut c = client(Some(0x08));
     c.transport().server().target.queue(&[0xaa; 16]);
-    assert!(c.transport().server().latch_inbound().expect("latch"));
+    assert_eq!(
+        c.transport().server().latch_inbound().expect("latch"),
+        Inbound::Latched
+    );
 
     // A buffer too small to hold the frame is rejected before the round-trip.
     let mut small = [0u8; 4];
