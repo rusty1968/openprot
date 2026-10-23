@@ -73,12 +73,6 @@ const FD_XFER_CAP: usize = 960;
 const IDLE_TIMEOUT_MILLIS: u32 = 15_000;
 /// Bound each FD-initiated request's wait for the UA response.
 const REQUESTER_TIMEOUT_MILLIS: u32 = 5_000;
-/// While downloading, poll for an inbound UA command once every this many
-/// requests instead of after each one. Each poll is an IPC round trip plus a
-/// wait for its timeout, per chunk, on a slow core. A UA command such as
-/// CancelUpdate that arrives between polls is answered up to this many requests
-/// late.
-const RESPONDER_POLL_EVERY_STEPS: u32 = 16;
 
 /// Device UUID the Update Agent's package targets (same as the native FD).
 const DEVICE_UUID: [u8; 16] = [
@@ -265,7 +259,6 @@ fn entry() {
         responder_transport,
         requester_transport,
     );
-    fd.set_responder_poll_interval(RESPONDER_POLL_EVERY_STEPS);
 
     pw_log::info!("pldm fd: waiting for update agent");
 
