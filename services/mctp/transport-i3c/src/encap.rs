@@ -41,8 +41,9 @@ const WRITE: u8 = 0;
 /// R/W# bit of the address byte for a controller read (of this target).
 const READ: u8 = 1;
 
-/// One SMBus CRC-8 step: polynomial 0x07, no reflection.
-const fn crc8_step(mut crc: u8, value: u8) -> u8 {
+/// Bitwise SMBus CRC-8 step: polynomial 0x07, no reflection. Only used to build
+/// [`CRC8_TABLE`] at compile time.
+const fn crc8_step_bitwise(mut crc: u8, value: u8) -> u8 {
     crc ^= value;
     let mut i = 0;
     while i < 8 {
@@ -54,6 +55,25 @@ const fn crc8_step(mut crc: u8, value: u8) -> u8 {
         i += 1;
     }
     crc
+}
+
+/// CRC-8 (poly 0x07) of every single byte value, so a step is one lookup. The
+/// bitwise loop costs ~60-90 instructions per byte, which dominated frame
+/// decode on the slow core.
+static CRC8_TABLE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = crc8_step_bitwise(0, i as u8);
+        i += 1;
+    }
+    table
+};
+
+/// One SMBus CRC-8 step.
+#[inline(always)]
+fn crc8_step(crc: u8, value: u8) -> u8 {
+    CRC8_TABLE[(crc ^ value) as usize]
 }
 
 /// SMBus PEC: CRC-8 with polynomial 0x07, zero seed, no reflection.
@@ -201,5 +221,25 @@ impl MctpI3cEncap {
         }
 
         Ok(framed)
+    }
+}
+
+#[cfg(test)]
+mod crc_tests {
+    use super::*;
+
+    #[test]
+    fn table_matches_bitwise_for_all_inputs() {
+        for crc in 0..=255u8 {
+            for value in 0..=255u8 {
+                assert_eq!(crc8_step(crc, value), crc8_step_bitwise(crc, value));
+            }
+        }
+    }
+
+    #[test]
+    fn smbus_pec_check_value() {
+        // CRC-8/SMBUS check value for "123456789".
+        assert_eq!(smbus_pec(b"123456789"), 0xF4);
     }
 }
