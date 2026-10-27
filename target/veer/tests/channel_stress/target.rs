@@ -7,6 +7,7 @@
 #![no_std]
 #![no_main]
 
+use arch_riscv::Arch;
 use console_backend as _;
 use entry::exit;
 use target_common::{declare_target, TargetInterface};
@@ -18,8 +19,12 @@ impl TargetInterface for Target {
 
     fn main() -> ! {
         codegen::start();
-        #[expect(clippy::empty_loop)]
-        loop {}
+        // The bootstrap thread has nothing left to do. Sleep rather than spin: a
+        // spinning thread at the same priority as the app threads takes a time
+        // slice at every scheduler tick and delays every wake-up behind it.
+        loop {
+            let _ = kernel::sleep_until(Arch, kernel::Instant::MAX);
+        }
     }
 
     fn shutdown(code: u32) -> ! {
