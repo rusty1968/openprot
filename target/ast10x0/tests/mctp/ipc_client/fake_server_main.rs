@@ -27,9 +27,7 @@
 #![no_std]
 
 use mctp_lib::config;
-use openprot_mctp_api::wire::{
-    self, MctpOp, MctpRequestHeader, MctpResponseHeader,
-};
+use openprot_mctp_api::wire::{self, MctpOp, MctpRequestHeader, MctpResponseHeader};
 use openprot_mctp_api::ResponseCode;
 use userspace::syscall::Signals;
 use userspace::time::Instant;

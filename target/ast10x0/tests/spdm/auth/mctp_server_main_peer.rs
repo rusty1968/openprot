@@ -57,20 +57,18 @@ fn mctp_server_loop() -> Result<()> {
         handle::I2C,
         Signals::USER,
         &mut server,
-        |server| {
-            match i2c_rx_client.slave_receive(&mut i2c_rx_buf) {
-                Ok(event) => {
-                    if event.kind == SlaveEvent::DataReceived && event.data_len > 0 {
-                        if let Ok((pkt, _)) = i2c_receiver.decode(&i2c_rx_buf[..event.data_len]) {
-                            let _ = server.inbound(pkt);
-                        } else {
-                            pw_log::error!("i2c frame decode failed");
-                        }
+        |server| match i2c_rx_client.slave_receive(&mut i2c_rx_buf) {
+            Ok(event) => {
+                if event.kind == SlaveEvent::DataReceived && event.data_len > 0 {
+                    if let Ok((pkt, _)) = i2c_receiver.decode(&i2c_rx_buf[..event.data_len]) {
+                        let _ = server.inbound(pkt);
+                    } else {
+                        pw_log::error!("i2c frame decode failed");
                     }
                 }
-                Err(_) => {
-                    pw_log::error!("slave_receive failed");
-                }
+            }
+            Err(_) => {
+                pw_log::error!("slave_receive failed");
             }
         },
     )
@@ -89,4 +87,3 @@ fn entry() {
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
-

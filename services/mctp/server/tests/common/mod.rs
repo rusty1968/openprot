@@ -18,7 +18,7 @@
 
 use std::cell::RefCell;
 
-use mctp::Tag;
+use mctp::{Eid, Tag};
 use mctp_lib::fragment::{Fragmenter, SendOutput};
 use mctp_lib::Sender;
 use openprot_mctp_api::{
