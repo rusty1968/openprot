@@ -7,7 +7,7 @@
 # TARGET_COMPATIBLE_WITH for crates that don't depend on target-specific code.
 KERNEL_TARGET_COMPATIBLE_WITH = select({
     "//target/ast10x0:target_ast10x0": [],
-    "//target/veer:target_veer": [],
     "//target/earlgrey:target_earlgrey": [],
+    "//target/veer:target_veer": [],
     "//conditions:default": ["@platforms//:incompatible"],
 })
