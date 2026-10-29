@@ -49,6 +49,7 @@ struct LoopbackSender<'a> {
 impl Sender for LoopbackSender<'_> {
     fn send_vectored(
         &mut self,
+        _eid: mctp::Eid,
         mut fragmenter: Fragmenter,
         payload: &[&[u8]],
     ) -> mctp::Result<mctp::Tag> {
