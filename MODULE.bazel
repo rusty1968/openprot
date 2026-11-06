@@ -23,11 +23,16 @@ local_path_override(
 # Local patch: pw_kernel's VeeR PIC interrupt path writes MEICPCT (CSR 0xBCA),
 # which raises an illegal-instruction exception on the Caliptra FPGA's VeeR core
 # (first I3C interrupt crashes the kernel). See third_party/pigweed/veer_no_meicpct.patch.
+# Second local patch: make the PIC gateways level-triggered and active high explicitly,
+# as caliptra-mcu-sw's PIC driver does. See third_party/pigweed/veer_pic_gateways.patch.
 git_override(
     module_name = "pigweed",
     commit = "3ada25a6333e9165e3fdbc925d2862926c8356e3",  # roll:pigweed
     patch_strip = 1,
-    patches = ["//third_party/pigweed:veer_no_meicpct.patch"],
+    patches = [
+        "//third_party/pigweed:veer_no_meicpct.patch",
+        "//third_party/pigweed:veer_pic_gateways.patch",
+    ],
     remote = "https://pigweed.googlesource.com/pigweed/pigweed",
 )
 
