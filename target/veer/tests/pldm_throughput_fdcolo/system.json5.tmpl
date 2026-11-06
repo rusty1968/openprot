@@ -1,0 +1,52 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// FD-colocated variant of pldm_throughput_colo: the PLDM FirmwareDevice, the MCTP
+// server and the I3C driver are ONE process (`fd_colo`). The FD reaches the MCTP
+// server through an in-process client instead of the `mctp` kernel channel, so
+// there is no channel at all; the process owns the I3C IRQ and registers.
+{
+  arch: {
+    type: "riscv",
+  },
+  kernel: {
+    flash_start_address: @KERNEL_FLASH_START@,
+    flash_size_bytes: 0x18000,
+    ram_start_address: @KERNEL_RAM_START@,
+    ram_size_bytes: 0x8000,
+  },
+  apps: [
+    {
+      name: "pldm_throughput_fdcolo",
+      flash_size_bytes: 0x28000,
+      processes: [
+        {
+          name: "fd_colo",
+          // The two processes this replaces had 0x10000 each.
+          ram_size_bytes: 0x20000,
+          objects: [
+            { name: "wg", type: "wait_group" },
+            {
+              name: "i3c_irq",
+              type: "interrupt",
+              irqs: [{ name: "i3c", number: 2 }],
+            },
+            {
+              type: "thread",
+              name: "fd_colo_thread",
+              kernel_stack_size_bytes: 4096,
+            },
+          ],
+          memory_mappings: [
+            {
+              name: "i3c_regs",
+              type: "device",
+              start_address: @I3C_BASE@,
+              size_bytes: 0x1000,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+}
