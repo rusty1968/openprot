@@ -1,0 +1,23 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+# A keyed map of one-shot deadlines with no clock, so it builds and tests on
+# the host. No compatibility promise yet: it has no users so far.
+rust_library(
+    name = "deadlines",
+    srcs = ["src/lib.rs"],
+    crate_name = "util_deadlines",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rust_crates//:heapless",
+    ],
+)
+
+rust_test(
+    name = "deadlines_test",
+    crate = ":deadlines",
+    edition = "2024",
+)
