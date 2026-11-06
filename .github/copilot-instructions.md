@@ -12,6 +12,7 @@
 - [ ] Code is no_std compatible (no heap allocation: Vec, HashMap, String, etc.)
 - [ ] Fixed-size arrays and heapless collections used instead of dynamic allocation
 - [ ] Stack usage is bounded and reasonable for embedded targets
+- [ ] Shared/reused scratch buffers are not aliased across multiple batched results — each consumer's data is copied or encoded before the buffer is overwritten for the next one
 
 ## Quick Reference: Forbidden Patterns
 
@@ -25,6 +26,7 @@
 | `Vec<T>`, `HashMap<K,V>` | Fixed-size arrays `[T; N]`, `heapless::Vec<T, N>` |
 | `String` | Fixed-size string `heapless::String<N>` or `&str` |
 | `Box<T>` | Stack allocation or `&mut T` reference |
+| Batching N results against one shared buffer, then processing them after the loop | Copy-and-encode (or fully consume) each result's data immediately, within the same iteration that filled the buffer, before moving to the next |
 
 ## Security-Specific Guidelines
 
@@ -33,3 +35,4 @@
 - **Memory safety**: Ensure sensitive data is properly zeroized after use
 - **Hardware abstraction**: All register access must go through HAL traits
 - **Error information**: Don't leak sensitive data in error messages
+- **Buffer aliasing (CWE-488)**: Never collect metadata for multiple pending/ready items against a single shared buffer and process them afterward — the buffer only ever holds the last write. Each item must be fully encoded/consumed before the buffer is reused for the next.
