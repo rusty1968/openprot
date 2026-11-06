@@ -101,6 +101,19 @@ pub trait I3cTarget {
     /// Bring the target onto the bus using its pre-kernel configuration.
     fn enable(&mut self) -> Result<(), Self::Error>;
 
+    /// Also report [`TargetEvent::ResponseRead`], when the controller reads a
+    /// staged response out of the target's TX queue.
+    ///
+    /// Reporting that event can cost an extra interrupt per outbound message on
+    /// some controllers, and only a runtime that holds a second send until the
+    /// first has been read needs it, so [`enable`](Self::enable) does not turn it
+    /// on. Such a runtime calls this after `enable`. The default does nothing:
+    /// a target that never reports `ResponseRead` leaves its runtime to release
+    /// outbound back-pressure on the next inbound frame instead.
+    fn enable_response_read_events(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Service a target interrupt.
     ///
     /// Called from the pigweed IRQ handler: the implementation drains hardware

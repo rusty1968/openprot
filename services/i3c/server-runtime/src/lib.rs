@@ -27,9 +27,10 @@
 //!
 //! Back-pressure is released on `ResponseRead` and, as a fallback, on the next
 //! `InboundReady`: the i3c target derives `ResponseRead` from the hardware
-//! `IbiDone` interrupt, which is not raised reliably after a private read, and a
-//! fresh inbound request proves (by request/response ordering) the prior
-//! response was read. See [`release_backpressure`].
+//! `TxDescComplete` interrupt (the controller consumed the staged response). It
+//! is not returned when it arrives in the same interrupt as an inbound frame, and
+//! a fresh inbound request proves (by request/response ordering) the prior
+//! response was read, so `InboundReady` releases too. See [`release_backpressure`].
 //! - **IPC** — the wait returns `READABLE`; the runtime reads one request and
 //!   dispatches. A `Recv` that consumes the latch also clears `USER`; the IRQ
 //!   path re-raises it when the next frame lands.
@@ -49,9 +50,9 @@ use userspace::time::Instant;
 ///
 /// Called both from the `ResponseRead` IRQ and — as a fallback — when a fresh
 /// inbound request arrives. The i3c target derives `ResponseRead` from the
-/// hardware `IbiDone` interrupt, which the controller/emulator does not reliably
-/// raise after a private read; a missed `IbiDone` alone would leave `tx_pending`
-/// set and wedge the next `Send` forever. In strict request/response the
+/// hardware `TxDescComplete` interrupt, which is not returned separately when it
+/// shares an interrupt with an inbound frame; a missed `ResponseRead` alone would
+/// leave `tx_pending` set and wedge the next `Send` forever. In strict request/response the
 /// controller reads a response before issuing its next request, so a new inbound
 /// write is itself proof the prior response was read — a sound protocol-level
 /// release trigger that keeps the flow alive when `IbiDone` is missed.
@@ -82,6 +83,11 @@ fn release_backpressure<T: I3cTarget>(
 pub fn run<T: I3cTarget>(wg: u32, irq_signals: Signals, srv: &mut Server<T>) -> ! {
     if srv.target.enable().is_err() {
         pw_log::error!("i3c target enable failed");
+    }
+    // This runtime holds a second `Send` until the first has been read, so it
+    // wants the `ResponseRead` event (see the module docs for the fallback).
+    if srv.target.enable_response_read_events().is_err() {
+        pw_log::error!("i3c response-read events enable failed");
     }
     if syscall::wait_group_add(wg, srv.channel, Signals::READABLE, srv.channel as usize).is_err() {
         pw_log::error!("wait_group_add channel failed");

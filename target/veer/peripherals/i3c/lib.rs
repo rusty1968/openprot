@@ -49,10 +49,21 @@ pub const MCTP_DCR: u8 = 0xCC;
 pub const MDB_PENDING_READ: u8 = 0xAE;
 
 /// Driver for the Caliptra-SS i3c-core in target (secondary) mode.
+/// How many times a failed IBI is raised again before giving up. The
+/// caliptra-mcu-sw driver retries without a bound; a bound keeps a controller
+/// that never acknowledges the IBI from making this driver spin forever.
+const IBI_MAX_RETRIES: u8 = 16;
+
 pub struct CaliptraI3cTarget {
     regs: *const i3c::regs::I3c,
     // Mandatory Data Byte raised with each pending-read IBI.
     ibi_mdb: u8,
+    // The IBI payload (the 2-byte big-endian response length) of the IBI raised
+    // for the staged response, kept until the controller acknowledges it, so it
+    // can be raised again if the hardware reports a failure.
+    pending_ibi: Option<[u8; 2]>,
+    // Retries of `pending_ibi` so far.
+    ibi_retries: u8,
     // !Send + !Sync: exclusive ownership of one physical peripheral
     _not_send_sync: PhantomData<*mut ()>,
 }
@@ -68,6 +79,8 @@ impl CaliptraI3cTarget {
         Self {
             regs: MCU_MEMORY_MAP.i3c_offset as *const i3c::regs::I3c,
             ibi_mdb: MDB_PENDING_READ,
+            pending_ibi: None,
+            ibi_retries: 0,
             _not_send_sync: PhantomData,
         }
     }
@@ -234,30 +247,71 @@ impl I3cTarget for CaliptraI3cTarget {
     type Error = core::convert::Infallible;
 
     fn enable(&mut self) -> Result<(), Self::Error> {
-        // Arm the inbound-write and IBI-completion interrupts together, matching
-        // the upstream runtime driver's target bring-up.
+        // An inbound write is queued, and an IBI finished. The third interrupt
+        // the upstream runtime driver arms, `TxDescComplete` (the controller
+        // consumed a staged response), is left off here: it costs an interrupt per
+        // outbound message and only a runtime that gates on `ResponseRead` needs
+        // it (see `enable_response_read_events`).
         self.regs()
             .tti_interrupt_enable
             .modify(InterruptEnable::RxDescStatEn::SET + InterruptEnable::IbiDoneEn::SET);
         Ok(())
     }
 
+    fn enable_response_read_events(&mut self) -> Result<(), Self::Error> {
+        self.regs()
+            .tti_interrupt_enable
+            .modify(InterruptEnable::TxDescCompleteEn::SET);
+        Ok(())
+    }
+
     fn on_interrupt(&mut self) -> Result<TargetEvent, Self::Error> {
-        let regs = self.regs();
-        let status = regs.tti_interrupt_status.extract();
-        let mut event = TargetEvent::None;
+        // Each status bit is handled on its own, as the upstream driver does;
+        // one interrupt can carry several of them.
+        let status = self.regs().tti_interrupt_status.extract();
+
         if status.is_set(InterruptStatus::IbiDone) {
-            // Reading the last-IBI status clears IbiDone; the controller has
-            // consumed the staged private-read response.
-            let _ = regs.tti_status.read(Status::LastIbiStatus);
-            event = TargetEvent::ResponseRead;
+            // Reading the last-IBI status clears `IbiDone`. A non-zero status
+            // means the IBI was not accepted by the controller: raise it again
+            // (the staged TX data is still queued), up to a bound.
+            let ibi_status = self.regs().tti_status.read(Status::LastIbiStatus);
+            if ibi_status == 0 {
+                self.pending_ibi = None;
+                self.ibi_retries = 0;
+            } else if let Some(payload) = self.pending_ibi {
+                if self.ibi_retries < IBI_MAX_RETRIES {
+                    self.ibi_retries += 1;
+                    self.ibi_raise(self.ibi_mdb, &payload);
+                } else {
+                    self.pending_ibi = None;
+                    self.ibi_retries = 0;
+                }
+            }
         }
+
+        // The controller has read the staged response out of the TX queue.
+        // `TxDescComplete` is the signal for that (only raised if
+        // `enable_response_read_events` armed it); `IbiDone` only says the IBI
+        // was delivered, which can happen well before the private read.
+        let response_read = status.is_set(InterruptStatus::TxDescComplete);
+        if response_read {
+            self.regs()
+                .tti_interrupt_status
+                .write(InterruptStatus::TxDescComplete::SET);
+        }
+
         if status.is_set(InterruptStatus::RxDescStat) {
             // An inbound write is queued; the runtime drains it with
-            // `read_frame`, which clears the status on the last descriptor.
-            event = TargetEvent::InboundReady;
+            // `read_frame`. If a response read is reported in the same
+            // interrupt it is not returned separately: a new inbound request
+            // proves the previous response was read, and the runtimes release
+            // outbound back-pressure on `InboundReady` for exactly that reason.
+            return Ok(TargetEvent::InboundReady);
         }
-        Ok(event)
+        if response_read {
+            return Ok(TargetEvent::ResponseRead);
+        }
+        Ok(TargetEvent::None)
     }
 
     fn read_frame(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
@@ -269,7 +323,10 @@ impl I3cTarget for CaliptraI3cTarget {
         // big-endian payload tells the controller how many bytes to read.
         self.tx_write(data);
         let len = u16::try_from(data.len()).unwrap_or(u16::MAX);
-        self.ibi_raise(self.ibi_mdb, &len.to_be_bytes());
+        let payload = len.to_be_bytes();
+        self.pending_ibi = Some(payload);
+        self.ibi_retries = 0;
+        self.ibi_raise(self.ibi_mdb, &payload);
         Ok(())
     }
 
