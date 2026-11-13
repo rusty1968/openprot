@@ -12,6 +12,15 @@ load("//target/veer/tooling:caliptra_runner.bzl", "caliptra_test")
 
 package(default_visibility = ["//visibility:public"])
 
+# The system config and kernel target are the same for the throughput images.
+exports_files(
+    [
+        "system.json5.tmpl",
+        "target.rs",
+    ],
+    visibility = ["//target/veer/tests:__subpackages__"],
+)
+
 veer_system_config(
     name = "system_config",
     src = "system.json5.tmpl",

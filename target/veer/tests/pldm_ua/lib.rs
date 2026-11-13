@@ -49,7 +49,7 @@ use pldm_common::protocol::firmware_update::{
     ComponentClassification, FwUpdateCmd, PldmFirmwareString, UpdateOptionFlags, VersionStringType,
     PLDM_FWUP_IMAGE_SET_VER_STR_MAX_LEN,
 };
-use veer_host_util::{read_message, send_message, Message};
+use veer_host_util::{read_message, send_message_paced, Message};
 
 /// The firmware device's MCTP EID (`FD_EID` in the firmware).
 pub const FD_EID: u8 = 8;
@@ -70,6 +70,10 @@ pub struct UpdateConfig {
     /// The largest chunk the UA offers in `RequestUpdate`. The FD asks for the
     /// smaller of this and its own cap.
     pub max_transfer_size: u32,
+    /// Pause between the packets of one message the UA writes (see
+    /// `veer_host_util::send_message_paced`). The target needs time to drain its
+    /// receive FIFO, and the pause is part of the timed download.
+    pub write_gap: Duration,
 }
 
 /// What happened.
@@ -117,6 +121,15 @@ fn pldm_body(pldm: &[u8]) -> Vec<u8> {
     body
 }
 
+/// One UA to FD command.
+struct Command<'a> {
+    /// For messages.
+    name: &'static str,
+    cmd: FwUpdateCmd,
+    /// The encoded PLDM request.
+    pldm: &'a [u8],
+}
+
 /// Send a UA to FD command and read the FD's response. Returns the response's
 /// completion code. Checks the response is for this command and tag.
 fn command(
@@ -124,10 +137,10 @@ fn command(
     stream: &mut BufferedStream,
     log: &mut String,
     target_addr: u8,
-    pldm: &[u8],
-    cmd: FwUpdateCmd,
-    name: &str,
+    command: Command,
+    write_gap: Duration,
 ) -> u8 {
+    let Command { name, cmd, pldm } = command;
     let tag = 0;
     let request = Message {
         dest: FD_EID,
@@ -137,7 +150,7 @@ fn command(
         body: pldm_body(pldm),
         packets: 0,
     };
-    send_message(hw, stream, log, target_addr, &request);
+    send_message_paced(hw, stream, log, target_addr, &request, write_gap);
 
     let reply = read_message(hw, stream, log, target_addr);
     assert_eq!(reply.dest, UA_EID, "{name} response destination");
@@ -187,9 +200,12 @@ pub fn run_update(
         stream,
         log,
         target_addr,
-        &buf[..n],
-        FwUpdateCmd::RequestUpdate,
-        "RequestUpdate",
+        Command {
+            name: "RequestUpdate",
+            cmd: FwUpdateCmd::RequestUpdate,
+            pldm: &buf[..n],
+        },
+        config.write_gap,
     );
     assert_eq!(cc, SUCCESS, "RequestUpdate should succeed");
 
@@ -212,9 +228,12 @@ pub fn run_update(
         stream,
         log,
         target_addr,
-        &buf[..n],
-        FwUpdateCmd::PassComponentTable,
-        "PassComponentTable",
+        Command {
+            name: "PassComponentTable",
+            cmd: FwUpdateCmd::PassComponentTable,
+            pldm: &buf[..n],
+        },
+        config.write_gap,
     );
     assert_eq!(cc, SUCCESS, "PassComponentTable should succeed");
 
@@ -238,9 +257,12 @@ pub fn run_update(
         stream,
         log,
         target_addr,
-        &buf[..n],
-        FwUpdateCmd::UpdateComponent,
-        "UpdateComponent",
+        Command {
+            name: "UpdateComponent",
+            cmd: FwUpdateCmd::UpdateComponent,
+            pldm: &buf[..n],
+        },
+        config.write_gap,
     );
     assert_eq!(cc, SUCCESS, "UpdateComponent should succeed");
 
@@ -306,7 +328,7 @@ pub fn run_update(
             body: pldm_body(&resp[..resp_len]),
             packets: 0,
         };
-        send_message(hw, stream, log, target_addr, &reply);
+        send_message_paced(hw, stream, log, target_addr, &reply, config.write_gap);
     }
 
     // ---- ActivateFirmware: the last command; the FD then idles out and exits ----
@@ -323,9 +345,12 @@ pub fn run_update(
         stream,
         log,
         target_addr,
-        &buf[..n],
-        FwUpdateCmd::ActivateFirmware,
-        "ActivateFirmware",
+        Command {
+            name: "ActivateFirmware",
+            cmd: FwUpdateCmd::ActivateFirmware,
+            pldm: &buf[..n],
+        },
+        config.write_gap,
     );
     assert_eq!(cc, SUCCESS, "ActivateFirmware should succeed");
 

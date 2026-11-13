@@ -180,6 +180,20 @@ pub fn send_message(
     target_addr: u8,
     message: &Message,
 ) {
+    send_message_paced(hw, stream, log, target_addr, message, WRITE_GAP);
+}
+
+/// Like [`send_message`] with the pause between the packets of one message
+/// chosen by the caller. A test that times the transfer picks the smallest pause
+/// the target keeps up with: the pause is part of what it measures.
+pub fn send_message_paced(
+    hw: &mut impl McuHwModel,
+    stream: &mut BufferedStream,
+    log: &mut String,
+    target_addr: u8,
+    message: &Message,
+    gap: Duration,
+) {
     let packets = message_packets(
         message.dest,
         message.src,
@@ -194,7 +208,7 @@ pub fn send_message(
             "I3C socket closed before the write"
         );
         if i != last {
-            step_for(hw, log, WRITE_GAP);
+            step_for(hw, log, gap);
         }
     }
 }
