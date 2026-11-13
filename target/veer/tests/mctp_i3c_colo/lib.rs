@@ -40,7 +40,9 @@ use i3c_server::{dispatch, Server as I3cServer};
 use i3c_server_runtime::TargetService;
 use mctp_server_runtime::Channel;
 use openprot_mctp_server::Server as MctpServer;
-use openprot_mctp_transport_i3c::{I3cSender, MctpI3cReceiver, MAX_BUSY_RETRIES};
+use openprot_mctp_transport_i3c::{
+    transfer_pec, I3cSender, MctpI3cReceiver, MAX_BUSY_RETRIES,
+};
 use pw_status::Result;
 use userspace::syscall::Signals;
 use userspace::time::{self, Clock, Duration, Instant, SystemClock};
@@ -146,6 +148,8 @@ pub fn run(handles: Handles) -> Result<()> {
 
     let mut server = MctpServer::<_, 16>::new(mctp::Eid(OWN_EID), 0, sender);
     let mut rx_buf = [0u8; i3c_api::MAX_PAYLOAD];
+    // Failed frames dumped so far (see the decode failure below).
+    let mut dumps = 0u8;
     let mut channels = [Channel::new(handles.mctp)];
 
     // The MCTP side of the loop is the shared runtime. Its transport wake source
@@ -192,6 +196,34 @@ pub fn run(handles: Handles) -> Result<()> {
                             at(n.saturating_sub(1)),
                             shared.srv.borrow().target.last_rx_descriptor()
                         );
+                        // The PEC the frame carries against the one its bytes
+                        // give, and the frame itself, to tell a wrong PEC byte
+                        // from damaged payload. The first few failures only: the
+                        // UART is slow.
+                        if dumps < 3 {
+                            dumps += 1;
+                            let addr = rx_client.dynamic_address().ok().flatten().unwrap_or(0);
+                            let (body, got) = match frame.split_last() {
+                                Some((got, body)) => (body, u32::from(*got)),
+                                None => (&[][..], 0),
+                            };
+                            pw_log::error!(
+                                "i3c frame pec: addr=0x{:02x} got=0x{:02x} want=0x{:02x}",
+                                u32::from(addr),
+                                got,
+                                u32::from(transfer_pec(addr << 1, body))
+                            );
+                            for (i, row) in frame.chunks(16).enumerate() {
+                                let b = |k: usize| row.get(k).copied().unwrap_or(0) as u32;
+                                pw_log::error!(
+                                    "i3c frame [{:03x}] {:02x}{:02x}{:02x}{:02x} {:02x}{:02x}{:02x}{:02x} {:02x}{:02x}{:02x}{:02x} {:02x}{:02x}{:02x}{:02x} ({} bytes)",
+                                    (i * 16) as u32,
+                                    b(0), b(1), b(2), b(3), b(4), b(5), b(6), b(7),
+                                    b(8), b(9), b(10), b(11), b(12), b(13), b(14), b(15),
+                                    row.len() as u32
+                                );
+                            }
+                        }
                     }
                 }
             }
