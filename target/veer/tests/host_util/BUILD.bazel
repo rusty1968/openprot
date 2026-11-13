@@ -1,0 +1,20 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//target/veer/tests:__subpackages__"])
+
+# Helpers for the host side of the VeeR tests that drive firmware through
+# caliptra_mcu_hw_model: log waits, stepping, and MCTP over I3C packets.
+rust_library(
+    name = "host_util",
+    testonly = True,
+    srcs = ["lib.rs"],
+    crate_name = "veer_host_util",
+    edition = "2024",
+    deps = [
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_hw_model",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common",
+    ],
+)

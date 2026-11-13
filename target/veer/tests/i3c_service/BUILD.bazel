@@ -116,5 +116,8 @@ caliptra_test(
     name = "i3c_service_test",
     srcs = ["host_test.rs"],
     mcu_image = ":i3c_service_image",
-    deps = ["//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common"],
+    deps = [
+        "//target/veer/tests/host_util",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common",
+    ],
 )

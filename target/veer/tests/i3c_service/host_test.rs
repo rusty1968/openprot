@@ -37,8 +37,8 @@
 use caliptra_mcu_hw_model::McuHwModel;
 use caliptra_mcu_testing_common::i3c_socket::BufferedStream;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::Instant;
 use test_boot_files::BootFiles;
+use veer_host_util::{on_fpga, wait_for_any, wait_for_log};
 
 /// The payload the host writes to the target (see `EXPECTED` in `client.rs`).
 const PAYLOAD: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
@@ -67,34 +67,6 @@ const THIRD_ACCEPTED: &str = "third send accepted";
 
 /// Logged by the server runtime when it discards a response that stayed unread.
 const DISCARDED: &str = "staged response not read in time; discarded";
-
-const TIMEOUT_SECS: u64 = 120;
-
-/// Step the model until any of `terms` appears in the MCU log, accumulated in
-/// `log`, and return the index of the first term found. Looks at everything
-/// logged so far, so a term that arrived in the same burst as an earlier one is
-/// still found. Panics on a fatal error or timeout.
-fn wait_for_any(hw: &mut impl McuHwModel, log: &mut String, terms: &[&str]) -> usize {
-    let found = |log: &str| terms.iter().position(|t| log.contains(t));
-    let start = Instant::now();
-    hw.step_until(|m| {
-        let out = m.output().take(usize::MAX);
-        if !out.is_empty() {
-            print!("{out}");
-            log.push_str(&out);
-        }
-        found(log).is_some()
-            || m.mci_fw_fatal_error().is_some()
-            || start.elapsed().as_secs() > TIMEOUT_SECS
-    });
-    assert_eq!(hw.mci_fw_fatal_error(), None, "firmware hit a fatal error");
-    found(log).unwrap_or_else(|| panic!("timed out waiting for any of {terms:?} in the MCU log"))
-}
-
-/// Like [`wait_for_any`] for a single term.
-fn wait_for_log(hw: &mut impl McuHwModel, log: &mut String, term: &str) {
-    wait_for_any(hw, log, &[term]);
-}
 
 #[test]
 fn i3c_service_host_test() {
@@ -136,7 +108,7 @@ fn i3c_service_host_test() {
     // The client now sends a second reply. While the first is unread the server
     // refuses it as busy, and the client retries. Busy is checked first: a busy
     // send is always logged before it is accepted.
-    let on_fpga = std::env::var("CALIPTRA_INTERFACE").as_deref() == Ok("fpga");
+    let on_fpga = on_fpga();
     let busy = wait_for_any(&mut hw, &mut log, &[BUSY, ACCEPTED]) == 0;
     assert!(
         busy || !on_fpga,

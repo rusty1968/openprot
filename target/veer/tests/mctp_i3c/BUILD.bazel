@@ -12,6 +12,16 @@ load("//target/veer/tooling:caliptra_runner.bzl", "caliptra_test")
 
 package(default_visibility = ["//visibility:public"])
 
+# The i3c and MCTP server processes are the same in every image that runs MCTP
+# over I3C; the PLDM images build them from these sources.
+exports_files(
+    [
+        "i3c_server.rs",
+        "mctp_server.rs",
+    ],
+    visibility = ["//target/veer/tests:__subpackages__"],
+)
+
 veer_system_config(
     name = "system_config",
     src = "system.json5.tmpl",
@@ -134,5 +144,8 @@ caliptra_test(
     name = "mctp_i3c_test",
     srcs = ["host_test.rs"],
     mcu_image = ":mctp_i3c_image",
-    deps = ["//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common"],
+    deps = [
+        "//target/veer/tests/host_util",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common",
+    ],
 )
