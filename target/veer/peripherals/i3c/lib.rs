@@ -252,6 +252,12 @@ impl<M: Mmio> CaliptraI3cTarget<M> {
     // TTI receive (controller → target private write)
     // -------------------------------------------------------------------------
 
+    /// Whether the RX descriptor queue holds a descriptor (low byte of
+    /// `tti_desc_queue_depth`), whatever `RxDescStat` says.
+    fn rx_queued(&self) -> bool {
+        self.mmio.read(Reg::TtiDescQueueDepth) & 0xff != 0
+    }
+
     /// Drain one incoming write into `buf`.  Returns the number of bytes read,
     /// or `None` if no descriptor was present.
     fn rx_read(&mut self, buf: &mut [u8]) -> Option<usize> {
@@ -263,8 +269,7 @@ impl<M: Mmio> CaliptraI3cTarget<M> {
         // as a trigger so a model that does not implement the depth register
         // keeps working.
         let status_set = self.interrupt_status().is_set(InterruptStatus::RxDescStat);
-        let queued = self.mmio.read(Reg::TtiDescQueueDepth) & 0xff != 0;
-        if !status_set && !queued {
+        if !status_set && !self.rx_queued() {
             return None;
         }
 
@@ -404,7 +409,11 @@ impl<M: Mmio> I3cTarget for CaliptraI3cTarget<M> {
         if response_read {
             return Ok(TargetEvent::ResponseRead);
         }
-        if status.is_set(InterruptStatus::RxDescStat) {
+        // `RxDescStat` can read clear while a descriptor is still queued (see
+        // `rx_read`), and no further interrupt arrives for that frame: it would
+        // sit in the 256 byte FIFO until the next write overran it. So the queue
+        // depth counts too, and every wake-up, a timer one included, finds it.
+        if status.is_set(InterruptStatus::RxDescStat) || self.rx_queued() {
             // An inbound write is queued; the runtime drains it with
             // `read_frame`.
             return Ok(TargetEvent::InboundReady);
@@ -772,6 +781,15 @@ mod tests {
         assert_eq!(d.last_rx_descriptor(), 0);
         assert_eq!(d.rx_read(&mut [0u8; 8]), Some(3));
         assert_eq!(d.last_rx_descriptor(), 0xf000_0003);
+    }
+
+    #[test]
+    fn a_queued_descriptor_is_reported_although_rx_desc_stat_dropped() {
+        let mut d = driver();
+        assert_eq!(d.on_interrupt().unwrap(), TargetEvent::None);
+        // Depth 1, status clear: the frame must still be found.
+        d.mmio.set(Reg::TtiDescQueueDepth, 1);
+        assert_eq!(d.on_interrupt().unwrap(), TargetEvent::InboundReady);
     }
 
     #[test]
