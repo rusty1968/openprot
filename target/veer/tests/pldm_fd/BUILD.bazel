@@ -1,0 +1,28 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//target/veer:defs.bzl", "TARGET_COMPATIBLE_WITH")
+
+package(default_visibility = ["//target/veer/tests:__subpackages__"])
+
+# The PLDM firmware device the VeeR PLDM test images run: `FirmwareDevice`
+# over a pair of MCTP clients, with the update-agent-facing identity of the
+# native caliptra-mcu-sw FD. Shared by pldm_i3c and the throughput images.
+rust_library(
+    name = "pldm_fd",
+    srcs = ["lib.rs"],
+    crate_name = "veer_pldm_fd",
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        "//services/mctp/api:mctp_api",
+        "//services/pldm:pldm_service",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+        "@pigweed//pw_status/rust:pw_status",
+        "@rust_crates//:pldm-common",
+        "@rust_crates//:pldm-interface",
+    ],
+)

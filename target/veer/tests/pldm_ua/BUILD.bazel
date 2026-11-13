@@ -1,0 +1,22 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//target/veer/tests:__subpackages__"])
+
+# A PLDM Update Agent for the host side of the VeeR PLDM tests: one firmware
+# update over MCTP over I3C through caliptra_mcu_hw_model, timed on the host.
+rust_library(
+    name = "pldm_ua",
+    testonly = True,
+    srcs = ["lib.rs"],
+    crate_name = "veer_pldm_ua",
+    edition = "2024",
+    deps = [
+        "//target/veer/tests/host_util",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_hw_model",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common",
+        "@rust_crates//:pldm-common",
+    ],
+)
