@@ -20,8 +20,10 @@
 //! caliptra-mcu-sw's own benchmark uses); `PLDM_BENCH_IMAGE_SIZE` overrides it.
 //! The packets of one message the UA writes are paced 5 ms apart on the emulator
 //! and 25 ms on the FPGA, where the controller's receive FIFO holds 256 bytes
-//! and the model adds its own delay to every write. The pause is part of the
-//! measured time, so compare runs on the same interface only.
+//! and the model adds its own delay to every write; `PLDM_BENCH_WRITE_GAP_MS`
+//! overrides it (a target that does not keep up shows as `i3c frame decode failed`
+//! on its log). The pause is part of the measured time, so compare runs on the
+//! same interface and the same pause only.
 
 use caliptra_mcu_hw_model::McuHwModel;
 use caliptra_mcu_testing_common::i3c_socket::BufferedStream;
@@ -49,6 +51,9 @@ fn image_size() -> u32 {
 }
 
 fn write_gap() -> Duration {
+    if let Ok(v) = std::env::var("PLDM_BENCH_WRITE_GAP_MS") {
+        return Duration::from_millis(v.parse().expect("PLDM_BENCH_WRITE_GAP_MS is milliseconds"));
+    }
     if on_fpga() {
         Duration::from_millis(25)
     } else {
