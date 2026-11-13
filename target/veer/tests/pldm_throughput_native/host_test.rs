@@ -24,7 +24,7 @@
 //! completed. Run it with `--test_arg=--nocapture`. The component is 4 KiB on the
 //! emulator and 64 KiB on the VCK190; `PLDM_BENCH_IMAGE_SIZE` overrides it.
 
-use caliptra_mcu_hw_model::McuHwModel;
+use caliptra_mcu_hw_model::{McuHwModel, McuManager};
 use caliptra_mcu_pldm_common::protocol::firmware_update::ComponentClassification;
 use caliptra_mcu_pldm_fw_pkg::{
     manifest::{
@@ -61,6 +61,10 @@ const DEVICE_UUID: [u8; 16] = [
 /// would answer a packet that appears to come from itself.
 const FD_EID: u8 = 8;
 const UA_EID: u8 = 0x0a;
+
+/// The `FIRMWARE_PLDM_READY` boot milestone: bit 12 of the milestones, which are
+/// the upper half of the MCI `fw_flow_status` register.
+const PLDM_READY: u32 = (1 << 12) << 16;
 
 /// How long the whole update may take on the host's wall clock.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(900);
@@ -142,6 +146,17 @@ fn pldm_throughput_native_host_test() {
 
     // The FD must be listening before the first command arrives.
     wait_for_log(&mut hw, &mut log, READY);
+
+    // The agent's first send waits for the firmware to raise `FIRMWARE_PLDM_READY`
+    // and gives up only after 50M ticks, which the FPGA model slows to one per 100
+    // cycles: about 280 s at the board's clock. This firmware does not raise the
+    // milestone (it has no MCI mapping), so raise it here: the FD has just logged
+    // that it is listening, which is what the milestone announces. (The bench
+    // branch did the same with a harness patch, `CPTRA_FORCE_PLDM_READY`.)
+    hw.mcu_manager().with_mci(|mci| {
+        let status = mci.fw_flow_status().read();
+        mci.fw_flow_status().write(|_| status | PLDM_READY);
+    });
 
     let size = image_size();
     let socket = MctpTransport::new(port, target_addr.into())

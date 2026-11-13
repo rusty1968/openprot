@@ -101,9 +101,9 @@ rust_process(
     srcs = ["//target/veer/tests/pldm_throughput:pldm_fd.rs"],
     codegen_crate_name = "pldm_fd_codegen",
     edition = "2024",
-    # Outlasts the native update agent's wait for a readiness milestone the
-    # firmware never raises (see pldm_fd.rs).
-    rustc_env = {"PLDM_FD_IDLE_MS": "75000"},
+    # Room for the native update agent's discovery before its first update
+    # command, which the 2 s default of the other images does not give it.
+    rustc_env = {"PLDM_FD_IDLE_MS": "10000"},
     tags = ["kernel"],
     deps = [
         "//services/mctp/client-ipc:mctp_client_ipc",
