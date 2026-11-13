@@ -57,21 +57,141 @@ pub use util_service::Channel;
 /// [`STAGED_RESPONSE_TIMEOUT_MS`].
 const STAGED_TIMEOUT: Duration = Duration::from_millis(STAGED_RESPONSE_TIMEOUT_MS as u64);
 
-/// Discard the staged response if its time is up. `deadline` is when the staged
-/// response runs out of time to be read, and is cleared when it does.
-fn discard_if_expired<T: I3cTarget, const RING: usize>(
-    srv: &mut Server<T, RING>,
-    deadline: &mut Option<Instant>,
-) {
-    let Some(due) = *deadline else { return };
-    if SystemClock::now() < due {
-        return;
+/// The part of serving an I3C target that does not depend on how its clients
+/// reach it: servicing its interrupt, and the clock on its staged response.
+///
+/// [`run`] drives one of these from its loop. A process that runs the target in
+/// the same thread as its client (so no loop of this crate's own) drives one
+/// itself: call [`on_interrupt`](Self::on_interrupt) when the interrupt is
+/// signalled, [`after_request`](Self::after_request) around each dispatched
+/// request, and [`discard_if_expired`](Self::discard_if_expired) whenever it
+/// might have waited too long.
+pub struct TargetService {
+    irq_signals: Signals,
+    /// When the staged response, if any, runs out of time to be read.
+    staged_deadline: Option<Instant>,
+}
+
+impl TargetService {
+    /// A service for a target whose interrupt object signals `irq_signals`.
+    pub const fn new(irq_signals: Signals) -> Self {
+        Self {
+            irq_signals,
+            staged_deadline: None,
+        }
     }
-    *deadline = None;
-    match srv.cancel_staged() {
-        Ok(true) => pw_log::error!("i3c staged response not read in time; discarded"),
-        Ok(false) => {}
-        Err(_) => pw_log::error!("i3c cancel_response failed"),
+
+    /// Bring the target onto the bus and arm the events this service depends on.
+    ///
+    /// The only thing that releases the next `Send` is `ResponseRead`, so the
+    /// target must report it. Call this before serving anything.
+    pub fn enable<T: I3cTarget, const RING: usize>(&self, srv: &mut Server<T, RING>) {
+        if srv.target.enable().is_err() {
+            pw_log::error!("i3c target enable failed");
+        }
+        if srv.target.enable_response_read_events().is_err() {
+            pw_log::error!("i3c response-read events enable failed");
+        }
+    }
+
+    /// When to wake to discard the staged response, or [`Instant::MAX`] if none
+    /// is staged. A wait's deadline is a hint only: it is honored when nothing
+    /// else is ready, so call [`discard_if_expired`](Self::discard_if_expired)
+    /// as well.
+    pub fn deadline(&self) -> Instant {
+        self.staged_deadline.unwrap_or(Instant::MAX)
+    }
+
+    /// Service the target's interrupt: decode it, queue any inbound frames, and
+    /// let the next `Send` through if the controller read the staged response.
+    ///
+    /// This does not acknowledge the interrupt (see
+    /// [`acknowledge`](Self::acknowledge)): the caller does, once it has dealt
+    /// with queued frames ([`Server::has_frame`]). The interrupt is level
+    /// triggered, so until it is acknowledged it stays signalled, and a loop
+    /// waiting on it is woken again. A caller that cannot deal with the frames
+    /// where it is (it is in the middle of something else) can leave the
+    /// interrupt unacknowledged so that its main loop sees it.
+    pub fn on_interrupt<T: I3cTarget, const RING: usize>(&mut self, srv: &mut Server<T, RING>) {
+        match srv.target.on_interrupt() {
+            Ok(TargetEvent::InboundReady) => {
+                // Drain every frame the interrupt covers into the ring; a single
+                // RX-descriptor interrupt can stand for more than one hardware
+                // frame. Stop on Empty.
+                let mut dropped = false;
+                loop {
+                    match srv.latch_inbound() {
+                        Ok(Inbound::Latched) => continue,
+                        Ok(Inbound::DroppedFull) => {
+                            dropped = true;
+                            continue;
+                        }
+                        Ok(Inbound::Empty) => break,
+                        Err(_) => {
+                            pw_log::error!("i3c read_frame failed");
+                            break;
+                        }
+                    }
+                }
+                if dropped {
+                    pw_log::error!("i3c inbound ring full; frame(s) dropped");
+                }
+            }
+            Ok(TargetEvent::ResponseRead) => {
+                // The controller read the staged response: the next `Send` can be
+                // staged.
+                srv.notify_response_read();
+                self.staged_deadline = None;
+            }
+            Ok(_) => {}
+            Err(_) => pw_log::error!("i3c on_interrupt failed"),
+        }
+    }
+
+    /// Acknowledge the target's interrupt after [`on_interrupt`](Self::on_interrupt):
+    /// it is level triggered, so until it is acknowledged it is signalled again
+    /// at once.
+    pub fn acknowledge<T, const RING: usize>(&self, srv: &Server<T, RING>) {
+        if syscall::interrupt_ack(srv.irq, self.irq_signals).is_err() {
+            pw_log::error!("interrupt_ack failed");
+        }
+    }
+
+    /// Call after dispatching a request, with whether a response was staged
+    /// *before* it ([`Server::tx_pending`]): if the request staged one, its clock
+    /// starts.
+    pub fn after_request<T, const RING: usize>(
+        &mut self,
+        srv: &Server<T, RING>,
+        was_pending: bool,
+    ) {
+        if !was_pending && srv.tx_pending() {
+            self.staged_deadline = Some(
+                SystemClock::now()
+                    .checked_add_duration(STAGED_TIMEOUT)
+                    .unwrap_or(Instant::MAX),
+            );
+        }
+    }
+
+    /// Discard the staged response if its time is up, so the next `Send` is not
+    /// refused for good.
+    pub fn discard_if_expired<T: I3cTarget, const RING: usize>(
+        &mut self,
+        srv: &mut Server<T, RING>,
+    ) {
+        let Some(due) = self.staged_deadline else {
+            return;
+        };
+        if SystemClock::now() < due {
+            return;
+        }
+        self.staged_deadline = None;
+        match srv.cancel_staged() {
+            Ok(true) => pw_log::error!("i3c staged response not read in time; discarded"),
+            Ok(false) => {}
+            Err(_) => pw_log::error!("i3c cancel_response failed"),
+        }
     }
 }
 
@@ -89,14 +209,8 @@ pub fn run<T: I3cTarget, const RING: usize>(
     irq_signals: Signals,
     srv: &mut Server<T, RING>,
 ) -> Result<()> {
-    if srv.target.enable().is_err() {
-        pw_log::error!("i3c target enable failed");
-    }
-    // The only thing that releases the next `Send` is `ResponseRead`, so the
-    // target must report it.
-    if srv.target.enable_response_read_events().is_err() {
-        pw_log::error!("i3c response-read events enable failed");
-    }
+    let mut target = TargetService::new(irq_signals);
+    target.enable(srv);
 
     let mut channels = [Channel::new(srv.channel)];
     let mut service = ServiceLoop::new(wg, &mut channels)?;
@@ -105,62 +219,24 @@ pub fn run<T: I3cTarget, const RING: usize>(
     let mut request_buf = [0u8; MAX_FRAME];
     let mut response_buf = [0u8; MAX_FRAME];
 
-    // When the staged response, if any, runs out of time to be read.
-    let mut staged_deadline: Option<Instant> = None;
-
     loop {
         // Check the clock here and not only through `next`'s deadline: `next`
         // returns `Deadline` only when nothing else is ready, and a client
         // retrying `Busy` faster than the scheduler tick always has a request
         // ready, so the deadline would never be seen and the staged response
         // never discarded.
-        discard_if_expired(srv, &mut staged_deadline);
+        target.discard_if_expired(srv);
 
-        match service.next(staged_deadline.unwrap_or(Instant::MAX), &mut request_buf)? {
-            // The staged response was not read in time: give up on it so the
-            // next `Send` is not refused for good.
-            Event::Deadline => discard_if_expired(srv, &mut staged_deadline),
+        match service.next(target.deadline(), &mut request_buf)? {
+            // A staged response may have gone unread for too long.
+            Event::Deadline => target.discard_if_expired(srv),
 
             // ---- I3C hardware IRQ: decode, latch an inbound frame, wake client ----
             Event::Source(_) => {
-                match srv.target.on_interrupt() {
-                    Ok(TargetEvent::InboundReady) => {
-                        // Drain every frame the IRQ covers into the ring; a single
-                        // RX-descriptor interrupt can stand for more than one
-                        // hardware frame. Stop on Empty.
-                        let mut dropped = false;
-                        loop {
-                            match srv.latch_inbound() {
-                                Ok(Inbound::Latched) => continue,
-                                Ok(Inbound::DroppedFull) => {
-                                    dropped = true;
-                                    continue;
-                                }
-                                Ok(Inbound::Empty) => break,
-                                Err(_) => {
-                                    pw_log::error!("i3c read_frame failed");
-                                    break;
-                                }
-                            }
-                        }
-                        if dropped {
-                            pw_log::error!("i3c inbound ring full; frame(s) dropped");
-                        }
-                    }
-                    Ok(TargetEvent::ResponseRead) => {
-                        // The controller read the staged response: the next
-                        // `Send` can be staged.
-                        srv.notify_response_read();
-                        staged_deadline = None;
-                    }
-                    Ok(_) => {}
-                    Err(_) => pw_log::error!("i3c on_interrupt failed"),
-                }
-                // The loop does not acknowledge a source, and the IRQ is level
-                // triggered, so ack it or `next` returns it again at once.
-                if syscall::interrupt_ack(srv.irq, irq_signals).is_err() {
-                    pw_log::error!("interrupt_ack failed");
-                }
+                target.on_interrupt(srv);
+                // The loop does not acknowledge a source, and the interrupt is
+                // level triggered: ack it or `next` returns it again at once.
+                target.acknowledge(srv);
                 if srv.has_frame() {
                     // ORs USER onto the client channel without disturbing READABLE.
                     if syscall::object_set_peer_user_signal(srv.channel, true).is_err() {
@@ -175,14 +251,7 @@ pub fn run<T: I3cTarget, const RING: usize>(
                 let is_recv = decode_request(request).map(|(op, _)| op) == Some(I3cOp::Recv);
                 let was_pending = srv.tx_pending();
                 let resp_len = dispatch(srv, request, &mut response_buf);
-                if !was_pending && srv.tx_pending() {
-                    // This request staged a response: start its clock.
-                    staged_deadline = Some(
-                        SystemClock::now()
-                            .checked_add_duration(STAGED_TIMEOUT)
-                            .unwrap_or(Instant::MAX),
-                    );
-                }
+                target.after_request(srv, was_pending);
                 // A Recv pops one frame from the ring. Keep USER asserted while
                 // frames remain so the client drains the rest; clear it only when
                 // the ring is empty (the IRQ path re-raises it when the next frame
