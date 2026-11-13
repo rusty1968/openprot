@@ -146,8 +146,25 @@ pub struct Message {
 /// Flags: SOM on the first packet, EOM on the last, a 2-bit packet sequence
 /// number counting from 0, the tag-owner bit, and the tag.
 pub fn message_packets(dest: u8, src: u8, tag_owner: bool, tag: u8, body: &[u8]) -> Vec<Vec<u8>> {
+    message_packets_sized(dest, src, tag_owner, tag, body, MAX_PACKET)
+}
+
+/// Like [`message_packets`] with packets of at most `max_packet` bytes, header
+/// included, instead of [`MAX_PACKET`].
+pub fn message_packets_sized(
+    dest: u8,
+    src: u8,
+    tag_owner: bool,
+    tag: u8,
+    body: &[u8],
+    max_packet: usize,
+) -> Vec<Vec<u8>> {
     assert!(!body.is_empty(), "an MCTP message has at least a type byte");
-    let chunks: Vec<&[u8]> = body.chunks(MAX_PACKET - MCTP_HEADER_LEN).collect();
+    assert!(
+        max_packet > MCTP_HEADER_LEN && max_packet <= MAX_PACKET,
+        "packet size {max_packet} outside {MCTP_HEADER_LEN}..={MAX_PACKET}"
+    );
+    let chunks: Vec<&[u8]> = body.chunks(max_packet - MCTP_HEADER_LEN).collect();
     let last = chunks.len() - 1;
     chunks
         .iter()
@@ -194,12 +211,29 @@ pub fn send_message_paced(
     message: &Message,
     gap: Duration,
 ) {
-    let packets = message_packets(
+    send_message_sized(hw, stream, log, target_addr, message, gap, MAX_PACKET);
+}
+
+/// Like [`send_message_paced`] with packets of at most `max_packet` bytes.
+///
+/// A smaller packet means more of them per message and a lighter load on the
+/// target's 256 byte receive FIFO, which a full 251 byte packet nearly fills.
+pub fn send_message_sized(
+    hw: &mut impl McuHwModel,
+    stream: &mut BufferedStream,
+    log: &mut String,
+    target_addr: u8,
+    message: &Message,
+    gap: Duration,
+    max_packet: usize,
+) {
+    let packets = message_packets_sized(
         message.dest,
         message.src,
         message.tag_owner,
         message.tag,
         &message.body,
+        max_packet,
     );
     let last = packets.len() - 1;
     for (i, packet) in packets.into_iter().enumerate() {

@@ -22,15 +22,16 @@
 //! and 25 ms on the FPGA, where the controller's receive FIFO holds 256 bytes
 //! and the model adds its own delay to every write; `PLDM_BENCH_WRITE_GAP_MS`
 //! overrides it (a target that does not keep up shows as `i3c frame decode failed`
-//! on its log). The pause is part of the measured time, so compare runs on the
-//! same interface and the same pause only.
+//! on its log). `PLDM_BENCH_MAX_PACKET` sets the largest packet the update agent
+//! writes (default 251; the native agent uses 68). The pause and the packet size
+//! are part of the measured time, so compare runs with the same ones only.
 
 use caliptra_mcu_hw_model::McuHwModel;
 use caliptra_mcu_testing_common::i3c_socket::BufferedStream;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 use test_boot_files::BootFiles;
-use veer_host_util::{on_fpga, wait_for_log};
+use veer_host_util::{on_fpga, wait_for_log, MAX_PACKET};
 use veer_pldm_ua::{run_update, UpdateConfig};
 
 /// Logged by the FD once it is running and waiting for the update agent.
@@ -47,6 +48,16 @@ fn image_size() -> u32 {
         64 * 1024
     } else {
         4096
+    }
+}
+
+/// Largest packet the UA writes. `PLDM_BENCH_MAX_PACKET` lowers it: the native
+/// update agent uses 68 byte packets, and a full 251 byte packet nearly fills the
+/// target's 256 byte receive FIFO.
+fn max_packet() -> usize {
+    match std::env::var("PLDM_BENCH_MAX_PACKET") {
+        Ok(v) => v.parse().expect("PLDM_BENCH_MAX_PACKET is a byte count"),
+        Err(_) => MAX_PACKET,
     }
 }
 
@@ -99,6 +110,7 @@ fn pldm_throughput_host_test() {
             image_size: size,
             max_transfer_size: FD_CHUNK,
             write_gap: write_gap(),
+            max_packet: max_packet(),
         },
     );
 

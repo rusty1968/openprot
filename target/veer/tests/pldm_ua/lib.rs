@@ -49,7 +49,7 @@ use pldm_common::protocol::firmware_update::{
     ComponentClassification, FwUpdateCmd, PldmFirmwareString, UpdateOptionFlags, VersionStringType,
     PLDM_FWUP_IMAGE_SET_VER_STR_MAX_LEN,
 };
-use veer_host_util::{read_message, send_message_paced, Message};
+use veer_host_util::{read_message, send_message_sized, Message};
 
 /// The firmware device's MCTP EID (`FD_EID` in the firmware).
 pub const FD_EID: u8 = 8;
@@ -74,6 +74,11 @@ pub struct UpdateConfig {
     /// `veer_host_util::send_message_paced`). The target needs time to drain its
     /// receive FIFO, and the pause is part of the timed download.
     pub write_gap: Duration,
+    /// Largest MCTP packet the UA writes, header included. A message longer
+    /// than one packet is cut into several. A full 251 byte packet nearly fills
+    /// the target's 256 byte receive FIFO; the native update agent uses 64 byte
+    /// payloads (68 byte packets).
+    pub max_packet: usize,
 }
 
 /// What happened.
@@ -139,6 +144,7 @@ fn command(
     target_addr: u8,
     command: Command,
     write_gap: Duration,
+    max_packet: usize,
 ) -> u8 {
     let Command { name, cmd, pldm } = command;
     let tag = 0;
@@ -150,7 +156,15 @@ fn command(
         body: pldm_body(pldm),
         packets: 0,
     };
-    send_message_paced(hw, stream, log, target_addr, &request, write_gap);
+    send_message_sized(
+        hw,
+        stream,
+        log,
+        target_addr,
+        &request,
+        write_gap,
+        max_packet,
+    );
 
     let reply = read_message(hw, stream, log, target_addr);
     assert_eq!(reply.dest, UA_EID, "{name} response destination");
@@ -206,6 +220,7 @@ pub fn run_update(
             pldm: &buf[..n],
         },
         config.write_gap,
+        config.max_packet,
     );
     assert_eq!(cc, SUCCESS, "RequestUpdate should succeed");
 
@@ -234,6 +249,7 @@ pub fn run_update(
             pldm: &buf[..n],
         },
         config.write_gap,
+        config.max_packet,
     );
     assert_eq!(cc, SUCCESS, "PassComponentTable should succeed");
 
@@ -263,6 +279,7 @@ pub fn run_update(
             pldm: &buf[..n],
         },
         config.write_gap,
+        config.max_packet,
     );
     assert_eq!(cc, SUCCESS, "UpdateComponent should succeed");
 
@@ -328,7 +345,15 @@ pub fn run_update(
             body: pldm_body(&resp[..resp_len]),
             packets: 0,
         };
-        send_message_paced(hw, stream, log, target_addr, &reply, config.write_gap);
+        send_message_sized(
+            hw,
+            stream,
+            log,
+            target_addr,
+            &reply,
+            config.write_gap,
+            config.max_packet,
+        );
     }
 
     // ---- ActivateFirmware: the last command; the FD then idles out and exits ----
@@ -351,6 +376,7 @@ pub fn run_update(
             pldm: &buf[..n],
         },
         config.write_gap,
+        config.max_packet,
     );
     assert_eq!(cc, SUCCESS, "ActivateFirmware should succeed");
 

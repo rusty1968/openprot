@@ -15,7 +15,7 @@ use caliptra_mcu_hw_model::McuHwModel;
 use caliptra_mcu_testing_common::i3c_socket::BufferedStream;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use test_boot_files::BootFiles;
-use veer_host_util::{wait_for_log, WRITE_GAP};
+use veer_host_util::{wait_for_log, MAX_PACKET, WRITE_GAP};
 use veer_pldm_ua::{run_update, UpdateConfig};
 
 /// Logged by the FD once it is running and waiting for the update agent.
@@ -67,6 +67,7 @@ fn pldm_i3c_firmware_update_host_test() {
             // this and its own cap.
             max_transfer_size: IMAGE_SIZE,
             write_gap: WRITE_GAP,
+            max_packet: MAX_PACKET,
         },
     );
     println!("pldm-i3c host: {report:?}");
