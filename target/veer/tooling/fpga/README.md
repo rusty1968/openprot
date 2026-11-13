@@ -63,6 +63,14 @@ test:fpga --test_env=VCK190_FPGA_HOST=<ssh-host-or-alias>
 
 Or pass `--test_env=VCK190_FPGA_HOST=<host>` on each command.
 
+The test runs on the board, not on your workstation, and `sudo` drops the
+environment, so `run_remote.sh` forwards only some variables:
+`CALIPTRA_BOOT_ENV`, `CALIPTRA_INTERFACE` (how a test knows it is on the FPGA),
+`CPTRA_UIO_NUM`, `RUST_BACKTRACE`, `RUST_LOG`, `RUST_TEST_THREADS`, and anything
+that starts with `PLDM_BENCH_` (the PLDM benchmark's options). A `--test_env` for
+any other name does not reach the test; add it to `FORWARDED_ENV` in
+`run_remote.sh`.
+
 ## Running tests
 
 ```sh

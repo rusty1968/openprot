@@ -19,8 +19,12 @@
 set -euo pipefail
 
 readonly REMOTE_RUNFILES=openprot-fpga/runfiles # Relative to the SSH user's home.
-# Test environment to forward to the board, if set.
-readonly FORWARDED_ENV=(CALIPTRA_BOOT_ENV CPTRA_UIO_NUM RUST_BACKTRACE RUST_LOG RUST_TEST_THREADS)
+# Test environment to forward to the board, if set. CALIPTRA_INTERFACE is how a
+# test tells it is on the FPGA (`caliptra_test` sets it); without it a test that
+# behaves differently there silently runs its emulator branch on the board.
+# Variables that start with PLDM_BENCH_ are the PLDM benchmark's options and are
+# forwarded too (see below).
+readonly FORWARDED_ENV=(CALIPTRA_BOOT_ENV CALIPTRA_INTERFACE CPTRA_UIO_NUM RUST_BACKTRACE RUST_LOG RUST_TEST_THREADS)
 # Share one SSH connection between rsync, ssh, and consecutive tests (kept open
 # for 60s after the last use) instead of paying ~2s of connection setup for
 # each. BatchMode makes ssh fail rather than prompt.
@@ -53,7 +57,7 @@ rsync -a --copy-links --exclude=/MANIFEST \
 
 # 2. Run on the board. `sudo` drops the environment, so forward it explicitly.
 env_vars=()
-for var in "${FORWARDED_ENV[@]}"; do
+for var in "${FORWARDED_ENV[@]}" $(compgen -v | grep '^PLDM_BENCH_' || true); do
   if [[ -n "${!var:-}" ]]; then
     env_vars+=("$var=${!var}")
   fi
