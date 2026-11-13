@@ -1,0 +1,149 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@pigweed//pw_kernel/tooling:multi_process_app.bzl", "multi_process_app")
+load("@pigweed//pw_kernel/tooling:rust_app.bzl", "rust_process")
+load("@pigweed//pw_kernel/tooling:target_codegen.bzl", "target_codegen")
+load("@pigweed//pw_kernel/tooling:target_linker_script.bzl", "target_linker_script")
+load("@pigweed//pw_kernel/tooling/panic_detector:rust_binary_no_panics_test.bzl", "rust_binary_no_panics_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//target/veer:defs.bzl", "TARGET_COMPATIBLE_WITH", "veer_system_config", "veer_system_image")
+load("//target/veer/tooling:caliptra_runner.bzl", "caliptra_test")
+
+package(default_visibility = ["//visibility:public"])
+
+veer_system_config(
+    name = "system_config",
+    src = "//target/veer/tests/pldm_i3c:system.json5.tmpl",
+)
+
+target_codegen(
+    name = "codegen",
+    arch = "@pigweed//pw_kernel/arch/riscv:arch_riscv",
+    system_config = ":system_config",
+)
+
+target_linker_script(
+    name = "linker_script",
+    system_config = ":system_config",
+    tags = ["kernel"],
+    template = "//target/veer:linker_script_template",
+)
+
+rust_binary(
+    name = "target",
+    srcs = ["//target/veer/tests/pldm_i3c:target.rs"],
+    edition = "2024",
+    tags = ["kernel"],
+    target_compatible_with = TARGET_COMPATIBLE_WITH,
+    deps = [
+        ":codegen",
+        ":linker_script",
+        "//target/veer:entry",
+        "@pigweed//pw_kernel/arch/riscv:arch_riscv",
+        "@pigweed//pw_kernel/kernel",
+        "@pigweed//pw_kernel/subsys/console:console_backend",
+        "@pigweed//pw_kernel/target:target_common",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+    ],
+)
+
+# The same three processes as pldm_throughput (and the same app name, which the
+# system config names), only the FD's idle timeout differs.
+multi_process_app(
+    name = "pldm_i3c",
+    processes = [
+        ":i3c_server",
+        ":mctp_server",
+        ":pldm_fd",
+    ],
+    tags = ["kernel"],
+)
+
+rust_process(
+    name = "i3c_server",
+    srcs = ["//target/veer/tests/mctp_i3c:i3c_server.rs"],
+    codegen_crate_name = "i3c_server_codegen",
+    edition = "2024",
+    tags = ["kernel"],
+    deps = [
+        "//services/i3c/server:i3c_server",
+        "//services/i3c/server-runtime:i3c_server_runtime",
+        "//target/veer/peripherals/i3c",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+    ],
+)
+
+rust_process(
+    name = "mctp_server",
+    srcs = ["//target/veer/tests/mctp_i3c:mctp_server.rs"],
+    codegen_crate_name = "mctp_server_codegen",
+    edition = "2024",
+    tags = ["kernel"],
+    deps = [
+        "//services/i3c/api:i3c_api",
+        "//services/i3c/client:i3c_client",
+        "//services/i3c/client-ipc:i3c_client_ipc",
+        "//services/mctp/server:mctp_server_lib",
+        "//services/mctp/server-runtime:mctp_server_runtime",
+        "//services/mctp/transport-i3c:mctp_transport_i3c",
+        "@pigweed//pw_kernel/userspace",
+        "@pigweed//pw_log/rust:pw_log",
+        "@pigweed//pw_status/rust:pw_status",
+        "@rust_crates//:mctp",
+    ],
+)
+
+rust_process(
+    name = "pldm_fd",
+    srcs = ["//target/veer/tests/pldm_throughput:pldm_fd.rs"],
+    codegen_crate_name = "pldm_fd_codegen",
+    edition = "2024",
+    # Outlasts the native update agent's wait for a readiness milestone the
+    # firmware never raises (see pldm_fd.rs).
+    rustc_env = {"PLDM_FD_IDLE_MS": "75000"},
+    tags = ["kernel"],
+    deps = [
+        "//services/mctp/client-ipc:mctp_client_ipc",
+        "//target/veer/tests/pldm_fd",
+        "@pigweed//pw_kernel/userspace",
+    ],
+)
+
+veer_system_image(
+    name = "pldm_throughput_native_image",
+    apps = [":pldm_i3c"],
+    kernel = ":target",
+    platform = "//target/veer",
+    system_config = ":system_config",
+    tags = ["kernel"],
+)
+
+rust_binary_no_panics_test(
+    name = "no_panics_test",
+    binary = ":pldm_throughput_native_image",
+    tags = ["kernel"],
+)
+
+# The host side is caliptra-mcu-sw's own update agent (`caliptra-mcu-pldm-ua`),
+# the one the earlier VCK190 numbers came from, over caliptra_mcu_hw_model. A
+# benchmark, so `manual`. Generates pldm_throughput_native_test_emulator and
+# pldm_throughput_native_test_fpga.
+caliptra_test(
+    name = "pldm_throughput_native_test",
+    srcs = ["host_test.rs"],
+    mcu_image = ":pldm_throughput_native_image",
+    tags = ["manual"],
+    timeout = "eternal",
+    deps = [
+        "//target/veer/tests/host_util",
+        "//third_party/caliptra/caliptra-mcu-sw:mcu_testing_common",
+        "@rust_caliptra_crates_host//:caliptra-mcu-pldm-common",
+        "@rust_caliptra_crates_host//:caliptra-mcu-pldm-fw-pkg",
+        "@rust_caliptra_crates_host//:caliptra-mcu-pldm-ua",
+        "@rust_caliptra_crates_host//:chrono",
+        "@rust_caliptra_crates_host//:uuid",
+    ],
+)

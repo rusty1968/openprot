@@ -26,6 +26,9 @@ def _caliptra_repos_impl(module_ctx):
         patches = [
             # Lets mcu-hw-model build without introducing OpenSSL
             "//third_party/caliptra/caliptra-mcu-sw:hw_model_no_builder.patch",
+            # Lets the host MctpUtil reassemble messages whose first packet's
+            # sequence number is not 0, which DSP0236 allows and mctp-estack does
+            "//third_party/caliptra/caliptra-mcu-sw:mctp_util_any_seq.patch",
         ],
         patch_args = ["-p0"],
     )

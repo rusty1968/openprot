@@ -26,8 +26,28 @@ const XFER_CAP: usize = 960;
 /// Assumed until `UpdateComponent` gives the real size; the host sets it.
 const IMAGE_SIZE: usize = 4096;
 
-/// How long the FD waits for a command after the update before it exits.
-const IDLE_TIMEOUT_MILLIS: u32 = 2_000;
+/// How long the FD waits for a command before it gives up, and so how long a run
+/// takes to finish after the update (the host UA stops talking). Built-in 2 s;
+/// the build can set `PLDM_FD_IDLE_MS`: the native update agent's first send
+/// waits up to 50M emulator ticks (tens of seconds on the emulator) for a
+/// `FIRMWARE_PLDM_READY` boot milestone this firmware never raises, so its image
+/// needs a timeout that outlasts that.
+const IDLE_TIMEOUT_MILLIS: u32 = match option_env!("PLDM_FD_IDLE_MS") {
+    Some(ms) => parse_millis(ms),
+    None => 2_000,
+};
+
+const fn parse_millis(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut value = 0u32;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(bytes[i].is_ascii_digit(), "PLDM_FD_IDLE_MS is a number");
+        value = value * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    value
+}
 
 #[process_entry("pldm_fd")]
 fn entry() {
