@@ -12,6 +12,16 @@ load("//target/veer/tooling:caliptra_runner.bzl", "caliptra_test")
 
 package(default_visibility = ["//visibility:public"])
 
+# The colocated variant runs the same FD and the same host test, so the two
+# measurements differ only in the process layout.
+exports_files(
+    [
+        "pldm_fd.rs",
+        "host_test.rs",
+    ],
+    visibility = ["//target/veer/tests:__subpackages__"],
+)
+
 veer_system_config(
     name = "system_config",
     src = "//target/veer/tests/pldm_i3c:system.json5.tmpl",
