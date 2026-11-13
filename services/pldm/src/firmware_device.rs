@@ -73,6 +73,16 @@ const RESPONDER_POLL_TIMEOUT_MILLIS: u32 = 1;
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FdEvent {
+    /// The responder's listener is registered: from now on an Update Agent
+    /// command is accepted and held for the FD, not dropped. Emitted once, at the
+    /// start of [`FirmwareDevice::run_until`] (and so of `run_terminus`), before
+    /// the first command is waited for.
+    ///
+    /// An FD that reports itself ready to an Update Agent should do so on this
+    /// event, not earlier: until the listener exists a command that arrives has
+    /// nowhere to go and is dropped, and a fast transport can deliver one in that
+    /// window.
+    Listening,
     /// The Update Agent's `RequestUpdate` was accepted: the FD moved out of
     /// `Idle` (into `LearnComponents`) and the success response has already
     /// been sent. Emitted exactly once per accepted `RequestUpdate`;
@@ -350,6 +360,7 @@ impl<'a, O: FdOps, Cr: MctpClient, Cq: MctpClient> FirmwareDevice<'a, O, Cr, Cq>
             Ok(listener) => listener,
             Err(e) => return RunTerminusResult::StoppedByError(e),
         };
+        sink.notify(FdEvent::Listening);
         // Scratch buffer for FD-initiated (outbound) requests, reused across
         // steps rather than re-zeroed on every one.
         let mut fw_buf = [0u8; FD_MAX_MSG];

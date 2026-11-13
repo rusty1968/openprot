@@ -28,7 +28,9 @@ use openprot_mctp_api::Handle;
 use openprot_mctp_server::Server;
 use openprot_orchestrator_pldm_adapter::UpdateRequestLatch;
 use openprot_orchestrator_sm::Event;
-use openprot_pldm_service::firmware_device::{FirmwareDevice, RunTerminusResult};
+use openprot_pldm_service::firmware_device::{
+    FdEvent, FdEventSink, FirmwareDevice, RunTerminusResult,
+};
 use openprot_pldm_service::{MctpPldmTransport, PldmServiceError};
 use pldm_common::codec::{PldmCodec, PldmCodecWithLifetime};
 use pldm_common::message::firmware_update::apply_complete::{ApplyCompleteResponse, ApplyResult};
@@ -643,5 +645,72 @@ fn run_until_stops_at_the_callers_condition() {
         resp[3],
         PldmBaseCompletionCode::Success as u8,
         "RequestUpdate should have been answered within the single permitted step"
+    );
+}
+
+/// Records the events a sink is sent.
+struct Recorder<'a>(&'a RefCell<Vec<FdEvent>>);
+
+impl FdEventSink for Recorder<'_> {
+    fn notify(&mut self, event: FdEvent) {
+        self.0.borrow_mut().push(event);
+    }
+}
+
+/// The FD announces that it is `Listening` once its responder listener is
+/// registered, before it waits for the first command, and only once.
+///
+/// An FD that tells an Update Agent it is ready any earlier can have a command
+/// delivered while no listener exists, which drops it.
+#[test]
+fn listening_is_announced_before_the_first_command_is_waited_for() {
+    let fd_ops = MockFdOps {
+        component_accepted: Cell::new(false),
+        download_bytes_received: Cell::new(0),
+        downloaded_image: RefCell::new([0u8; IMAGE_SIZE as usize]),
+        verified: Cell::new(false),
+        applied: Cell::new(false),
+    };
+    let fd_to_ua_packets = RefCell::new(Vec::new());
+    let fd_sender = BufferSender {
+        packets: &fd_to_ua_packets,
+    };
+    let fd_server: RefCell<Server<_, 16>> = RefCell::new(Server::new(Eid(FD_EID), 0, fd_sender));
+    let requester_transport = MctpPldmTransport::new(DirectClientWithPump::new(&fd_server, || {}));
+    let responder_transport = MctpPldmTransport::new(DirectClientWithPump::new(&fd_server, || {}));
+    let mut fd = FirmwareDevice::init(
+        &fd_ops,
+        &pldm_interface::config::PLDM_PROTOCOL_CAPABILITIES,
+        responder_transport,
+        requester_transport,
+    );
+
+    let events = RefCell::new(Vec::new());
+    let mut announced_before_first_step = None;
+    let mut fd_buf = [0u8; 1024];
+    let result = fd.run_until(
+        UA_EID,
+        &mut fd_buf,
+        TIMEOUT_MILLIS,
+        TIMEOUT_MILLIS,
+        &mut Recorder(&events),
+        || {
+            // Consulted before each step; stop at once, so no step runs.
+            announced_before_first_step
+                .get_or_insert(events.borrow().contains(&FdEvent::Listening));
+            false
+        },
+    );
+
+    assert!(matches!(result, RunTerminusResult::Completed));
+    assert_eq!(
+        announced_before_first_step,
+        Some(true),
+        "Listening must be announced before the first step"
+    );
+    assert_eq!(
+        *events.borrow(),
+        [FdEvent::Listening],
+        "once, and nothing else"
     );
 }
