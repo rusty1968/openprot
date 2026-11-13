@@ -183,6 +183,8 @@ pub struct CaliptraI3cTarget<M: Mmio = MmioBlock> {
     pending_ibi: Option<[u8; 2]>,
     // Retries of `pending_ibi` so far.
     ibi_retries: u8,
+    // The last RX descriptor read, for diagnosing a frame that does not decode.
+    last_rx_desc: u32,
     // !Send + !Sync: exclusive ownership of one physical peripheral
     _not_send_sync: PhantomData<*mut ()>,
 }
@@ -209,8 +211,16 @@ impl<M: Mmio> CaliptraI3cTarget<M> {
             ibi_mdb: MDB_PENDING_READ,
             pending_ibi: None,
             ibi_retries: 0,
+            last_rx_desc: 0,
             _not_send_sync: PhantomData,
         }
+    }
+
+    /// The last RX descriptor read: the frame length in bits 15:0, and the
+    /// controller's error flags for it in the top bits (which the driver does
+    /// not act on). For diagnosing a frame that fails to decode.
+    pub fn last_rx_descriptor(&self) -> u32 {
+        self.last_rx_desc
     }
 
     /// Apply pre-kernel target configuration.
@@ -259,6 +269,7 @@ impl<M: Mmio> CaliptraI3cTarget<M> {
         }
 
         let desc = self.mmio.read(Reg::TtiRxDescPort);
+        self.last_rx_desc = desc;
         // Lower 16 bits of descriptor carry the data length in bytes.
         let len = (desc & 0xffff) as usize;
         if len == 0 {
@@ -748,6 +759,19 @@ mod tests {
         let mut small = [0u8; 3];
         assert_eq!(d.rx_read(&mut small), Some(3));
         assert_eq!(small, [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_last_rx_descriptor_is_remembered() {
+        let mut fake = FakeMmio::default();
+        fake.set(Reg::TtiInterruptStatus, 1);
+        // Length 3, with the top (error) bits set.
+        fake.set(Reg::TtiRxDescPort, 0xf000_0003);
+        fake.set(Reg::TtiRxDataPort, 0x0003_0201);
+        let mut d = CaliptraI3cTarget::with_mmio(fake);
+        assert_eq!(d.last_rx_descriptor(), 0);
+        assert_eq!(d.rx_read(&mut [0u8; 8]), Some(3));
+        assert_eq!(d.last_rx_descriptor(), 0xf000_0003);
     }
 
     #[test]

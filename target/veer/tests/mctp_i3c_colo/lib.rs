@@ -177,7 +177,22 @@ pub fn run(handles: Handles) -> Result<()> {
                     Some(Ok(packet)) => {
                         let _ = server.inbound(packet);
                     }
-                    _ => pw_log::error!("i3c frame decode failed"),
+                    _ => {
+                        // What the frame looked like, and the controller's own
+                        // descriptor for it (its error flags are the top bits).
+                        let frame = rx_buf.get(..n).unwrap_or(&[]);
+                        let at = |i: usize| frame.get(i).copied().unwrap_or(0) as u32;
+                        pw_log::error!(
+                            "i3c frame decode failed: len=0x{:04x} first=0x{:02x}{:02x}{:02x}{:02x} last=0x{:02x} desc=0x{:08x}",
+                            n as u32,
+                            at(0),
+                            at(1),
+                            at(2),
+                            at(3),
+                            at(n.saturating_sub(1)),
+                            shared.srv.borrow().target.last_rx_descriptor()
+                        );
+                    }
                 }
             }
         },
