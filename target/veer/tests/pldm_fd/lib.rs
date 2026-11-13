@@ -28,7 +28,9 @@
 use core::cell::Cell;
 
 use openprot_mctp_api::MctpClient;
-use openprot_pldm_service::firmware_device::{FirmwareDevice, RunTerminusResult, FD_MAX_MSG};
+use openprot_pldm_service::firmware_device::{
+    FdEvent, FdEventSink, FirmwareDevice, RunTerminusResult, FD_MAX_MSG,
+};
 use openprot_pldm_service::{MctpPldmTransport, PldmServiceError};
 use pldm_common::message::firmware_update::apply_complete::ApplyResult;
 use pldm_common::message::firmware_update::get_fw_params::FirmwareParameters;
@@ -57,6 +59,24 @@ const REQUESTER_TIMEOUT_MILLIS: u32 = 5_000;
 const DEVICE_UUID: [u8; 16] = [
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
 ];
+
+/// Logs the line a host test waits for before it sends its first command
+/// ("pldm fd: waiting for update agent") when the FD starts listening.
+///
+/// Not before: until the responder's listener is registered an Update Agent
+/// command that arrives has nowhere to go and is dropped, and a fast transport
+/// (an FD in the same process as the MCTP server) can deliver one in that
+/// window. The log line is the signal the host acts on, so it has to mean the
+/// listener exists.
+struct ReadySink;
+
+impl FdEventSink for ReadySink {
+    fn notify(&mut self, event: FdEvent) {
+        if matches!(event, FdEvent::Listening) {
+            pw_log::info!("pldm fd: waiting for update agent");
+        }
+    }
+}
 
 /// What differs between the images that run this FD.
 #[derive(Clone, Copy)]
@@ -261,8 +281,6 @@ pub fn run<Cr: MctpClient, Cq: MctpClient>(config: FdConfig, responder: Cr, requ
         requester_transport,
     );
 
-    pw_log::info!("pldm fd: waiting for update agent");
-
     let mut buf = [0u8; FD_MAX_MSG];
 
     // Drive the whole update in a single `run_terminus`, exactly like the
@@ -279,7 +297,7 @@ pub fn run<Cr: MctpClient, Cq: MctpClient>(config: FdConfig, responder: Cr, requ
         &mut buf,
         config.idle_timeout_millis,
         REQUESTER_TIMEOUT_MILLIS,
-        &mut (),
+        &mut ReadySink,
     ) {
         RunTerminusResult::Completed => {
             pw_log::info!("pldm fd: run_terminus completed");
