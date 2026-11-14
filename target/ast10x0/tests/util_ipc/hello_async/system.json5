@@ -1,0 +1,74 @@
+// Licensed under the Apache-2.0 license
+// SPDX-License-Identifier: Apache-2.0
+
+// AST10x0 hello-async QEMU test: an async client against a ServiceLoop server.
+//
+//   client — two channels, both driven with util_ipc::AsyncChannelTransport and
+//            one client WaitGroup. Reports through debug_shutdown(Ok|Err).
+//   server — util_service::ServiceLoop. `slow` is answered by defer/complete
+//            after a delay; `fast` is answered at once.
+//
+// Memory map is the same as util_ipc/async_transaction.
+{
+    arch: {
+        type: "armv7m",
+        vector_table_start_address: 0x00000000,
+        vector_table_size_bytes: 1280,
+    },
+    kernel: {
+        flash_start_address: 0x00000500,
+        flash_size_bytes: 129792,
+        ram_start_address: 0x00060000,
+        ram_size_bytes: 131072,
+    },
+    apps: [
+        {
+            name: "client",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "client_process",
+                    ram_size_bytes: 65536,
+                    objects: [
+                        { name: "wg", type: "wait_group" },
+                        {
+                            name: "slow",
+                            type: "channel_initiator",
+                            handler_process: "server_process",
+                            handler_object_name: "slow",
+                        },
+                        {
+                            name: "fast",
+                            type: "channel_initiator",
+                            handler_process: "server_process",
+                            handler_object_name: "fast",
+                        },
+                        {
+                            type: "thread",
+                            name: "client_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },],
+                },
+            ],
+        },
+        {
+            name: "server",
+            flash_size_bytes: 131072,
+            processes: [
+                {
+                    name: "server_process",
+                    ram_size_bytes: 32768,
+                    objects: [
+                        { name: "wg", type: "wait_group" },
+                        { name: "slow", type: "channel_handler" },
+                        { name: "fast", type: "channel_handler" },
+                        {
+                            type: "thread",
+                            name: "server_thread",
+                            kernel_stack_size_bytes: 4096,
+                        },],
+                },
+            ],
+        },
+    ],
+}
