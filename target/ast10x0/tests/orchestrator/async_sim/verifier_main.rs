@@ -15,10 +15,8 @@
 //! have a new request read until the deferred reply is completed. The
 //! orchestrator's test plan accounts for that.
 //!
-//! A second, never-connected channel (`idle`) keeps the WaitGroup from going
-//! empty while `ipc` is deferred. The kernel rejects a wait on a WaitGroup
-//! with no members (`InvalidArgument`), so a `ServiceLoop` whose only
-//! channel is parked cannot wait for its own deadline.
+//! This is a single-channel `ServiceLoop`: while the reply is parked the
+//! WaitGroup is empty, and `next` sleeps until the reply is due.
 
 #![no_main]
 #![no_std]
@@ -34,7 +32,7 @@ const UNIT_MS: u64 = 10;
 const KEY: u32 = 1;
 
 fn serve() -> Result<()> {
-    let mut channels = [Channel::new(handle::IPC), Channel::new(handle::IDLE)];
+    let mut channels = [Channel::new(handle::IPC)];
     let mut service = ServiceLoop::new(handle::WG, &mut channels)?;
     let mut buf = [0u8; 8];
     // When the parked reply is due, and for which component.

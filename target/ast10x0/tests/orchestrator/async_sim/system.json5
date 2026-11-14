@@ -76,9 +76,6 @@
                     objects: [
                         { name: "wg", type: "wait_group" },
                         { name: "ipc", type: "channel_handler" },
-                        // Never connected. Keeps the WaitGroup non-empty
-                        // while `ipc` is deferred; see verifier_main.rs.
-                        { name: "idle", type: "channel_handler" },
                         {
                             type: "thread",
                             name: "verifier_thread",
