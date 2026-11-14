@@ -64,6 +64,7 @@ rust_app(
         "//services/orchestrator/server:orchestrator_server",
         "//services/orchestrator/sm:orchestrator_sm",
         "//util/ipc",
+        "//util/requester",
         "//util/transport",
         "@pigweed//pw_kernel/userspace",
         "@pigweed//pw_log/rust:pw_log",

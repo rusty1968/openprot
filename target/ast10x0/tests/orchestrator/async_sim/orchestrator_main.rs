@@ -41,7 +41,7 @@ use userspace::entry;
 use userspace::syscall::{self, Signals};
 use userspace::time::{Clock, Duration, Instant, SystemClock};
 use util_ipc::{AsyncChannelTransport, IpcHandle};
-use util_transport::AsyncTransport;
+use util_requester::Command;
 
 const N: usize = 3;
 const E: usize = 2 * N + 2;
@@ -107,103 +107,95 @@ enum Cmd {
 }
 
 impl Cmd {
-    fn encode(self, out: &mut [u8; 4]) -> usize {
-        let (bytes, len) = match self {
-            Cmd::Verify { id, units } => ([OP_VERIFY, id, units, 0], 3),
-            Cmd::Release { id, units } => ([OP_RELEASE, id, units, 0], 3),
-            Cmd::Assert { id } => ([OP_ASSERT, id, 0, 0], 2),
-            Cmd::Restore { id } => ([OP_RESTORE, id, 0, 0], 2),
-            Cmd::WaitBoot => ([OP_WAIT, 0, 0, 0], 1),
-        };
-        *out = bytes;
-        len
-    }
-
-    fn deadline(self) -> Instant {
+    /// A verify that has not answered this long after it started is
+    /// abandoned. Nothing else has a deadline.
+    fn deadline(&self) -> Option<Instant> {
         match self {
-            Cmd::Verify { .. } => SystemClock::now()
-                .checked_add_duration(VERIFY_DEADLINE)
-                .unwrap_or(Instant::MAX),
-            _ => Instant::MAX,
+            Cmd::Verify { .. } => Some(
+                SystemClock::now()
+                    .checked_add_duration(VERIFY_DEADLINE)
+                    .unwrap_or(Instant::MAX),
+            ),
+            _ => None,
         }
     }
 }
 
-#[derive(Clone, Copy)]
-struct Inflight {
-    cmd: Cmd,
-    deadline: Instant,
+impl Command for Cmd {
+    fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let (bytes, len) = match *self {
+            Cmd::Verify { id, units } => ([OP_VERIFY, id, units], 3),
+            Cmd::Release { id, units } => ([OP_RELEASE, id, units], 3),
+            Cmd::Assert { id } => ([OP_ASSERT, id, 0], 2),
+            Cmd::Restore { id } => ([OP_RESTORE, id, 0], 2),
+            Cmd::WaitBoot => ([OP_WAIT, 0, 0], 1),
+        };
+        out.get_mut(..len)?.copy_from_slice(bytes.get(..len)?);
+        Some(len)
+    }
 }
 
-/// One service channel: a transport, the command in flight on it, and the
-/// commands waiting for it.
+/// A `util_requester` lane plus the kernel half of it: the transport's handle
+/// is in the WaitGroup exactly while a command is in flight.
 struct Lane {
     index: usize,
-    tr: Transport,
-    inflight: Option<Inflight>,
-    queue: heapless::Deque<Cmd, 8>,
+    inner: util_requester::Lane<Transport, Cmd, Instant, 8>,
 }
 
 impl Lane {
     fn new(index: usize, tr: Transport) -> Self {
         Self {
             index,
-            tr,
-            inflight: None,
-            queue: heapless::Deque::new(),
+            inner: util_requester::Lane::new(tr),
         }
     }
 
-    fn idle(&self) -> bool {
-        self.inflight.is_none() && self.queue.is_empty()
+    fn unwatch(&self) -> Result<()> {
+        syscall::wait_group_remove(handle::WG, self.inner.transport().as_raw())
     }
 
     /// Start the next queued command if the channel is free.
     fn start_next(&mut self) -> Result<()> {
-        if self.inflight.is_some() {
-            return Ok(());
+        match self.inner.start_next(|cmd| cmd.deadline()) {
+            Ok(Some(_)) => syscall::wait_group_add(
+                handle::WG,
+                self.inner.transport().as_raw(),
+                Signals::READABLE,
+                self.index,
+            ),
+            Ok(None) => Ok(()),
+            Err(_) => Err(Error::Internal),
         }
-        let Some(cmd) = self.queue.pop_front() else {
-            return Ok(());
-        };
-        let mut req = [0u8; 4];
-        let len = cmd.encode(&mut req);
-        self.tr
-            .start(req.get(..len).unwrap_or(&[]))
-            .map_err(|_| Error::Internal)?;
-        syscall::wait_group_add(handle::WG, self.tr.as_raw(), Signals::READABLE, self.index)?;
-        self.inflight = Some(Inflight {
-            cmd,
-            deadline: cmd.deadline(),
-        });
-        Ok(())
     }
 
     /// Collect the response if it has landed.
     fn finish(&mut self) -> Result<Option<(Cmd, [u8; 2])>> {
-        let Some(inflight) = self.inflight else {
-            return Ok(None);
-        };
         let mut resp = [0u8; 4];
-        match self.tr.poll(&mut resp) {
-            Ok(Some(n)) if n >= 2 => {
-                syscall::wait_group_remove(handle::WG, self.tr.as_raw())?;
-                self.inflight = None;
-                Ok(Some((inflight.cmd, [resp[0], resp[1]])))
-            }
-            Ok(Some(_)) | Err(_) => Err(Error::Internal),
+        match self.inner.poll(&mut resp) {
             Ok(None) => Ok(None),
+            Ok(Some(done)) => {
+                self.unwatch()?;
+                match (done.len >= 2, resp.first(), resp.get(1)) {
+                    (true, Some(status), Some(id)) => Ok(Some((done.cmd, [*status, *id]))),
+                    _ => Err(Error::Internal),
+                }
+            }
+            Err(_) => {
+                let _ = self.unwatch();
+                Err(Error::Internal)
+            }
         }
     }
 
     /// Abandon the command in flight and return it.
     fn cancel(&mut self) -> Result<Option<Cmd>> {
-        let Some(inflight) = self.inflight.take() else {
-            return Ok(None);
-        };
-        self.tr.cancel().map_err(|_| Error::Internal)?;
-        syscall::wait_group_remove(handle::WG, self.tr.as_raw())?;
-        Ok(Some(inflight.cmd))
+        let cancelled = self.inner.cancel();
+        let unwatched = self.unwatch();
+        let cmd = cancelled.map_err(|_| Error::Internal)?;
+        if cmd.is_some() {
+            unwatched?;
+        }
+        Ok(cmd)
     }
 }
 
@@ -243,8 +235,8 @@ impl Exec {
         self.lanes
             .get_mut(lane)
             .ok_or(EffectError)?
-            .queue
-            .push_back(cmd)
+            .inner
+            .push(cmd)
             .map_err(|_| EffectError)
     }
 
@@ -346,9 +338,9 @@ impl Exec {
     /// queued.
     fn pump(&mut self) -> Result<()> {
         if let Some(events) = self.lanes.get_mut(EVENTS)
-            && events.idle()
+            && events.inner.is_idle()
         {
-            let _ = events.queue.push_back(Cmd::WaitBoot);
+            let _ = events.inner.push(Cmd::WaitBoot);
         }
         for lane in self.lanes.iter_mut() {
             lane.start_next()?;
@@ -391,15 +383,15 @@ impl Exec {
         let Some(lane) = self.lanes.get_mut(VERIFIER) else {
             return Ok(None);
         };
-        let Some(inflight) = lane.inflight else {
+        let Some(&cmd) = lane.inner.in_flight() else {
             return Ok(None);
         };
-        if now < inflight.deadline {
+        if !lane.inner.expired(&now) {
             return Ok(None);
         }
         let _ = lane.cancel()?;
         self.verify_cancels += 1;
-        Ok(match inflight.cmd {
+        Ok(match cmd {
             Cmd::Verify { id, .. } => Some(Event::VerificationFailed(ComponentId::new(id))),
             _ => None,
         })
@@ -408,10 +400,10 @@ impl Exec {
     /// The earliest moment the loop must wake without a response.
     fn next_deadline(&self) -> Instant {
         let mut at = self.wd.wait_deadline();
-        if let Some(inflight) = self.lanes.get(VERIFIER).and_then(|l| l.inflight)
-            && inflight.deadline < at
+        if let Some(due) = self.lanes.get(VERIFIER).and_then(|l| l.inner.deadline())
+            && due < at
         {
-            at = inflight.deadline;
+            at = due;
         }
         at
     }
@@ -421,7 +413,7 @@ impl Exec {
         self.lanes
             .iter()
             .take(EVENTS)
-            .all(|lane| lane.idle())
+            .all(|lane| lane.inner.is_idle())
     }
 
     fn all_booted(&self) -> bool {
