@@ -9,7 +9,8 @@ use openprot_orchestrator_sm::{
 };
 
 use crate::board::{
-    Board, BoardCapabilities, ImageSource, Report, ReportSink, SvnFloorBinding, Verdict, Verifier,
+    AsyncVerifier, Board, BoardCapabilities, ImageSource, Report, ReportSink, SvnFloorBinding,
+    Verdict, VerifyStatus,
 };
 use orchestrator_capabilities::{BootControl, BootWatch, FailureCause, Svn, SvnFloor, WalkVerdict};
 
@@ -56,6 +57,10 @@ pub struct PlatformDriver<B: BoardCapabilities, const N: usize> {
     board: Board<B, N>,
     /// Component whose image is staged (source opened) for verification.
     staged: Option<ComponentId>,
+    /// Component whose verification is outstanding with the verifier. At most
+    /// one: a new start or a re-stage cancels the old one, so its answer can
+    /// never be taken for the current image's.
+    verifying: Option<ComponentId>,
     /// `watching[i]`: `ComponentId(i)` is out of reset with a walk in
     /// flight. Set on `ReleaseReset`, cleared on `AssertReset` and on a
     /// terminal verdict. Only watched walks are polled, so a finished or
@@ -74,6 +79,7 @@ impl<B: BoardCapabilities, const N: usize> PlatformDriver<B, N> {
         Self {
             board,
             staged: None,
+            verifying: None,
             watching: [false; N],
             verified_svn: [None; N],
         }
@@ -97,40 +103,83 @@ impl<B: BoardCapabilities, const N: usize> PlatformDriver<B, N> {
     }
 
     /// Stage `id`'s image: open its source so
-    /// [`verify_firmware`](Self::verify_firmware) can read it.
+    /// [`start_verify`](Self::start_verify) can read it.
     pub fn stage_firmware(&mut self, id: ComponentId) -> Result<(), DriverError> {
         self.staged = None;
+        // A new staging replaces the image an outstanding check was judging.
+        self.cancel_verify()?;
         let source = Self::source(&mut self.board.images, id)?;
         source.open().map_err(|_| DriverError::ImageUnavailable)?;
         self.staged = Some(id);
         Ok(())
     }
 
-    /// Judge the staged image via the [`Verifier`] and return the verdict:
+    /// Abandon the outstanding verification, if any. Its answer is discarded.
+    fn cancel_verify(&mut self) -> Result<(), DriverError> {
+        if let Some(prev) = self.verifying.take() {
+            self.board
+                .verifier
+                .cancel(prev)
+                .map_err(|_| DriverError::VerifierFault)?;
+        }
+        Ok(())
+    }
+
+    /// Begin judging the staged image. Returns at once; the verdict arrives
+    /// from [`poll_verify`](Self::poll_verify) as
     /// `Event::VerificationPassed(id)` or `Event::VerificationFailed(id)`.
-    pub fn verify_firmware(&mut self, id: ComponentId) -> Result<Event, DriverError> {
+    ///
+    /// Starting supersedes any check still outstanding, and voids `id`'s
+    /// recorded SVN: until this check answers, no earlier authenticated
+    /// reading may reach the anti-rollback commit.
+    pub fn start_verify(&mut self, id: ComponentId) -> Result<(), DriverError> {
         // Id validity first: an unknown component is UnknownComponent even
         // though it can never be staged.
-        let source = Self::source(&mut self.board.images, id)?;
+        Self::source(&mut self.board.images, id)?;
         if self.staged != Some(id) {
             return Err(DriverError::NotStaged);
         }
-        let verdict = self
-            .board
+        self.cancel_verify()?;
+        let source = Self::source(&mut self.board.images, id)?;
+        self.board
             .verifier
-            .verify(id, source)
+            .start(id, source)
             .map_err(|_| DriverError::VerifierFault)?;
+        self.verified_svn[id.get() as usize] = None;
+        self.verifying = Some(id);
+        Ok(())
+    }
+
+    /// Collect the outstanding verification's outcome, if it has one. Never
+    /// waits. A passed check records the image's SVN for the floor commit; a
+    /// rejection or a timeout clears it and reports
+    /// `Event::VerificationFailed(id)`.
+    ///
+    /// An error means the check could not be carried through. It ends the
+    /// check, and the run loop should dispatch `Event::EffectFailed`, the same
+    /// fail-closed answer an executor error gets.
+    pub fn poll_verify(&mut self) -> Result<Option<Event>, DriverError> {
+        let Some(id) = self.verifying else {
+            return Ok(None);
+        };
         let idx = id.get() as usize;
-        Ok(match verdict {
-            Verdict::Authenticated { svn } => {
+        match self.board.verifier.poll(id) {
+            Err(_) => {
+                self.verifying = None;
+                Err(DriverError::VerifierFault)
+            }
+            Ok(VerifyStatus::Pending) => Ok(None),
+            Ok(VerifyStatus::Done(Verdict::Authenticated { svn })) => {
+                self.verifying = None;
                 self.verified_svn[idx] = Some(svn);
-                Event::VerificationPassed(id)
+                Ok(Some(Event::VerificationPassed(id)))
             }
-            Verdict::Rejected => {
+            Ok(VerifyStatus::Done(Verdict::Rejected) | VerifyStatus::TimedOut) => {
+                self.verifying = None;
                 self.verified_svn[idx] = None;
-                Event::VerificationFailed(id)
+                Ok(Some(Event::VerificationFailed(id)))
             }
-        })
+        }
     }
 
     /// Advance `id`'s anti-rollback floor to its verified image's SVN.
@@ -268,14 +317,15 @@ pub struct BootWalkPoll {
 
 impl<B: BoardCapabilities, const N: usize> Platform for PlatformDriver<B, N> {
     /// Routes each effect to its executor. Exhaustive: a new [`Effect`]
-    /// variant must get an executor before this compiles. Synchronous
-    /// results (the verification verdict) come back as the returned event;
-    /// every executor error reports as [`EffectError`] — the SM treats all
-    /// actuation failures the same, fail-closed.
+    /// variant must get an executor before this compiles. Nothing here waits
+    /// on a slow service: the verification verdict, for one, arrives later
+    /// from [`poll_verify`](PlatformDriver::poll_verify). Every executor
+    /// error reports as [`EffectError`] — the SM treats all actuation
+    /// failures the same, fail-closed.
     fn execute(&mut self, effect: Effect) -> Result<Option<Event>, EffectError> {
         match effect {
             Effect::ReadFirmware(id) => self.stage_firmware(id).map(|_| None),
-            Effect::VerifyFirmware(id) => self.verify_firmware(id).map(Some),
+            Effect::VerifyFirmware(id) => self.start_verify(id).map(|_| None),
             Effect::ReleaseReset(id) => self.release_reset(id).map(|_| None),
             Effect::AssertReset(id) => self.assert_reset(id).map(|_| None),
             Effect::CommitSvnFloor(id) => self.commit_svn_floor(id).map(|_| None),

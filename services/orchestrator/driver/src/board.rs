@@ -81,6 +81,129 @@ impl<V: Verifier> Verifier for &mut V {
     }
 }
 
+/// Judges a component's firmware image without making the caller wait.
+///
+/// The split mirrors `util_transport::AsyncTransport`: `start` begins a check
+/// and returns, `poll` reports whether it has finished, and `cancel` abandons
+/// it. A board whose check is a request to a crypto service implements this
+/// directly, so the orchestrator keeps serving timers and events while the
+/// image is hashed. A board whose check is fast and local can wrap its
+/// [`Verifier`] in [`Immediate`].
+///
+/// One check is outstanding at a time, and the driver cancels before starting
+/// another, so an implementation never holds two.
+pub trait AsyncVerifier {
+    /// The error type reported by this verifier.
+    type Error: core::error::Error;
+
+    /// Begins judging `id`'s image. An implementation that reaches the image
+    /// itself, such as a service that reads it from the device server, may
+    /// ignore `image`.
+    ///
+    /// # Errors
+    ///
+    /// Only when the check could not be started. A checked-and-bad image is
+    /// a [`Verdict::Rejected`] from `poll`, not an error here.
+    fn start(
+        &mut self,
+        id: ComponentId,
+        image: &mut impl ImageSource,
+    ) -> Result<(), Self::Error>;
+
+    /// Reports the outcome of the check started for `id`. Never waits.
+    ///
+    /// # Errors
+    ///
+    /// Only when the check could not be carried through (the service
+    /// failed, the transport broke). That is a fault, not a verdict. An
+    /// error ends the check.
+    fn poll(&mut self, id: ComponentId) -> Result<VerifyStatus, Self::Error>;
+
+    /// Abandons the check started for `id`. Its answer, if one arrives
+    /// later, is discarded.
+    fn cancel(&mut self, id: ComponentId) -> Result<(), Self::Error>;
+}
+
+impl<V: AsyncVerifier> AsyncVerifier for &mut V {
+    type Error = V::Error;
+
+    #[inline(always)]
+    fn start(
+        &mut self,
+        id: ComponentId,
+        image: &mut impl ImageSource,
+    ) -> Result<(), Self::Error> {
+        (**self).start(id, image)
+    }
+
+    #[inline(always)]
+    fn poll(&mut self, id: ComponentId) -> Result<VerifyStatus, Self::Error> {
+        (**self).poll(id)
+    }
+
+    #[inline(always)]
+    fn cancel(&mut self, id: ComponentId) -> Result<(), Self::Error> {
+        (**self).cancel(id)
+    }
+}
+
+/// Where an asynchronous check stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyStatus {
+    /// Still running.
+    Pending,
+    /// Finished with a judgment.
+    Done(Verdict),
+    /// Ran past the implementation's deadline with no answer. Not a verdict:
+    /// nothing was judged. The driver reports it as a failed verification, so
+    /// the machine recovers the component instead of trusting or locking.
+    TimedOut,
+}
+
+/// Runs a synchronous [`Verifier`] as an [`AsyncVerifier`]: the check happens
+/// inside `start`, as it always did, and the first `poll` returns the
+/// verdict. For boards whose check is fast and local, and for tests.
+pub struct Immediate<V: Verifier> {
+    inner: V,
+    done: Option<(ComponentId, Verdict)>,
+}
+
+impl<V: Verifier> Immediate<V> {
+    pub const fn new(inner: V) -> Self {
+        Self { inner, done: None }
+    }
+}
+
+impl<V: Verifier> AsyncVerifier for Immediate<V> {
+    type Error = V::Error;
+
+    fn start(
+        &mut self,
+        id: ComponentId,
+        image: &mut impl ImageSource,
+    ) -> Result<(), Self::Error> {
+        self.done = None;
+        let verdict = self.inner.verify(id, image)?;
+        self.done = Some((id, verdict));
+        Ok(())
+    }
+
+    fn poll(&mut self, id: ComponentId) -> Result<VerifyStatus, Self::Error> {
+        Ok(match self.done {
+            Some((done_id, verdict)) if done_id == id => {
+                self.done = None;
+                VerifyStatus::Done(verdict)
+            }
+            _ => VerifyStatus::Pending,
+        })
+    }
+
+    fn cancel(&mut self, _id: ComponentId) -> Result<(), Self::Error> {
+        self.done = None;
+        Ok(())
+    }
+}
+
 /// A [`Verifier`]'s judgment of one image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -164,8 +287,9 @@ impl<S: ReportSink> ReportSink for &mut S {
 pub trait BoardCapabilities {
     /// Image access for the managed components.
     type Image: ImageSource;
-    /// Judges images for every component.
-    type Verifier: Verifier;
+    /// Judges images for every component, without making the driver wait.
+    /// A fast local [`Verifier`] is wrapped in [`Immediate`].
+    type Verifier: AsyncVerifier;
     /// Reset actuation for the managed components.
     type BootControl: BootControl;
     /// Boot-checkpoint supervision for the managed components.
@@ -199,7 +323,7 @@ pub enum SvnFloorBinding<F: SvnFloor> {
 /// struct Ast1060Board;
 /// impl BoardCapabilities for Ast1060Board {
 ///     type Image = SpiFlashImage;         // interposed flash, offsets from the slot layout
-///     type Verifier = ManifestVerifier;   // signature + SVN via the crypto engine
+///     type Verifier = Immediate<ManifestVerifier>; // signature + SVN via the crypto engine
 ///     type BootControl = ExtrstGpio;      // per-component reset line
 ///     type BootWatch = CheckpointWalk;    // GPIO checkpoint walk over the boot window
 ///     type SvnFloor = OtpSvnFloor;        // fuse-backed anti-rollback floor

@@ -39,9 +39,15 @@ The executor does no I/O inside the closure. It only queues a command, so a
 dispatch always runs to quiescence at once. The result comes back later as an
 ordinary event. **Shown** (in `async_sim` each effect is either queued on a lane or accepted locally, and nothing blocks).
 
-The existing `PlatformDriver` does not work this way yet: `VerifyFirmware`
-calls the verifier inside `execute` and returns the verdict from it. That is
-the blocking call this design removes.
+`PlatformDriver` follows the same shape for verification. `VerifyFirmware`
+calls `start_verify` on an `AsyncVerifier` and returns `Ok(None)`; the run
+loop collects the verdict from `poll_verify` and dispatches it. A verifier that
+passes its deadline reports `TimedOut`, which the driver turns into
+`VerificationFailed`, so the machine recovers the component instead of locking.
+Starting a check or re-staging the image cancels the one outstanding, so a
+stale answer is never recorded or emitted. This is **Shown** on the host
+(driver tests with a scripted slow verifier), not yet on QEMU. The short local
+calls (reset lines, the SVN floor, reports) still complete inside `execute`.
 
 ## Lanes: one transaction per channel
 
@@ -209,9 +215,11 @@ sequenceDiagram
 - A cancel racing the reply at the same instant.
 - Many event sources, and the channel and memory cost of one parked request
   each.
-- Migrating `PlatformDriver`: its executors for `VerifyFirmware` and the
-  recovery effects need to become queue-only, and the recovery and update
-  effects it fails closed on need real services behind them.
+- Running `PlatformDriver` against an IPC-backed `AsyncVerifier` (built on
+  `util_requester`) on QEMU. Its `BootControl` stays a synchronous call; over
+  IPC it would only report that a command was accepted, not completed.
+- The recovery, update and attestation effects, which the driver still fails
+  closed on and which need real services behind them.
 - Sizing: command queue depth per lane against the effect and pending-event
   caps in the state machine (`E >= 2*N + 2`).
 - The tests run on QEMU with margins of tens of milliseconds. Behaviour on
