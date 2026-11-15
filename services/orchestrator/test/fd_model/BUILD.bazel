@@ -1,0 +1,26 @@
+# Licensed under the Apache-2.0 license
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+# The firmware-device side of the PLDM-FD-as-IPC-server design (#464): a pure
+# state machine with injected time and no dependencies, so it runs on a host and
+# behind any carrier (a QEMU service, an in-process loopback).
+rust_library(
+    name = "fd_model",
+    srcs = [
+        "src/lib.rs",
+        "src/model.rs",
+        "src/tests.rs",
+        "src/types.rs",
+    ],
+    crate_name = "openprot_fd_model",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "fd_model_test",
+    crate = ":fd_model",
+    edition = "2024",
+)
