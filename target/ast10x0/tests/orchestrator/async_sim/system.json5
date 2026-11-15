@@ -80,6 +80,10 @@
                             type: "thread",
                             name: "verifier_thread",
                             kernel_stack_size_bytes: 4096,
+                            // Higher than the orchestrator (default, Level15): a
+                            // service runs as soon as a request or its timer is
+                            // ready, instead of waiting out the requester's slice.
+                            priority: "Level20",
                         },],
                 },
             ],
@@ -99,6 +103,10 @@
                             type: "thread",
                             name: "devices_thread",
                             kernel_stack_size_bytes: 4096,
+                            // Higher than the orchestrator (default, Level15): a
+                            // service runs as soon as a request or its timer is
+                            // ready, instead of waiting out the requester's slice.
+                            priority: "Level20",
                         },],
                 },
             ],

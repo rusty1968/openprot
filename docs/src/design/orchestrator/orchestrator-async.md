@@ -179,8 +179,13 @@ reset a device and listen, so it cannot shape the world it is judged against.
 For the same reason one image runs one scenario, built from the same sources
 with one build flag, and a failure names its scenario. Repeat a run with
 `--runs_per_test`, not a loop: the scripts count from the start of the image.
-The scenario tests are `exclusive`, because their timing margins are tens of
-milliseconds on QEMU's wall clock and shrink when other QEMU runs share the CPU.
+The service threads run at a higher priority than the orchestrator's (`Level20`
+against the default `Level15`), so a service reacts as soon as a request or its
+timer is ready instead of waiting out the requester's time slice. Under heavy
+host load (ten QEMU runs at once, 150 runs per setting) that cut failures from
+13 to 2 for `flaky_boot` and from 24 to 6 for `verify_hangs`. The scenario tests
+are still `exclusive`, because their timing margins are tens of milliseconds on
+QEMU's wall clock and a few runs still fail when other QEMU runs share the CPU.
 
 | Scenario | Claim shown |
 |---|---|
