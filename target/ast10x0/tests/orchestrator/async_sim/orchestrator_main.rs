@@ -68,7 +68,11 @@ const OP_WAIT: u8 = 5;
 /// A component that has not reported in this long after release is failed.
 const BOOT_WINDOW: Duration = Duration::from_millis(50);
 /// A verify not answered this long after it started is abandoned.
-const VERIFY_DEADLINE: Duration = Duration::from_millis(150);
+///
+/// Tied to the `verify_hangs` latency in verifier_main.rs, which must sit
+/// between this and twice this (see the margins there). Both are scaled
+/// together, not just widened.
+const VERIFY_DEADLINE: Duration = Duration::from_millis(300);
 /// A whole scenario that takes longer than this has hung.
 const SCENARIO_LIMIT: Duration = Duration::from_millis(4000);
 

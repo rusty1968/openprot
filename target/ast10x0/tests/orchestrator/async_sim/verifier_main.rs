@@ -38,9 +38,23 @@ const COMPONENTS: usize = 3;
 /// it is still running.
 #[cfg(flaky_boot)]
 const LATENCY_MS: [&[u64]; COMPONENTS] = [&[10], &[100, 10], &[10]];
-/// C2's first verify takes 200 ms, past the orchestrator's 150 ms deadline.
+/// C2's first verify takes 450 ms, past the orchestrator's 300 ms deadline.
+///
+/// Two margins decide whether this scenario is steady, with D the deadline
+/// (300), H this latency (450) and 10 ms for a normal verify:
+///
+/// - `H - D` = 150 ms: the orchestrator must give up and cancel before this
+///   reply lands. If it wakes later than that, the reply wins and no verify is
+///   ever abandoned.
+/// - `2D - (H + 10)` = 140 ms: after the cancel this service cannot read the
+///   next request until it finishes this one, so the re-walk's first verify,
+///   which starts about D in and has its own D to finish, is answered at
+///   H + 10. If H grew past about 2D the restart would time out too.
+///
+/// So H has to sit between D and 2D, and widening only one side breaks the
+/// other. Scale D and H together to buy more margin.
 #[cfg(verify_hangs)]
-const LATENCY_MS: [&[u64]; COMPONENTS] = [&[10], &[10], &[200, 10]];
+const LATENCY_MS: [&[u64]; COMPONENTS] = [&[10], &[10], &[450, 10]];
 #[cfg(not(any(flaky_boot, verify_hangs)))]
 const LATENCY_MS: [&[u64]; COMPONENTS] = [&[10], &[10], &[10]];
 
