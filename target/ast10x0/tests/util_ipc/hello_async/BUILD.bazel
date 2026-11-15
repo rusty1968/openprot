@@ -102,10 +102,14 @@ system_image(
 
 # Run with:
 #   bazel test --config=virt_ast10x0 //target/ast10x0/tests/util_ipc/hello_async:hello_async_qemu_test
+#
+# Exclusive: the client waits out a 10 ms settle, an 80 ms outlive-the-server
+# wait and a 50 ms deferral on QEMU's wall clock. Beside other QEMU runs the
+# guest slows down and those margins go (three of ten parallel runs failed).
 system_image_test(
     name = "hello_async_qemu_test",
     image = ":hello_async_image",
-    tags = ["qemu_only"],
+    tags = ["qemu_only", "exclusive"],
     target_compatible_with = TARGET_COMPATIBLE_WITH,
 )
 
