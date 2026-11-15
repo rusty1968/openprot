@@ -14,21 +14,29 @@
 //! service queue behind each other. The events channel always has one
 //! `WaitBoot` long-poll outstanding.
 //!
-//! Scenarios (see `PLAN_A`, `PLAN_B`):
+//! The services decide how they behave (a device's boot script, how long a
+//! verify takes), so nothing in this app tells them. One image runs one
+//! scenario, chosen by a build flag, so each service's script is fixed when
+//! the image is built and a failure names its scenario.
 //!
-//! | Scenario        | Shows                                                    |
-//! |-----------------|----------------------------------------------------------|
-//! | A flaky + slow  | C0 never boots on its first release. C1's verify is slow. |
-//! |                 | C0's boot watchdog fires *while* C1 is still verifying,   |
-//! |                 | the core recovers C0, C1's late verdict is dropped as     |
-//! |                 | stale, and the re-walk ends in `Ready`.                   |
-//! | B verify hangs  | C2's verify outlives the executor's deadline. The         |
-//! |                 | executor cancels it and reports `VerificationFailed`;     |
-//! |                 | the verifier's late reply is dropped; the re-walk ends    |
-//! |                 | in `Ready`.                                               |
+//! | Flag           | Shows                                                      |
+//! |----------------|------------------------------------------------------------|
+//! | `flaky_boot`   | C0 does not boot on its first release and C1's verify is   |
+//! |                | slow. C0's boot watchdog fires *while* C1 is still         |
+//! |                | verifying, the core recovers C0, C1's late verdict is      |
+//! |                | dropped as stale, and the re-walk ends in `Ready`.         |
+//! | `verify_hangs` | C2's verify outlives the executor's deadline. The executor |
+//! |                | cancels it and reports `VerificationFailed`; the           |
+//! |                | verifier's late reply is dropped; the re-walk ends in      |
+//! |                | `Ready`.                                                   |
 
 #![no_main]
 #![no_std]
+
+#[cfg(not(any(flaky_boot, verify_hangs)))]
+compile_error!("build one scenario: pass --cfg flaky_boot or --cfg verify_hangs");
+#[cfg(all(flaky_boot, verify_hangs))]
+compile_error!("build one scenario, not both");
 
 use app_orchestrator::handle;
 use openprot_orchestrator_server::BootWatchdogs;
@@ -68,39 +76,10 @@ const VERIFIER: usize = 0;
 const RESET: usize = 1;
 const EVENTS: usize = 2;
 
-/// What each service is told to do, per component and per attempt (the
-/// third attempt on repeats the last entry). Units are the services' own
-/// (10 ms); a boot of 0 means the device never boots.
-struct Plan {
-    verify: [[u8; 3]; N],
-    boot: [[u8; 3]; N],
-}
-
-/// C0 does not boot the first time; C1's verify is slow (100 ms), long
-/// enough that C0's 50 ms watchdog fires while it is still running.
-const PLAN_A: Plan = Plan {
-    verify: [[1, 1, 1], [10, 1, 1], [1, 1, 1]],
-    boot: [[0, 2, 2], [2, 2, 2], [2, 2, 2]],
-};
-
-/// C2's first verify takes 200 ms, past the 150 ms deadline.
-const PLAN_B: Plan = Plan {
-    verify: [[1, 1, 1], [1, 1, 1], [20, 1, 1]],
-    boot: [[2, 2, 2], [2, 2, 2], [2, 2, 2]],
-};
-
-fn pick(table: &[[u8; 3]; N], id: u8, attempt: u8) -> u8 {
-    table
-        .get(usize::from(id))
-        .and_then(|row| row.get(usize::from(attempt.min(2))))
-        .copied()
-        .unwrap_or(0)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cmd {
-    Verify { id: u8, units: u8 },
-    Release { id: u8, units: u8 },
+    Verify { id: u8 },
+    Release { id: u8 },
     Assert { id: u8 },
     Restore { id: u8 },
     WaitBoot,
@@ -124,8 +103,8 @@ impl Cmd {
 impl Command for Cmd {
     fn encode(&self, out: &mut [u8]) -> Option<usize> {
         let (bytes, len) = match *self {
-            Cmd::Verify { id, units } => ([OP_VERIFY, id, units], 3),
-            Cmd::Release { id, units } => ([OP_RELEASE, id, units], 3),
+            Cmd::Verify { id } => ([OP_VERIFY, id, 0], 2),
+            Cmd::Release { id } => ([OP_RELEASE, id, 0], 2),
             Cmd::Assert { id } => ([OP_ASSERT, id, 0], 2),
             Cmd::Restore { id } => ([OP_RESTORE, id, 0], 2),
             Cmd::WaitBoot => ([OP_WAIT, 0, 0], 1),
@@ -212,20 +191,14 @@ enum Seen {
 struct Exec {
     lanes: [Lane; 3],
     wd: BootWatchdogs<N>,
-    plan: &'static Plan,
-    verify_n: [u8; N],
-    release_n: [u8; N],
     booted: [bool; N],
     seen: heapless::Vec<Seen, 48>,
     verify_cancels: u32,
 }
 
 impl Exec {
-    fn begin(&mut self, plan: &'static Plan) {
+    fn begin(&mut self) {
         self.wd = BootWatchdogs::new();
-        self.plan = plan;
-        self.verify_n = [0; N];
-        self.release_n = [0; N];
         self.booted = [false; N];
         self.seen.clear();
         self.verify_cancels = 0;
@@ -240,17 +213,6 @@ impl Exec {
             .map_err(|_| EffectError)
     }
 
-    fn bump(counter: &mut [u8; N], id: u8) -> u8 {
-        match counter.get_mut(usize::from(id)) {
-            Some(n) => {
-                let was = *n;
-                *n = n.saturating_add(1);
-                was
-            }
-            None => 0,
-        }
-    }
-
     fn mark(&mut self, id: u8, booted: bool) {
         if let Some(b) = self.booted.get_mut(usize::from(id)) {
             *b = booted;
@@ -262,17 +224,12 @@ impl Exec {
     fn effect(&mut self, effect: Effect) -> core::result::Result<Option<Event>, EffectError> {
         match effect {
             Effect::VerifyFirmware(id) => {
-                let id = id.get();
-                let attempt = Self::bump(&mut self.verify_n, id);
-                let units = pick(&self.plan.verify, id, attempt);
-                self.push(VERIFIER, Cmd::Verify { id, units })?;
+                self.push(VERIFIER, Cmd::Verify { id: id.get() })?;
             }
             Effect::ReleaseReset(id) => {
                 let id = id.get();
-                let attempt = Self::bump(&mut self.release_n, id);
-                let units = pick(&self.plan.boot, id, attempt);
                 self.mark(id, false);
-                self.push(RESET, Cmd::Release { id, units })?;
+                self.push(RESET, Cmd::Release { id })?;
                 self.wd
                     .arm_boot(ComponentId::new(id), BOOT_WINDOW)
                     .map_err(|_| EffectError)?;
@@ -286,6 +243,11 @@ impl Exec {
             Effect::RecoverComponent { id, .. } => {
                 let id = id.get();
                 self.mark(id, false);
+                self.wd.cancel_boot(ComponentId::new(id));
+                // The machine expects the component held in reset while it is
+                // restored. A device that is still running (or hung) with its
+                // line released ignores a second release, so hold it first.
+                self.push(RESET, Cmd::Assert { id })?;
                 self.push(RESET, Cmd::Restore { id })?;
             }
             // Local, nothing to ask a service for.
@@ -442,8 +404,8 @@ fn new_core() -> Result<Core> {
 }
 
 /// Run one scenario to `Ready` with every device booted.
-fn run_scenario(exec: &mut Exec, plan: &'static Plan) -> Result<Core> {
-    exec.begin(plan);
+fn run_scenario(exec: &mut Exec) -> Result<Core> {
+    exec.begin();
     let mut core = new_core()?;
     let start = SystemClock::now();
 
@@ -498,25 +460,26 @@ fn run_scenario(exec: &mut Exec, plan: &'static Plan) -> Result<Core> {
 /// to fire during C1's verify, so the core is told about the timeout before
 /// C1's verdict, which then arrives for a component the re-walk has moved
 /// past.
-fn scenario_a(exec: &mut Exec) -> Result<()> {
-    pw_log::info!("scenario A: flaky boot beside a slow verify");
-    run_scenario(exec, &PLAN_A)?;
+#[cfg(flaky_boot)]
+fn scenario(exec: &mut Exec) -> Result<()> {
+    pw_log::info!("scenario flaky_boot: flaky boot beside a slow verify");
+    run_scenario(exec)?;
 
     let timeout = exec.first(Seen::Timeout(0));
     let late_verdict = exec.first(Seen::Passed(1));
     match (timeout, late_verdict) {
         (Some(t), Some(v)) if t < v => {}
         _ => {
-            pw_log::error!("A: C0 timeout did not precede C1's verdict");
+            pw_log::error!("flaky_boot: C0 timeout did not precede C1's verdict");
             return Err(Error::Internal);
         }
     }
     if exec.first(Seen::Restored(0)).is_none() {
-        pw_log::error!("A: C0 was never restored");
+        pw_log::error!("flaky_boot: C0 was never restored");
         return Err(Error::Internal);
     }
     if exec.verify_cancels != 0 {
-        pw_log::error!("A: a verify was abandoned unexpectedly");
+        pw_log::error!("flaky_boot: a verify was abandoned unexpectedly");
         return Err(Error::Internal);
     }
     Ok(())
@@ -524,16 +487,17 @@ fn scenario_a(exec: &mut Exec) -> Result<()> {
 
 /// A verify outlives its deadline: abandon it, fail the component, recover,
 /// and finish.
-fn scenario_b(exec: &mut Exec) -> Result<()> {
-    pw_log::info!("scenario B: verify outlives its deadline");
-    run_scenario(exec, &PLAN_B)?;
+#[cfg(verify_hangs)]
+fn scenario(exec: &mut Exec) -> Result<()> {
+    pw_log::info!("scenario verify_hangs: verify outlives its deadline");
+    run_scenario(exec)?;
 
     if exec.verify_cancels != 1 {
-        pw_log::error!("B: expected exactly one abandoned verify");
+        pw_log::error!("verify_hangs: expected exactly one abandoned verify");
         return Err(Error::Internal);
     }
     if exec.first(Seen::Failed(2)).is_none() || exec.first(Seen::Restored(2)).is_none() {
-        pw_log::error!("B: C2 was not failed and restored");
+        pw_log::error!("verify_hangs: C2 was not failed and restored");
         return Err(Error::Internal);
     }
     Ok(())
@@ -564,36 +528,25 @@ unsafe fn lanes() -> [Lane; 3] {
     ]
 }
 
-/// How many times each scenario runs. Services and lanes persist, so a
-/// leftover from one run (a parked reply, a stale boot) shows up in the next.
-const ROUNDS: u32 = 3;
-
 fn run_all() -> Result<()> {
     // Safety: called once.
     let mut exec = Exec {
         lanes: unsafe { lanes() },
         wd: BootWatchdogs::new(),
-        plan: &PLAN_A,
-        verify_n: [0; N],
-        release_n: [0; N],
         booted: [false; N],
         seen: heapless::Vec::new(),
         verify_cancels: 0,
     };
-    for round in 0..ROUNDS {
-        if let Err(e) = scenario_a(&mut exec).and_then(|_| scenario_b(&mut exec)) {
-            pw_log::error!("failed in round {}", round as u32);
-            return Err(e);
-        }
-    }
-    Ok(())
+    // One run per image: the services' scripts count from the start of the
+    // image. Repeat the run with `--runs_per_test`, not a loop.
+    scenario(&mut exec)
 }
 
 #[entry]
 fn entry() {
     let ret = run_all();
     match &ret {
-        Ok(()) => pw_log::info!("All scenarios PASSED"),
+        Ok(()) => pw_log::info!("scenario PASSED"),
         Err(e) => pw_log::error!("FAILED: status code {}", *e as u32),
     }
     let _ = syscall::debug_shutdown(ret);

@@ -88,20 +88,20 @@ Every command that can hang gets a deadline when it starts. When it passes, the
 requester cancels the transaction and tells the state machine the command
 failed. In `async_sim` an abandoned verify becomes `VerificationFailed`. This
 follows the platform rule that an operation with an unknown outcome counts as
-failed. **Shown** (scenario B).
+failed. **Shown** (`verify_hangs`).
 
 Two consequences of how a server defers a reply:
 
 - **The late reply goes nowhere.** After a cancel, the server's later
   `complete` fails and the server carries on, so a stale answer cannot reach
-  the next request. **Shown** (scenario B). The race where the reply lands at
+  the next request. **Shown** (`verify_hangs`). The race where the reply lands at
   the instant of the cancel is **Not shown**.
 - **A cancel does not free the server's side.** A deferred channel stays out of
   the executor's WaitGroup until it completes the old reply, so the next
   request on that channel is not read until then. A restarted verify waits
   behind the abandoned one. Executors should bound how long they defer, and
   the requester's deadline for a restart should allow for the wait. **Shown**
-  (scenario B's timings are sized around it).
+  (the `verify_hangs` timings are sized around it).
 
 ## Events from services
 
@@ -139,7 +139,7 @@ already drops such events: during `PreSupervision` only the component under
 verification (`chain[cursor]`) may be released, and `Timeout` for a component
 that is not awaiting boot is ignored. The requester delivers events in the
 order they land and leaves the judgment to the state machine. **Shown** in
-the event trace of scenario A: a verdict for a component arrives after a
+the event trace of `flaky_boot`: a verdict for a component arrives after a
 recovery has restarted the walk, and the run still ends in `Ready`. The test
 asserts the ordering and the final state, not the drop itself.
 
@@ -150,7 +150,7 @@ more than one verify in flight. What runs concurrently is **across services**:
 the verifier works on the component being verified while the reset service and
 the event channel serve components already released. This design does not give
 parallel verification; that would need the state machine's cursor to change.
-**Shown** (scenario A: a boot watchdog fires while a different component's
+**Shown** (`flaky_boot`: a boot watchdog fires while a different component's
 verify is still running).
 
 ## Executor requirements
@@ -169,14 +169,25 @@ Executors are ordinary `ServiceLoop` servers.
 `target/ast10x0/tests/orchestrator/async_sim/`: the real `orchestrator-sm`
 core, a test-local executor on `util_requester`, a verifier service
 (deferred replies) and a devices service (reset commands and the boot-event
-long-poll). Three rounds of each scenario.
+long-poll).
+
+The services decide how they behave, and the orchestrator never tells them.
+Each device is an `openprot_device_model::DeviceModel` with a boot script (hang,
+boot after a delay, boot then fail), and the verifier has a latency script per
+component. Both are fixed when the image is built. The orchestrator can only
+reset a device and listen, so it cannot shape the world it is judged against.
+For the same reason one image runs one scenario, built from the same sources
+with one build flag, and a failure names its scenario. Repeat a run with
+`--runs_per_test`, not a loop: the scripts count from the start of the image.
+The scenario tests are `exclusive`, because their timing margins are tens of
+milliseconds on QEMU's wall clock and shrink when other QEMU runs share the CPU.
 
 | Scenario | Claim shown |
 |---|---|
-| A: flaky boot beside a slow verify | the boot watchdog fires during another component's verify; recovery runs; the late verdict is dropped; the re-walk reaches `Ready` |
-| B: verify outlives its deadline | the requester cancels and reports failure; the late reply goes nowhere; recovery runs; the re-walk reaches `Ready` |
+| `flaky_boot`: a device that does not boot the first time, beside a slow verify | the boot watchdog fires during another component's verify; recovery runs; the late verdict is dropped; the re-walk reaches `Ready` |
+| `verify_hangs`: a verify that outlives its deadline | the requester cancels and reports failure; the late reply goes nowhere; recovery runs; the re-walk reaches `Ready` |
 
-Scenario A as the test ran it (component 1's verify is slow, component 0 never
+`flaky_boot` as the test ran it (component 1's verify is slow, component 0 never
 boots the first time):
 
 ```mermaid
@@ -206,6 +217,14 @@ sequenceDiagram
     Req->>Core: VerificationPassed(C0)
     Note over Core,Dev: C1 and C2 verify and boot in turn, then Ready
 ```
+
+A note the device model made possible. After a boot timeout the machine goes to
+`Recovering`, which expects the platform to hold the component in reset while it
+is restored. An executor that only sends "restore" and never "hold in reset"
+looks fine against a fake that restarts a timer on every release. Against the
+device model it does not: a second release of a device whose line was never
+asserted is a no-op, so a hung device stays hung. The executor now holds the
+device before it restores it. **Shown** (`flaky_boot`).
 
 ## Not shown, and open
 
