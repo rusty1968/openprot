@@ -39,7 +39,9 @@ const KEY_EVENTS: u32 = 1;
 const RESET_INDEX: usize = 0;
 const DEVICES: usize = 3;
 
-/// How long a healthy device takes to come up after its release.
+/// How long a healthy device takes to come up after its release. It has to
+/// beat the orchestrator's boot watchdog by a wide margin; see `BOOT_WINDOW`
+/// in orchestrator_main.rs.
 const BOOT_MS: u64 = 20;
 
 const BOOTS: &[Behaviour] = &[Behaviour::Boots {

@@ -34,10 +34,12 @@ const COMPONENTS: usize = 3;
 /// How long each component's nth verify takes, in milliseconds. The last
 /// entry repeats once the list runs out.
 ///
-/// C1's first verify is slow, long enough that C0's boot watchdog fires while
-/// it is still running.
+/// C1's first verify is slow (210 ms), long enough that C0's 110 ms boot
+/// watchdog fires while it is still running, and short enough to finish inside
+/// the orchestrator's 300 ms verify deadline. The three gaps are laid out in
+/// orchestrator_main.rs, beside `BOOT_WINDOW`.
 #[cfg(flaky_boot)]
-const LATENCY_MS: [&[u64]; COMPONENTS] = [&[10], &[100, 10], &[10]];
+const LATENCY_MS: [&[u64]; COMPONENTS] = [&[10], &[210, 10], &[10]];
 /// C2's first verify takes 450 ms, past the orchestrator's 300 ms deadline.
 ///
 /// Two margins decide whether this scenario is steady, with D the deadline

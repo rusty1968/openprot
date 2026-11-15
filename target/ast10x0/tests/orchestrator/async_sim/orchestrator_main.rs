@@ -66,7 +66,20 @@ const OP_RESTORE: u8 = 4;
 const OP_WAIT: u8 = 5;
 
 /// A component that has not reported in this long after release is failed.
-const BOOT_WINDOW: Duration = Duration::from_millis(50);
+///
+/// The scenarios race four durations, and each gap has to stay wide on QEMU's
+/// wall clock. In order: a healthy device's boot `B` (devices_main.rs, 20 ms),
+/// this window `W`, the slow verify `V` that `flaky_boot` arranges
+/// (verifier_main.rs, 210 ms), and the verify deadline `D` below (300 ms).
+///
+/// - `W - B` = 90 ms: a healthy device must report in before its watchdog.
+/// - `V - W` = 100 ms: the flaky device's watchdog must fire *while* the slow
+///   verify is still running, so the timeout is seen before that verdict.
+/// - `D - V` = 90 ms: the slow verify must still finish inside its deadline.
+///
+/// Move one and the others move with it. `verify_hangs` has its own pair of
+/// margins against `D`, described in verifier_main.rs.
+const BOOT_WINDOW: Duration = Duration::from_millis(110);
 /// A verify not answered this long after it started is abandoned.
 ///
 /// Tied to the `verify_hangs` latency in verifier_main.rs, which must sit
